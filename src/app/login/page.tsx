@@ -32,6 +32,11 @@ function LoginForm() {
     email: "",
   });
 
+  // Mirror the server's failure reason into the browser console.
+  React.useEffect(() => {
+    if (state.error) console.error("[login]", state.error);
+  }, [state]);
+
   const deactivated = params.get("deactivated") === "1";
 
   return (
