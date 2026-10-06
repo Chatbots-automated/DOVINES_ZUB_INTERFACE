@@ -1,11 +1,12 @@
 "use client";
 
 import * as React from "react";
-import { useRouter, useSearchParams } from "next/navigation";
-import { createClient } from "@/lib/supabase/client";
+import { useSearchParams } from "next/navigation";
+import { useFormStatus } from "react-dom";
 import { Button } from "@/components/ui/button";
 import { Input, Label } from "@/components/ui/input";
 import { BrandMark } from "@/components/layout/brand-mark";
+import { signIn, type LoginState } from "./actions";
 
 export default function LoginPage() {
   return (
@@ -15,38 +16,23 @@ export default function LoginPage() {
   );
 }
 
+function SubmitButton() {
+  const { pending } = useFormStatus();
+  return (
+    <Button type="submit" className="w-full" size="lg" disabled={pending}>
+      {pending ? "Jungiamasi..." : "Prisijungti"}
+    </Button>
+  );
+}
+
 function LoginForm() {
-  const router = useRouter();
   const params = useSearchParams();
-  const [email, setEmail] = React.useState("");
-  const [password, setPassword] = React.useState("");
-  const [error, setError] = React.useState<string | null>(null);
-  const [loading, setLoading] = React.useState(false);
+  const [state, formAction] = React.useActionState<LoginState, FormData>(signIn, {
+    error: null,
+    email: "",
+  });
 
   const deactivated = params.get("deactivated") === "1";
-
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    setError(null);
-    setLoading(true);
-
-    try {
-      const supabase = createClient();
-      const { error: signInError } = await supabase.auth.signInWithPassword({ email, password });
-
-      if (signInError) {
-        setError("Neteisingas el. paštas arba slaptažodis.");
-        setLoading(false);
-        return;
-      }
-
-      router.replace("/");
-      router.refresh();
-    } catch {
-      setError("Nepavyko prisijungti. Patikrinkite interneto ryšį ir bandykite dar kartą.");
-      setLoading(false);
-    }
-  }
 
   return (
     <div className="relative flex min-h-screen items-center justify-center overflow-hidden bg-ink px-4">
@@ -71,35 +57,32 @@ function LoginForm() {
             </p>
           )}
 
-          <form onSubmit={handleSubmit} className="space-y-4">
+          <form action={formAction} className="space-y-4">
             <div>
               <Label htmlFor="email">El. paštas</Label>
               <Input
                 id="email"
+                name="email"
                 type="email"
                 autoComplete="email"
                 required
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
+                defaultValue={state.email}
               />
             </div>
             <div>
               <Label htmlFor="password">Slaptažodis</Label>
               <Input
                 id="password"
+                name="password"
                 type="password"
                 autoComplete="current-password"
                 required
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
               />
             </div>
 
-            {error && <p className="text-[13px] text-danger">{error}</p>}
+            {state.error && <p className="text-[13px] text-danger">{state.error}</p>}
 
-            <Button type="submit" className="w-full" size="lg" disabled={loading}>
-              {loading ? "Jungiamasi..." : "Prisijungti"}
-            </Button>
+            <SubmitButton />
           </form>
         </div>
         <p className="mt-6 text-center text-[12px] text-text-on-ink/40">
