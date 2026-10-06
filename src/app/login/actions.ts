@@ -17,9 +17,36 @@ export async function signIn(_prev: LoginState, formData: FormData): Promise<Log
 
   try {
     const supabase = await createClient();
-    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
     if (error) {
-      return { error: "Neteisingas el. paštas arba slaptažodis.", email };
+      // 400 = wrong credentials / unknown user; anything else (bad API key,
+      // unreachable project, ...) is a config problem worth showing as-is.
+      const credentials = error.status === 400 || error.code === "invalid_credentials";
+      return {
+        error: credentials
+          ? "Neteisingas el. paštas arba slaptažodis."
+          : `Prisijungti nepavyko: ${error.message}`,
+        email,
+      };
+    }
+
+    // The middleware signs out any session without a usable public.users
+    // row, which looks like a silent bounce back to /login. Say why instead.
+    const { data: profile, error: profileError } = await supabase
+      .from("users")
+      .select("id, is_frozen")
+      .eq("id", data.user.id)
+      .maybeSingle();
+    if (profileError || !profile || profile.is_frozen) {
+      await supabase.auth.signOut();
+      return {
+        error: profileError
+          ? `Nepavyko nuskaityti profilio: ${profileError.message}`
+          : profile
+            ? "Jūsų paskyra yra užšaldyta. Susisiekite su administratoriumi."
+            : "Paskyra egzistuoja, bet neturi profilio lentelėje „users“. Susisiekite su administratoriumi.",
+        email,
+      };
     }
   } catch {
     return {
