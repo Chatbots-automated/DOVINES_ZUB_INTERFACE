@@ -1,0 +1,33 @@
+[build]
+  command = "npm run build"
+  publish = ".next"
+
+[build.environment]
+  # @supabase/supabase-js warns and will eventually drop Node 20 — build on
+  # 22 to match what the app actually needs going forward.
+  NODE_VERSION = "22"
+
+  # Netlify's secret scanner flags any env var whose value shows up in the
+  # build output, including these two — but `NEXT_PUBLIC_*` vars are
+  # *supposed* to end up in the client bundle (that's what the prefix
+  # means in Next.js); they're not secrets. Supabase's anon key is safe to
+  # expose publicly by design — it's the database's Row Level Security
+  # policies that actually gate access, not the secrecy of this key. Omit
+  # just these two by name so the scanner keeps checking everything else
+  # (e.g. it would still (correctly) fail the build if
+  # SUPABASE_SERVICE_ROLE_KEY ever leaked into client-side output).
+  SECRETS_SCAN_OMIT_KEYS = "NEXT_PUBLIC_SUPABASE_URL,NEXT_PUBLIC_SUPABASE_ANON_KEY"
+
+# Netlify's official Next.js runtime — handles SSR/Server Actions/ISR via
+# Netlify Functions and static assets via the CDN, straight from the
+# standard `next build` output above (no `output: "export"`/adapter
+# config needed in next.config.ts).
+[[plugins]]
+  package = "@netlify/plugin-nextjs"
+
+# Required at deploy time (set these in Netlify's UI — Site configuration →
+# Environment variables — not here, so secrets never get committed):
+#   NEXT_PUBLIC_SUPABASE_URL
+#   NEXT_PUBLIC_SUPABASE_ANON_KEY
+#   SUPABASE_SERVICE_ROLE_KEY   (server-only — used by createAdminClient()
+#                                 for "Naujas vartotojas"; never expose to the client)

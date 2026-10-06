@@ -1,0 +1,17 @@
+{
+  "name": "dovines-delpro-worker",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Runs on the Dovinės ŽŪB farm PC: DelPro -> GVET PRO herd sync and GVET PRO -> DelPro treatment write-back.",
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node src/index.js",
+    "once": "node src/index.js --once",
+    "discover": "node src/discover.js",
+    "test": "node --test test/"
+  },
+  "dependencies": {
+    "mssql": "^11.0.1"
+  }
+}

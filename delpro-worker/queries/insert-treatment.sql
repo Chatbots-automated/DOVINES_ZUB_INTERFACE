@@ -1,0 +1,14 @@
+-- TODO(discovery): only if DelPro discovery shows that writing a treatment
+-- record directly is safe and the farm has agreed to it in writing (see
+-- AGENTS.md "DelPro write path"). Preferred order: DelPro's own import
+-- function > UI automation > this direct SQL write.
+--
+-- Available parameters (all nvarchar unless noted):
+--   @delpro_animal_id, @animal_no, @tag_no,
+--   @event_date (date), @diagnosis, @diagnosis_code, @treatment_code,
+--   @treatment_text, @milk_withdrawal_days (int), @meat_withdrawal_days (int),
+--   @withdrawal_until_milk (date), @withdrawal_until_meat (date),
+--   @vet_name, @sync_id (GVET job id — store it in a note/remark field so the
+--   readback query can find exactly this record and retries stay idempotent).
+-- Must be idempotent: if a record with @sync_id already exists, do nothing.
+SELECT 1 WHERE 1 = 0;

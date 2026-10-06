@@ -1,0 +1,34 @@
+{
+  "name": "Dovinės — VIC gyvulių sinchronizacija (kasdien)",
+  "nodes": [
+    { "name": "Kasdien 03:00", "type": "n8n-nodes-base.scheduleTrigger", "typeVersion": 1.2, "position": [0, 0],
+      "parameters": { "rule": { "interval": [{ "field": "days", "triggerAtHour": 3 }] } } },
+    { "name": "VIC prisijungimas", "type": "n8n-nodes-base.httpRequest", "typeVersion": 4.2, "position": [240, 0],
+      "notes": "Service role key. Gauna username, password, farm code.",
+      "parameters": { "url": "={{ $env.SUPABASE_URL }}/rest/v1/vic_credentials?is_active=eq.true&select=vic_username,vic_password,vic_farm_code&limit=1",
+        "sendHeaders": true, "headerParameters": { "parameters": [
+          { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+          { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}" } ] } } },
+    { "name": "Gauti gyvulius iš VIC", "type": "n8n-nodes-base.code", "typeVersion": 2, "position": [480, 0],
+      "notes": "TODO(discovery): VIC neturi viešo API. Čia įdėti tą patį prisijungimo/nuskaitymo žingsnį, kuris veikia Žibartonių workflow. Turi grąžinti masyvą [{tag_no, sex, breed, birth_date}] — vienas item su {animals:[...]}.",
+      "parameters": { "jsCode": "throw new Error('TODO(discovery): VIC nuskaitymas neįdiegtas');" } },
+    { "name": "upsert_animals_from_vic", "type": "n8n-nodes-base.httpRequest", "typeVersion": 4.2, "position": [720, 0],
+      "parameters": { "method": "POST", "url": "={{ $env.SUPABASE_URL }}/rest/v1/rpc/upsert_animals_from_vic",
+        "sendHeaders": true, "headerParameters": { "parameters": [
+          { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+          { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}" } ] },
+        "sendBody": true, "specifyBody": "json", "jsonBody": "={{ JSON.stringify($json.animals) }}" } },
+    { "name": "Pranešti apie klaidą", "type": "n8n-nodes-base.httpRequest", "typeVersion": 4.2, "position": [480, 200],
+      "notes": "Prijungti prie Error Trigger arba mazgų 'On Error' išėjimo.",
+      "parameters": { "method": "POST", "url": "={{ $env.SUPABASE_URL }}/rest/v1/rpc/vic_report_error",
+        "sendHeaders": true, "headerParameters": { "parameters": [
+          { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+          { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}" } ] },
+        "sendBody": true, "specifyBody": "json", "jsonBody": "={{ JSON.stringify({ p_error: $json.error?.message ?? 'VIC sinchronizacija nepavyko' }) }}" } }
+  ],
+  "connections": {
+    "Kasdien 03:00": { "main": [[{ "node": "VIC prisijungimas", "type": "main", "index": 0 }]] },
+    "VIC prisijungimas": { "main": [[{ "node": "Gauti gyvulius iš VIC", "type": "main", "index": 0 }]] },
+    "Gauti gyvulius iš VIC": { "main": [[{ "node": "upsert_animals_from_vic", "type": "main", "index": 0 }]] }
+  }
+}

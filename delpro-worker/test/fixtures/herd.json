@@ -1,0 +1,16 @@
+{
+  "groups": [
+    { "delpro_group_id": "1", "name": "Melžiamos 1" },
+    { "delpro_group_id": "2", "name": "Užtrūkusios" }
+  ],
+  "animals": [
+    { "delpro_animal_id": "101", "animal_no": "512", "tag_no": "LT000000000512", "sex": "Karvė", "birth_date": "2021-03-14", "group_id": "1", "lactation_no": 3, "active": 1,
+      "reproduction_status": "Veršinga", "last_calving_date": "2026-01-05T00:00:00.000Z", "days_in_milk": 250, "milk_yield_kg": "31,4",
+      "last_milking_at": "2026-10-05T06:30:00Z", "last_milking_kg": 12.1, "produces_milk": 1, "last_insemination_date": "2026-03-01",
+      "insemination_count": 2, "last_bulls": ["Atlas", "Zeus"], "is_pregnant": 1, "pregnancy_days": 200, "expected_calving_date": "2026-12-10",
+      "dry_off_date": "2026-10-15", "genetic_worth": "+120", "blood_line": "HOL-1", "missing_teats": "fl, hr, xx", "health_alert": "Mastitas",
+      "group_since": "2026-09-01" },
+    { "delpro_animal_id": "102", "animal_no": "513", "tag_no": "LT000000000513", "sex": "Karvė", "group_id": "1", "active": 1 },
+    { "delpro_animal_id": "103", "animal_no": "514", "tag_no": "LT000000000514", "sex": "Karvė", "group_id": "2", "active": 1 }
+  ]
+}

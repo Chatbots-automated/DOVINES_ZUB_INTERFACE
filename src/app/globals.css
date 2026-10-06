@@ -1,0 +1,136 @@
+@import "tailwindcss";
+
+:root {
+  /* Dovinės ŽŪB palette — "Dovinė" is the river/lake the farm is named
+     after, so the identity is built on deep water (ink + lake teal) with
+     heather plum as the second module colour and a cool mist canvas.
+     Deliberately not the green/gold/cream of the Žibartoniai sibling.
+     Re-sample from the farm's logo if one is ever supplied. */
+  --ink: #0b1a24;
+  --ink-soft: #16303d;
+  --ink-line: #23404f;
+
+  /* Veterinarija — lake teal */
+  --accent: #14707f;
+  --accent-hover: #0e5663;
+  --accent-soft: #e0f0f1;
+  --accent-border: #a9d4d8;
+
+  /* Apskaita — heather plum (its own token, no longer borrowed from --warning) */
+  --accent-alt: #7b3f6e;
+  --accent-alt-hover: #612f56;
+  --accent-alt-soft: #f3e6ef;
+  --accent-alt-border: #dcb8d2;
+
+  --app-bg: #eef3f4;
+  --surface: #ffffff;
+  --surface-secondary: #e4ecee;
+
+  --text-primary: #0f1e27;
+  --text-secondary: #475b66;
+  --text-muted: #7b8d97;
+  --text-on-ink: #e8f1f3;
+
+  --border: #d5e0e3;
+  --border-strong: #b1c3c9;
+
+  --success: #2f7d5b;
+  --success-soft: #e2f1ea;
+  --warning: #b7791f;
+  --warning-soft: #f8eed9;
+  --danger: #c0344d;
+  --danger-soft: #fae3e7;
+  --info: #3b62a8;
+  --info-soft: #e5ecf8;
+
+  --radius-control: 9px;
+  --radius-panel: 16px;
+  --radius-modal: 20px;
+  --radius-badge: 999px;
+
+  --shadow-elevated: 0 24px 48px -20px rgba(8, 26, 36, 0.45);
+  --shadow-popover: 0 10px 24px -8px rgba(8, 26, 36, 0.3);
+  --shadow-soft: 0 1px 2px rgba(8, 26, 36, 0.05), 0 2px 8px -4px rgba(8, 26, 36, 0.08);
+}
+
+@theme inline {
+  --color-ink: var(--ink);
+  --color-ink-soft: var(--ink-soft);
+  --color-ink-line: var(--ink-line);
+
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-soft: var(--accent-soft);
+  --color-accent-border: var(--accent-border);
+
+  --color-accent-alt: var(--accent-alt);
+  --color-accent-alt-hover: var(--accent-alt-hover);
+  --color-accent-alt-soft: var(--accent-alt-soft);
+  --color-accent-alt-border: var(--accent-alt-border);
+
+  --color-app-bg: var(--app-bg);
+  --color-surface: var(--surface);
+  --color-surface-secondary: var(--surface-secondary);
+
+  --color-text-primary: var(--text-primary);
+  --color-text-secondary: var(--text-secondary);
+  --color-text-muted: var(--text-muted);
+  --color-text-on-ink: var(--text-on-ink);
+
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+
+  --color-success: var(--success);
+  --color-success-soft: var(--success-soft);
+  --color-warning: var(--warning);
+  --color-warning-soft: var(--warning-soft);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+  --color-info: var(--info);
+  --color-info-soft: var(--info-soft);
+
+  --radius-control: var(--radius-control);
+  --radius-panel: var(--radius-panel);
+  --radius-modal: var(--radius-modal);
+  --radius-badge: var(--radius-badge);
+
+  --shadow-soft: var(--shadow-soft);
+
+  --font-sans: var(--font-body);
+  --font-display: var(--font-heading);
+}
+
+body {
+  background: var(--app-bg);
+  color: var(--text-primary);
+}
+
+/* Headings in the display face; body/table text stays in Plex Sans. */
+h1,
+h2,
+h3 {
+  font-family: var(--font-heading);
+  font-variation-settings: "wdth" 92;
+}
+
+/* Rippled-water motif for the dark gateway screens (login, module picker). */
+.bg-ripples {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='24' viewBox='0 0 120 24'%3E%3Cpath d='M0 12c15 0 15-8 30-8s15 8 30 8 15-8 30-8 15 8 30 8' fill='none' stroke='white' stroke-width='1'/%3E%3C/svg%3E");
+  background-size: 120px 24px;
+}
+
+* {
+  border-color: var(--border);
+}
+
+.scrollbar-thin::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 999px;
+}
+.scrollbar-thin::-webkit-scrollbar-track {
+  background: transparent;
+}
