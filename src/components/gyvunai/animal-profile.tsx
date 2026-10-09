@@ -22,6 +22,8 @@ import {
   Milk,
   PawPrint,
   ShieldAlert,
+  ShieldCheck,
+  Repeat,
   StickyNote,
   Stethoscope,
   Syringe,
@@ -41,6 +43,7 @@ import { updateAnimalNotes, type ActionResult } from "@/lib/actions/animals";
 import { NewTreatmentDialog } from "@/components/gyvunai/new-treatment-dialog";
 import { NewVaccinationDialog } from "@/components/vakcinacijos/new-vaccination-dialog";
 import { NewVisitDialog } from "@/components/vizitai/new-visit-dialog";
+import { ApplySyncProtocolDialog } from "@/components/sinchronizacijos/apply-protocol-dialog";
 import { NewInseminationDialog } from "@/components/seklinimas/new-insemination-dialog";
 import { NewHoofExamDialog } from "@/components/nagos/new-hoof-exam-dialog";
 import {
@@ -80,8 +83,8 @@ import {
 } from "@/lib/animal-profile";
 import { GESTATION_DAYS, INSEMINATION_SELECT, PREGNANCY_LABELS, expectedCalvingDate, pregnancyStatus, type InseminationRow } from "@/lib/seklinimas";
 import { HOOF_LEG_LABELS, formatZones, severityTone } from "@/lib/hoof";
-import { VISIT_PROCEDURE_LABELS, VISIT_STATUS_LABELS, VISIT_STATUS_TONE } from "@/lib/visits";
-import type { VisitProcedure, VisitStatus } from "@/lib/supabase/types";
+import { TREATMENT_TYPE_LABELS, VISIT_PROCEDURE_LABELS, VISIT_STATUS_LABELS, VISIT_STATUS_TONE } from "@/lib/visits";
+import type { ProcedureType, VisitProcedure, VisitStatus } from "@/lib/supabase/types";
 
 type Variant = "drawer" | "page";
 
@@ -429,7 +432,7 @@ function TreatmentsTab({ history, loading }: { history: AnimalHistory; loading: 
               {formatDate(t.reg_date)} · {t.title}
             </p>
             <div className="flex gap-1">
-              <Badge tone="neutral">{t.procedure_type === "gydymas" ? "Gydymas" : t.procedure_type === "profilaktika" ? "Profilaktika" : "Apžiūra"}</Badge>
+              <Badge tone="neutral">{TREATMENT_TYPE_LABELS[t.procedure_type as ProcedureType] ?? "Apžiūra"}</Badge>
               {t.outcome && <Badge tone="info">{t.outcome}</Badge>}
             </div>
           </div>
@@ -566,6 +569,12 @@ function VisitsTab({ history, loading }: { history: AnimalHistory; loading: bool
               )}
               {v.vet_name && <span className="text-[12px] text-text-muted">{v.vet_name}</span>}
             </div>
+            {v.sync_step_title && (
+              <p className="mt-1.5 text-[12px] font-medium text-text-primary">
+                {v.sync_protocol_applications?.protocol_name ?? "Protokolas"}
+                {v.sync_step_no && v.sync_step_total ? ` · ${v.sync_step_no}/${v.sync_step_total}` : ""} — {v.sync_step_title}
+              </p>
+            )}
             {v.notes && <p className="mt-1.5 text-[12px] text-text-secondary">{v.notes}</p>}
             {v.next_visit_date && <p className="mt-1 text-[12px] text-text-muted">Kitas vizitas: {formatDate(v.next_visit_date)}</p>}
           </HistoryCard>
@@ -782,6 +791,32 @@ export function AnimalProfile({
             trigger={
               <Button size="sm" variant="success">
                 <Syringe className="size-4" /> Vakcinacija
+              </Button>
+            }
+            onCreated={refetch}
+          />
+          <NewTreatmentDialog
+            animalId={animal.id}
+            diseases={lookups.diseases}
+            products={lookups.products}
+            currentVetName={currentVetName}
+            fixedProcedureType="profilaktika"
+            dialogTitle={`Nauja profilaktika — ${animalTitle(animal)}`}
+            trigger={
+              <Button size="sm" variant="outline">
+                <ShieldCheck className="size-4 text-success" /> Profilaktika
+              </Button>
+            }
+            onCreated={refetch}
+          />
+          <ApplySyncProtocolDialog
+            animalId={animal.id}
+            currentVetName={currentVetName}
+            today={lookups.today}
+            title={`Sinchronizacija — ${animalTitle(animal)}`}
+            trigger={
+              <Button size="sm" variant="outline">
+                <Repeat className="size-4 text-accent" /> Sinchronizacija
               </Button>
             }
             onCreated={refetch}

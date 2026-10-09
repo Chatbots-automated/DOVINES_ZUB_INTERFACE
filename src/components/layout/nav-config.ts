@@ -71,6 +71,7 @@ export const apskaitaNavGroups: NavGroup[] = [
     id: "apskaita",
     label: "Apskaita",
     items: [
+      { href: "/apskaita", label: "Pagrindinis", icon: LayoutDashboard },
       { href: "/apskaita/pajamavimas", label: "Pajamavimas", icon: PackagePlus },
       { href: "/apskaita/produktai", label: "Produktai", icon: Pill },
       { href: "/apskaita/atsargos", label: "Atsargos", icon: Boxes },

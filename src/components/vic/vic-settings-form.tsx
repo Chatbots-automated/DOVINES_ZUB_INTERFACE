@@ -5,14 +5,17 @@ import { useActionState } from "react";
 import { Eye, EyeOff, Save } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input, Label } from "@/components/ui/input";
+import type { VicLoginKind } from "@/lib/supabase/types";
 import { saveVicCredentials, type VicActionResult } from "@/lib/actions/vic";
 
 export function VicSettingsForm({
+  kind,
   username,
   farmCode,
   passwordSet,
   isActive,
 }: {
+  kind: VicLoginKind;
   username: string;
   farmCode: string;
   passwordSet: boolean;
@@ -29,16 +32,17 @@ export function VicSettingsForm({
 
   return (
     <form action={formAction} className="space-y-4">
+      <input type="hidden" name="kind" value={kind} />
       <div>
-        <Label htmlFor="vic_username">VIC prisijungimo vardas *</Label>
-        <Input id="vic_username" name="vic_username" required autoComplete="off" defaultValue={username} />
+        <Label htmlFor={`vic_username_${kind}`}>VIC prisijungimo vardas *</Label>
+        <Input id={`vic_username_${kind}`} name="vic_username" required autoComplete="off" defaultValue={username} />
       </div>
       <div>
-        <Label htmlFor="vic_password">VIC slaptažodis{passwordSet ? "" : " *"}</Label>
+        <Label htmlFor={`vic_password_${kind}`}>VIC slaptažodis{passwordSet ? "" : " *"}</Label>
         <div className="relative">
           <Input
             ref={passwordRef}
-            id="vic_password"
+            id={`vic_password_${kind}`}
             name="vic_password"
             type={showPassword ? "text" : "password"}
             autoComplete="new-password"
@@ -57,8 +61,8 @@ export function VicSettingsForm({
         </div>
       </div>
       <div>
-        <Label htmlFor="vic_farm_code">VIC valdos / ūkio kodas</Label>
-        <Input id="vic_farm_code" name="vic_farm_code" autoComplete="off" defaultValue={farmCode} />
+        <Label htmlFor={`vic_farm_code_${kind}`}>VIC valdos / ūkio kodas</Label>
+        <Input id={`vic_farm_code_${kind}`} name="vic_farm_code" autoComplete="off" defaultValue={farmCode} />
       </div>
       <label className="flex items-center gap-2 text-[13px] text-text-secondary">
         <input type="checkbox" name="is_active" defaultChecked={isActive} className="size-4 rounded border-border-strong" />

@@ -193,6 +193,10 @@ export type VisitCardRow = {
   notes: string | null;
   vet_name: string | null;
   next_visit_date: string | null;
+  sync_step_title: string | null;
+  sync_step_no: number | null;
+  sync_step_total: number | null;
+  sync_protocol_applications: { protocol_name: string } | null;
 };
 
 export type HoofExamCardRow = {
@@ -228,7 +232,7 @@ export const TREATMENT_SELECT =
 export const VACCINATION_SELECT =
   "id, vaccination_date, dose_amount, unit, is_revaccination, next_booster_date, withdrawal_until_milk, withdrawal_until_meat, products(name)";
 
-export const VISIT_SELECT = "id, visit_datetime, procedures, status, temperature, notes, vet_name, next_visit_date";
+export const VISIT_SELECT = "id, visit_datetime, procedures, status, temperature, notes, vet_name, next_visit_date, sync_step_title, sync_step_no, sync_step_total, sync_protocol_applications(protocol_name)";
 
 export const HOOF_EXAM_SELECT =
   "id, exam_date, performed_by, notes, hoof_findings(id, leg, zones, condition_code, severity, followup_required, followup_date, followup_completed, hoof_condition_codes(description))";

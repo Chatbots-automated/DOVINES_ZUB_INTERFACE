@@ -195,17 +195,19 @@ reset role;
 set role authenticated;
 select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000b',false);
 do $$ declare blocked boolean := false; begin
-  begin perform vic_save_credentials('vet','pw',true); exception when others then blocked := true; end;
+  begin perform vic_save_credentials('seklinimas','vet','pw',true); exception when others then blocked := true; end;
   if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: vet saves VIC'; end if;
 end $$;
 select 'assert' as step, 'vet VIC blocked' as what;
 select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000a',false);
-select vic_save_credentials('dovine','slapta1',true);
-select vic_save_credentials('dovine2','',false);
-select 'vic' as step, vic_username, password_set, is_active from vic_get_settings();
+select vic_save_credentials('seklinimas','dovine','slapta1',true);
+select vic_save_credentials('seklinimas','dovine2','',false);
+select vic_save_credentials('veterinaras','vetas','vetslapta',true);
+select 'vic' as step, vic_username, password_set, is_active from vic_get_settings('seklinimas');
+select 'vic_vet' as step, vic_username, password_set, is_active from vic_get_settings('veterinaras');
 select 'vic_direct' as step, count(*) as visible_rows from vic_credentials;
 reset role;
-select 'vic_stored' as step, vic_username, vic_password from vic_credentials;
+select 'vic_stored' as step, kind, vic_username, vic_password from vic_credentials order by kind;
 
 -- 8. viewer cannot write
 set role authenticated;
@@ -283,8 +285,8 @@ do $$ declare blocked boolean := false; begin
   if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: app calls VIC upsert'; end if;
 end $$;
 select 'assert' as step, 'app cannot call VIC upsert' as what;
-select vic_save_credentials('dovine2','',true,'LT123456');
-select 'vic_settings' as step, vic_farm_code, password_set, last_error from vic_get_settings();
+select vic_save_credentials('seklinimas','dovine2','',true,'LT123456');
+select 'vic_settings' as step, vic_farm_code, password_set, last_error from vic_get_settings('seklinimas');
 reset role;
 
 -- 13. receive_invoice (0015): atomic, duplicate-safe, pack size x count, journals
@@ -651,4 +653,318 @@ do $$ declare blocked boolean := false; begin
   if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: viewer creates subcategory'; end if;
 end $$;
 select 'assert' as step, 'viewer cannot create subcategory' as what;
+reset role;
+
+-- 16. Sinchronizacijos protokolai (0025): own protocols -> planned visits -> FEFO only when recorded
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000b',false);
+insert into products (id,name,category,unit,withdrawal_days_milk,withdrawal_days_meat) values
+ ('11111111-0000-0000-0000-0000000000c1','GnRH','medicines','ml',0,0),
+ ('11111111-0000-0000-0000-0000000000c2','PGF2a','medicines','ml',1,2);
+insert into batches (product_id,lot,expiry_date,received_qty,purchase_price) values
+ ('11111111-0000-0000-0000-0000000000c1','SYNC-G','2027-06-01',20,2),
+ ('11111111-0000-0000-0000-0000000000c2','SYNC-F','2027-06-01',20,3);
+select 'sync_save' as step, save_sync_protocol(jsonb_build_object('name','Ovsynch','description','GnRH-PGF-GnRH','steps',jsonb_build_array(
+  -- client unit 'l' is ignored: the product's own unit (ml) is stored
+  jsonb_build_object('day_offset',0,'title','GnRH injekcija','medications',jsonb_build_array(
+    jsonb_build_object('product_id','11111111-0000-0000-0000-0000000000c1','qty',2,'unit','l','administration_route','im'))),
+  jsonb_build_object('day_offset',7,'title','Ultragarsas','notes','patikrinti kiaušidę'),
+  jsonb_build_object('day_offset',9,'title','PGF2a injekcija','medications',jsonb_build_array(
+    jsonb_build_object('product_id','11111111-0000-0000-0000-0000000000c2','qty',5)))))) is not null as ok;
+select 'sync_steps' as step, s.day_offset, s.title, s.sort_order, s.medications->0->>'unit' as unit, jsonb_array_length(s.medications) as meds
+  from sync_protocol_steps s join sync_protocols p on p.id = s.protocol_id where p.name = 'Ovsynch' order by s.sort_order;
+-- validation
+do $$ declare blocked boolean := false; begin
+  begin perform save_sync_protocol(jsonb_build_object('name','ovsynch','steps',jsonb_build_array(jsonb_build_object('day_offset',0,'title','x')))); exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: duplicate protocol name'; end if;
+end $$;
+do $$ declare blocked boolean := false; begin
+  begin perform save_sync_protocol(jsonb_build_object('name','Tuščias','steps','[]'::jsonb)); exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: protocol without steps'; end if;
+end $$;
+do $$ declare blocked boolean := false; begin
+  begin perform save_sync_protocol(jsonb_build_object('name','Blogas','steps',jsonb_build_array(jsonb_build_object('day_offset',0,'title','x','medications',jsonb_build_array(
+    jsonb_build_object('product_id','11111111-0000-0000-0000-0000000000c1','qty',0)))))); exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: zero medicine qty'; end if;
+end $$;
+do $$ declare blocked boolean := false; begin
+  begin perform save_sync_protocol(jsonb_build_object('name','Biocidas','steps',jsonb_build_array(jsonb_build_object('day_offset',0,'title','x','medications',jsonb_build_array(
+    jsonb_build_object('product_id','11111111-0000-0000-0000-000000000003','qty',1)))))); exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: biocide in protocol'; end if;
+end $$;
+select 'assert' as step, 'protocol validation blocks duplicate/empty/zero-qty/biocide' as what;
+-- the treatment dialog cannot give bull semen / reproduction products, so a protocol cannot plan them either
+insert into products (id,name,category,unit) values ('11111111-0000-0000-0000-0000000000c3','Sėkla X','reproduction','vnt');
+do $$ declare blocked boolean := false; begin
+  begin perform save_sync_protocol(jsonb_build_object('name','Sėkla','steps',jsonb_build_array(jsonb_build_object('day_offset',0,'title','x','medications',jsonb_build_array(
+    jsonb_build_object('product_id','11111111-0000-0000-0000-0000000000c3','qty',1)))))); exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: reproduction product in protocol'; end if;
+end $$;
+select 'assert' as step, 'non-treatment category blocked' as what;
+select 'sync_protocol_count' as step, count(*) from sync_protocols;
+
+-- apply: one planned visit per step, nothing consumed yet
+select 'sync_apply' as step, apply_sync_protocol((select id from sync_protocols where name='Ovsynch'),
+  (select id from animals where animal_no='513'), date '2026-10-20', '08:30', 'Dr. Test') as visits;
+select 'sync_visits' as step, v.sync_step_no, v.sync_step_total, v.sync_step_title, v.procedures, v.status,
+  to_char(v.visit_datetime at time zone 'Europe/Vilnius', 'YYYY-MM-DD HH24:MI') as at_vilnius, jsonb_array_length(v.planned_medications) as planned_meds
+  from animal_visits v where v.sync_application_id is not null order by v.visit_datetime;
+select 'sync_stock_untouched' as step, (select qty_left from batches where lot='SYNC-G') as g1, (select qty_left from batches where lot='SYNC-F') as f1;
+do $$ declare blocked boolean := false; begin
+  begin perform apply_sync_protocol((select id from sync_protocols where name='Ovsynch'), (select id from animals where animal_no='513'), date '2026-11-01'); exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: second protocol while one is open'; end if;
+end $$;
+select 'assert' as step, 'second open protocol blocked' as what;
+
+-- recording step 1 (has medicine): FEFO consumed, treatment typed sinchronizacija, visit done, NOT queued for DelPro
+select 'sync_record1' as step, create_treatment_for_visit((select id from animal_visits where sync_step_no = 1), jsonb_build_object(
+  'procedure_type','sinchronizacija','reg_date','2026-10-20','vet_name','Dr. Test',
+  'medications', jsonb_build_array(jsonb_build_object('product_id','11111111-0000-0000-0000-0000000000c1','qty',2,'unit','ml','administration_route','im')))) is not null as ok;
+select 'sync_after1' as step, v.status, (select qty_left from batches where lot='SYNC-G') as g1,
+  (select count(*) from delpro_sync_jobs j join treatments t on t.id = j.treatment_id where t.visit_id = v.id) as delpro_jobs
+  from animal_visits v where v.sync_step_no = 1;
+-- step 2 has no medicine: a (record-only) treatment never auto-closes it — it is closed by hand
+select 'sync_record2' as step, create_treatment_for_visit((select id from animal_visits where sync_step_no = 2), jsonb_build_object(
+  'procedure_type','sinchronizacija','reg_date','2026-10-27')) is not null as ok;
+select 'sync_after2' as step, status from animal_visits where sync_step_no = 2;
+
+-- editing the template does not rewrite visits that were already planned
+select 'sync_edit' as step, save_sync_protocol(jsonb_build_object('id',(select id from sync_protocols where name='Ovsynch'),'name','Ovsynch v2',
+  'steps',jsonb_build_array(jsonb_build_object('day_offset',0,'title','Nauja diena')))) is not null as ok;
+select 'sync_edit_check' as step, (select count(*) from sync_protocol_steps s join sync_protocols p on p.id=s.protocol_id where p.name='Ovsynch v2') as new_steps,
+  (select count(*) from animal_visits where sync_step_title = 'PGF2a injekcija') as visit_keeps_old_step;
+
+-- cancel the running protocol: open steps cancelled, the recorded one stays
+select 'sync_cancel' as step, cancel_sync_application((select id from sync_protocol_applications limit 1)) as cancelled;
+select 'sync_statuses' as step, sync_step_no, status from animal_visits where sync_application_id is not null order by sync_step_no;
+-- the animal is free again once the running protocol was cancelled
+select 'sync_reapply' as step, apply_sync_protocol((select id from sync_protocols where name='Ovsynch v2'), (select id from animals where animal_no='513'), date '2026-11-01') as visits;
+
+-- deleting a protocol keeps applications (name snapshot) and visits
+delete from sync_protocols where name = 'Ovsynch v2';
+select 'sync_deleted' as step, (select count(*) from sync_protocols) as protocols,
+  (select count(*) from sync_protocol_steps) as steps,
+  (select count(*) from sync_protocol_applications where protocol_id is null and protocol_name = 'Ovsynch') as app_kept,
+  (select count(*) from sync_protocol_applications where protocol_id is null and protocol_name = 'Ovsynch v2') as app2_kept,
+  (select count(*) from animal_visits where sync_application_id is not null) as visits_kept;
+
+-- viewer reads, cannot write
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000c',false);
+select 'viewer_reads_sync' as step, count(*) from sync_protocol_applications;
+do $$ declare blocked boolean := false; begin
+  begin perform save_sync_protocol(jsonb_build_object('name','Viewer','steps',jsonb_build_array(jsonb_build_object('day_offset',0,'title','x')))); exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: viewer saves protocol'; end if;
+end $$;
+select 'assert' as step, 'viewer cannot save protocol' as what;
+reset role;
+
+-- 17. Profilaktika / Boliusai product types (0026/0027): drugs like medicines
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000b',false);
+insert into products (id,name,category,unit,withdrawal_days_milk,withdrawal_days_meat) values
+ ('11111111-0000-0000-0000-0000000000d1','Vitaminas ADE','profilaktika','ml',0,0),
+ ('11111111-0000-0000-0000-0000000000d2','Mineralinis bolius','boliusai','vnt',0,28);
+-- like medicines they need serija + galiojimo terminas on pajamavimas
+do $$ declare blocked boolean := false; begin
+  begin perform receive_invoice(jsonb_build_object('mode','manual','invoice',jsonb_build_object('number','PR-1'),
+    'items',jsonb_build_array(jsonb_build_object('product_id','11111111-0000-0000-0000-0000000000d2','qty',10,'unit_price',2)))); exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: bolius without lot'; end if;
+end $$;
+select 'assert' as step, 'boliusai need serija + galiojimas' as what;
+select 'recv_prof' as step, receive_invoice(jsonb_build_object('mode','manual','invoice',jsonb_build_object('number','PR-2','date','2026-10-01'),
+  'items',jsonb_build_array(
+    jsonb_build_object('product_id','11111111-0000-0000-0000-0000000000d1','qty',20,'unit_price',1,'lot','PR-A','expiry_date','2030-01-01'),
+    jsonb_build_object('product_id','11111111-0000-0000-0000-0000000000d2','qty',10,'unit_price',2,'lot','PR-B','expiry_date','2030-01-01')))) is not null as ok;
+-- they appear in the legal veterinary drug journal
+select 'prof_journal' as step, product_name, category, batch_number from vw_vet_drug_journal where batch_number in ('PR-A','PR-B') order by product_name;
+-- and can be given as a profilaktika treatment (FEFO)
+select 'prof_treatment' as step, create_treatment(jsonb_build_object('animal_id',(select id from animals where animal_no='513'),'procedure_type','profilaktika',
+  'reg_date','2026-10-09','medications',jsonb_build_array(jsonb_build_object('product_id','11111111-0000-0000-0000-0000000000d2','qty',1,'unit','vnt')))) is not null as ok;
+select 'prof_stock' as step, qty_left from batches where lot = 'PR-B';
+-- and planned in a sync protocol step
+select 'prof_in_protocol' as step, save_sync_protocol(jsonb_build_object('name','Su bolius','steps',jsonb_build_array(jsonb_build_object('day_offset',0,'title','Bolius','medications',jsonb_build_array(
+  jsonb_build_object('product_id','11111111-0000-0000-0000-0000000000d2','qty',1)))))) is not null as ok;
+reset role;
+
+-- 18. Karencija of a 0-day product (0028): no restriction at all, not "date + 1"
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000b',false);
+insert into products (id,name,category,unit,withdrawal_days_milk,withdrawal_days_meat) values
+ ('11111111-0000-0000-0000-0000000000e1','Bioestrovet','medicines','ml',0,0),
+ ('11111111-0000-0000-0000-0000000000e2','Mėsos vaistas','medicines','ml',0,5);
+insert into batches (product_id,lot,expiry_date,received_qty,purchase_price) values
+ ('11111111-0000-0000-0000-0000000000e1','BIO1','2027-06-01',50,2),
+ ('11111111-0000-0000-0000-0000000000e2','MV1','2027-06-01',50,2);
+select 'zero_days_single' as step, create_treatment(jsonb_build_object('animal_id',(select id from animals where animal_no='513'),'diagnosis','Nulis',
+  'reg_date','2026-10-01','medications',jsonb_build_array(jsonb_build_object('product_id','11111111-0000-0000-0000-0000000000e1','qty',2,'unit','ml')))) is not null as ok;
+select 'zero_days_check' as step, withdrawal_until_milk, withdrawal_until_meat from treatments where diagnosis = 'Nulis';
+-- mixed: the product with meat days sets only the meat date, milk stays unrestricted
+select 'zero_days_mixed' as step, create_treatment(jsonb_build_object('animal_id',(select id from animals where animal_no='513'),'diagnosis','Mišrus',
+  'reg_date','2026-10-01','medications',jsonb_build_array(
+    jsonb_build_object('product_id','11111111-0000-0000-0000-0000000000e1','qty',2,'unit','ml'),
+    jsonb_build_object('product_id','11111111-0000-0000-0000-0000000000e2','qty',2,'unit','ml')))) is not null as ok;
+select 'zero_days_mixed_check' as step, withdrawal_until_milk, withdrawal_until_meat from treatments where diagnosis = 'Mišrus';
+do $$ declare m date; t date; begin
+  select withdrawal_until_milk, withdrawal_until_meat into m, t from treatments where diagnosis = 'Nulis';
+  if m is not null or t is not null then raise exception '0-day product must not set karencija: % %', m, t; end if;
+  select withdrawal_until_milk, withdrawal_until_meat into m, t from treatments where diagnosis = 'Mišrus';
+  if m is not null or t is distinct from date '2026-10-07' then raise exception 'mixed karencija wrong: % %', m, t; end if;
+end $$;
+select 'assert' as step, '0-day product sets no karencija' as what;
+reset role;
+
+-- 29. Sėklinimas kaip vizito žingsnis (0029): protocol's last step = insemination
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000b',false);
+insert into products (id,name,category,unit) values ('11111111-0000-0000-0000-0000000000f1','Sėkla FTAI','reproduction','dose');
+insert into batches (product_id,lot,expiry_date,received_qty,purchase_price) values ('11111111-0000-0000-0000-0000000000f1','SEK1','2027-06-01',3,10);
+select 'sek_protocol' as step, save_sync_protocol(jsonb_build_object('name','Su sėklinimu','steps',jsonb_build_array(
+  jsonb_build_object('day_offset',0,'title','GnRH','medications',jsonb_build_array(jsonb_build_object('product_id','11111111-0000-0000-0000-0000000000c1','qty',2))),
+  -- medicine on a sekinimas step is dropped: semen/gloves are chosen when the insemination is recorded
+  jsonb_build_object('day_offset',10,'title','FTAI sėklinimas','kind','sekinimas','medications',jsonb_build_array(jsonb_build_object('product_id','11111111-0000-0000-0000-0000000000c1','qty',9)))))) is not null as ok;
+select 'sek_steps' as step, title, kind, jsonb_array_length(medications) as meds from sync_protocol_steps where protocol_id = (select id from sync_protocols where name='Su sėklinimu') order by sort_order;
+do $$ declare blocked boolean := false; begin
+  begin perform save_sync_protocol(jsonb_build_object('name','Blogas tipas','steps',jsonb_build_array(jsonb_build_object('day_offset',0,'title','x','kind','kita')))); exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: bad step kind'; end if;
+end $$;
+select 'assert' as step, 'bad step kind blocked' as what;
+select 'sek_apply' as step, apply_sync_protocol((select id from sync_protocols where name='Su sėklinimu'), (select id from animals where animal_no='512'), date '2026-11-10') as visits;
+select 'sek_visits' as step, sync_step_no, sync_step_title, procedures, jsonb_array_length(planned_medications) as planned
+  from animal_visits where sync_application_id = (select id from sync_protocol_applications where protocol_name='Su sėklinimu') order by sync_step_no;
+-- recording the insemination: semen consumed FEFO, linked, visit done
+select 'sek_record' as step, create_insemination_for_visit((select id from animal_visits where sync_step_title='FTAI sėklinimas'),
+  jsonb_build_object('insemination_date','2026-11-20','sperm_product_id','11111111-0000-0000-0000-0000000000f1','sperm_quantity',1,'animal_id','00000000-0000-0000-0000-000000000000')) is not null as ok;
+select 'sek_after' as step, v.status, a.animal_no, (select qty_left from batches where lot='SEK1') as semen_left
+  from animal_visits v join animals a on a.id = v.animal_id
+  join insemination_records i on i.visit_id = v.id where v.sync_step_title='FTAI sėklinimas';
+-- standalone sekinimas visit; shortfall rolls back record + link + status
+select 'sek_visit2' as step, create_visit(jsonb_build_object('animal_id',(select id from animals where animal_no='513'),'procedures',jsonb_build_array('sekinimas'))) is not null as ok;
+do $$ declare blocked boolean := false; begin
+  begin perform create_insemination_for_visit((select id from animal_visits where animal_id=(select id from animals where animal_no='513') and procedures=array['sekinimas']),
+    jsonb_build_object('sperm_product_id','11111111-0000-0000-0000-0000000000f1','sperm_quantity',50)); exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: semen shortfall'; end if;
+end $$;
+select 'assert' as step, 'insemination shortfall blocked' as what;
+select 'sek_rollback' as step, (select count(*) from insemination_records where visit_id is not null) as linked, (select qty_left from batches where lot='SEK1') as semen_left;
+-- deleting the visit keeps the insemination journal row
+delete from animal_visits where sync_step_title = 'FTAI sėklinimas';
+select 'sek_deleted' as step, (select count(*) from insemination_records where visit_id is null and insemination_date = date '2026-11-20') as journal_kept;
+reset role;
+
+-- 31. Gydymų istorija (0031): vw_treated_animals exposes procedure_type, old columns intact
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000b',false);
+select 'history_types' as step, procedure_type, count(distinct treatment_id) as treatments from vw_treated_animals group by procedure_type order by 2;
+do $$ declare n integer; begin
+  select count(*) into n from vw_treated_animals where diagnosis = 'Nulis' and procedure_type = 'gydymas' and product_name = 'Bioestrovet' and withdrawal_until_milk is null;
+  if n <> 1 then raise exception 'history view: expected the 0-day Bioestrovet treatment once, got %', n; end if;
+end $$;
+select 'assert' as step, 'history view has procedure_type and null karencija for 0-day product' as what;
+reset role;
+
+-- 32. Analitika (0032): aggregates agree with the raw ledger; readable by a viewer
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000c',false);
+do $$ declare
+  raw_used numeric; fn_used numeric; raw_stock numeric; view_stock numeric; raw_expired numeric; view_expired numeric; raw_bought numeric; fn_bought numeric; n_cat numeric;
+begin
+  select coalesce(sum(qty * coalesce(purchase_price, 0)), 0) into raw_used from vw_usage_items_detailed where used_on between date '2000-01-01' and date '2100-01-01';
+  select coalesce(sum(consumed), 0), coalesce(sum(purchased), 0) into fn_used, fn_bought from analytics_monthly(date '2000-01-01', date '2100-01-01');
+  if raw_used <> fn_used then raise exception 'analytics_monthly consumed % <> raw %', fn_used, raw_used; end if;
+  select coalesce(sum(b.received_qty * coalesce(b.purchase_price, 0)), 0) into raw_bought from batches b;
+  if raw_bought <> fn_bought then raise exception 'analytics_monthly purchased % <> raw %', fn_bought, raw_bought; end if;
+  select coalesce(sum(spent), 0) into n_cat from analytics_spend_by_category(date '2000-01-01', date '2100-01-01');
+  if n_cat <> raw_used then raise exception 'spend by category % <> raw %', n_cat, raw_used; end if;
+  select coalesce(sum(b.qty_left * coalesce(b.purchase_price, 0)), 0) into raw_stock from batches b where b.status = 'active' and (b.expiry_date is null or b.expiry_date >= current_date);
+  select coalesce(sum(usable_value), 0), coalesce(sum(expired_value), 0) into view_stock, view_expired from vw_stock_value_by_category;
+  if raw_stock <> view_stock then raise exception 'stock value % <> raw %', view_stock, raw_stock; end if;
+  select coalesce(sum(b.qty_left * coalesce(b.purchase_price, 0)), 0) into raw_expired from batches b where b.status = 'active' and b.qty_left > 0 and b.expiry_date < current_date;
+  if raw_expired <> view_expired then raise exception 'expired value % <> raw %', view_expired, raw_expired; end if;
+end $$;
+select 'assert' as step, 'analytics totals match the ledger' as what;
+select 'an_monthly' as step, to_char(month,'YYYY-MM') as month, purchased, consumed from analytics_monthly(date '2026-08-01', date '2026-10-31');
+select 'an_category' as step, category, spent from analytics_spend_by_category(date '2026-01-01', date '2026-12-31');
+select 'an_top' as step, product_name, qty, spent, is_antimicrobial from analytics_top_products(date '2026-01-01', date '2026-12-31', 3);
+select 'an_amr' as step, product_name, qty from analytics_antimicrobial(date '2026-01-01', date '2026-12-31', 3);
+select 'an_tr_month' as step, to_char(month,'YYYY-MM') as month, procedure_type, n from analytics_treatments_by_month(date '2026-08-01', date '2026-10-31');
+select 'an_diseases' as step, name, n from analytics_top_diseases(date '2026-01-01', date '2026-12-31', 3);
+select 'an_groups' as step, animal_group, n from analytics_treatments_by_group(date '2026-01-01', date '2026-12-31', 3);
+select 'an_stock' as step, category, usable_value, expired_value, unpriced_batches from vw_stock_value_by_category order by 1;
+select 'an_alerts' as step, product_name, lot, days_left < 0 as expired from vw_stock_batch_alerts limit 3;
+reset role;
+
+-- 30. Nagos: kurso planavimas (0030) — a drug in a hoof finding is a treatment record, a course plans later doses
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000b',false);
+insert into products (id,name,category,unit,withdrawal_days_milk,withdrawal_days_meat) values
+ ('11111111-0000-0000-0000-000000003001','Nagų antibiotikas','medicines','ml',3,7),
+ ('11111111-0000-0000-0000-000000003002','Nagų tvarstis','hoof_care','vnt',0,0);
+insert into batches (product_id,lot,expiry_date,received_qty,purchase_price) values
+ ('11111111-0000-0000-0000-000000003001','NAGOS-AB1','2027-06-01',20,2),
+ ('11111111-0000-0000-0000-000000003002','NAGOS-TV1','2027-06-01',10,1);
+-- finding with a drug (day 1 now), a bandage and a 2-dose course
+select 'hoof_course_exam' as step, create_hoof_exam(jsonb_build_object(
+  'animal_id',(select id from animals where animal_no='513'),'exam_date','2026-10-09','performed_by','Dr. Test',
+  'findings', jsonb_build_array(jsonb_build_object('leg','HL','zones','[{"zone":3,"claw":"outer"}]'::jsonb,'condition_code','SU','severity',2,'was_treated',true,
+    'products', jsonb_build_array(
+      jsonb_build_object('product_id','11111111-0000-0000-0000-000000003001','qty',4,'unit','ml','administration_route','im'),
+      jsonb_build_object('product_id','11111111-0000-0000-0000-000000003002','qty',1,'unit','vnt')),
+    'course_days', jsonb_build_array(
+      jsonb_build_object('scheduled_date','2026-10-10','product_id','11111111-0000-0000-0000-000000003001','qty',4,'unit','ml','administration_route','im'),
+      jsonb_build_object('scheduled_date','2026-10-12','product_id','11111111-0000-0000-0000-000000003001','qty',4,'unit','ml','administration_route','im')))))) is not null as ok;
+select 'hoof_course_treatment' as step, t.procedure_type, t.diagnosis, t.hoof_finding_id is not null as linked, tc.days, tc.status,
+  (select count(*) from course_doses cd where cd.course_id = tc.id) as doses,
+  (select count(*) from course_doses cd where cd.course_id = tc.id and cd.administered) as given,
+  t.withdrawal_until_milk, t.withdrawal_until_meat
+  from treatments t join treatment_courses tc on tc.treatment_id = t.id where t.hoof_finding_id is not null;
+-- day 1 consumed now (drug via the treatment, bandage via the finding); later doses not yet
+select 'hoof_course_stock' as step, (select qty_left from batches where lot='NAGOS-AB1') as drug_left, (select qty_left from batches where lot='NAGOS-TV1') as bandage_left,
+  (select count(*) from usage_items where treatment_id is not null and product_id='11111111-0000-0000-0000-000000003001') as drug_usage_rows,
+  (select count(*) from usage_items where hoof_finding_id is not null and product_id='11111111-0000-0000-0000-000000003002') as bandage_usage_rows;
+-- karencija counts from the LAST planned dose: 12 Oct + 3 / + 7 + 1
+do $$ declare m date; t date; begin
+  select withdrawal_until_milk, withdrawal_until_meat into m, t from treatments where hoof_finding_id is not null;
+  if m is distinct from date '2026-10-16' or t is distinct from date '2026-10-20' then raise exception 'hoof course karencija wrong: % %', m, t; end if;
+end $$;
+select 'assert' as step, 'hoof course karencija from last dose' as what;
+-- administering a planned dose consumes FEFO stock then
+select administer_course_dose((select cd.id from course_doses cd join treatment_courses tc on tc.id = cd.course_id
+  join treatments t on t.id = tc.treatment_id where t.hoof_finding_id is not null order by cd.day_number limit 1), date '2026-10-10');
+select 'hoof_dose_admin' as step, (select qty_left from batches where lot='NAGOS-AB1') as drug_left,
+  (select count(*) from course_doses where administered) >= 1 as dose_marked,
+  (select count(*) from usage_items where course_dose_id is not null and product_id='11111111-0000-0000-0000-000000003001') as dose_usage_rows;
+-- a drug without a course is still a treatment record (karencija from the exam date)
+select 'hoof_drug_only' as step, create_hoof_exam(jsonb_build_object(
+  'animal_id',(select id from animals where animal_no='513'),'exam_date','2026-10-09',
+  'findings', jsonb_build_array(jsonb_build_object('leg','FL','zones','[{"zone":1,"claw":"inner"}]'::jsonb,
+    'products', jsonb_build_array(jsonb_build_object('product_id','11111111-0000-0000-0000-000000003001','qty',1,'unit','ml','administration_route','im')))))) is not null as ok;
+select 'hoof_drug_only_check' as step, count(*) filter (where tc.id is null) as no_course, max(t.withdrawal_until_milk) as milk
+  from treatments t left join treatment_courses tc on tc.treatment_id = t.id where t.hoof_finding_id is not null and tc.id is null;
+-- shortfall on the drug rolls the whole exam back (no exam, finding, treatment or course left behind)
+do $$ declare blocked boolean := false; n_ex integer; n_tr integer; begin
+  select count(*) into n_ex from hoof_exams; select count(*) into n_tr from treatments where hoof_finding_id is not null;
+  begin perform create_hoof_exam(jsonb_build_object('animal_id',(select id from animals where animal_no='513'),
+    'findings', jsonb_build_array(jsonb_build_object('leg','HR','zones','[{"zone":2,"claw":"inner"}]'::jsonb,
+      'products', jsonb_build_array(jsonb_build_object('product_id','11111111-0000-0000-0000-000000003001','qty',999,'unit','ml'))))));
+  exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: hoof drug shortfall'; end if;
+  if (select count(*) from hoof_exams) <> n_ex or (select count(*) from treatments where hoof_finding_id is not null) <> n_tr then raise exception 'shortfall left partial rows'; end if;
+end $$;
+select 'assert' as step, 'hoof drug shortfall rolls back exam + treatment' as what;
+-- a course date on/before the exam date is refused
+do $$ declare blocked boolean := false; begin
+  begin perform create_hoof_exam(jsonb_build_object('animal_id',(select id from animals where animal_no='513'),'exam_date','2026-10-09',
+    'findings', jsonb_build_array(jsonb_build_object('leg','HR','zones','[{"zone":2,"claw":"inner"}]'::jsonb,
+      'products', jsonb_build_array(jsonb_build_object('product_id','11111111-0000-0000-0000-000000003001','qty',1,'unit','ml')),
+      'course_days', jsonb_build_array(jsonb_build_object('scheduled_date','2026-10-09','product_id','11111111-0000-0000-0000-000000003001','qty',1,'unit','ml'))))));
+  exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: course date not after exam'; end if;
+end $$;
+select 'assert' as step, 'hoof course date must be after exam date' as what;
+-- deleting the exam removes its treatment / course and returns the stock
+select 'hoof_exam_delete' as step, (select count(*) from hoof_exams) as exams_before;
+delete from hoof_exams where animal_id = (select id from animals where animal_no='513') and id in (select exam_id from hoof_findings where leg in ('HL','FL'));
+select 'hoof_exam_deleted' as step, (select count(*) from treatments where hoof_finding_id is not null) as linked_left,
+  (select count(*) from course_doses cd join treatment_courses tc on tc.id = cd.course_id where tc.treatment_id not in (select id from treatments)) as orphan_doses,
+  (select qty_left from batches where lot='NAGOS-AB1') as drug_left, (select qty_left from batches where lot='NAGOS-TV1') as bandage_left;
 reset role;

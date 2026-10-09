@@ -16,8 +16,10 @@ export async function createInsemination(_prev: ActionResult | null, formData: F
   const animal_id = field(formData, "animal_id");
   if (!animal_id) return { ok: false, error: "Pasirinkite gyvūną." };
 
-  const { error } = await supabase.rpc("create_insemination", {
-    p_data: {
+  // Opened from a visit card (Vizitai / sinchronizacijos protokolo sėklinimo žingsnis): same
+  // payload through the wrapper that links the record to the visit and closes it (0029).
+  const visit_id = field(formData, "visit_id");
+  const payload = {
       animal_id,
       insemination_date: field(formData, "insemination_date"),
       sperm_product_id: field(formData, "sperm_product_id"),
@@ -34,8 +36,10 @@ export async function createInsemination(_prev: ActionResult | null, formData: F
       sp_savininkas: field(formData, "sp_savininkas"),
       next_pregnancy_check_date: field(formData, "next_pregnancy_check_date"),
       notes: field(formData, "notes"),
-    },
-  });
+  };
+  const { error } = visit_id
+    ? await supabase.rpc("create_insemination_for_visit", { p_visit_id: visit_id, p_data: payload })
+    : await supabase.rpc("create_insemination", { p_data: payload });
 
   if (error) {
     console.error("[sekinimas] create_insemination failed:", error);

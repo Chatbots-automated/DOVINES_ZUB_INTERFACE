@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Input, Label, Select, Textarea } from "@/components/ui/input";
 import { createProduct, updateProduct, type ProductActionResult, type ProductRow } from "@/lib/actions/products";
 import { WithdrawalRouteFields } from "@/components/produktai/withdrawal-route-fields";
-import { PRODUCT_CATEGORY_OPTIONS as CATEGORY_OPTIONS } from "@/lib/product-categories";
+import { PRODUCT_CATEGORY_OPTIONS as CATEGORY_OPTIONS, WITHDRAWAL_REQUIRED_CATEGORIES } from "@/lib/product-categories";
 import { WRITE_OFF_KINDS, WRITE_OFF_KIND_OPTIONS, productWriteOffKind } from "@/lib/write-off-kinds";
 import type { ProductCategory, WriteOffKind } from "@/lib/supabase/types";
 import type { SubcategoryOption } from "@/lib/product-subcategories";
@@ -343,8 +343,8 @@ export function ProductFormDialog({
             <div className="space-y-4 rounded-panel border border-border bg-surface-secondary p-4">
               <div>
                 <p className="mb-3 text-[13px] font-semibold text-text-primary">Karencija</p>
-                {!editing && category === "medicines" && (
-                  <p className="-mt-2 mb-3 text-[11px] text-text-muted">Vaistams būtina nurodyti (įrašykite 0, jei karencijos nėra).</p>
+                {!editing && WITHDRAWAL_REQUIRED_CATEGORIES.includes(category) && (
+                  <p className="-mt-2 mb-3 text-[11px] text-text-muted">Vaistams, profilaktikai ir boliusams būtina nurodyti (įrašykite 0, jei karencijos nėra).</p>
                 )}
                 <div className="grid grid-cols-2 gap-3">
                   <div>
@@ -354,8 +354,8 @@ export function ProductFormDialog({
                       name="withdrawal_days_milk"
                       type="number"
                       min="0"
-                      required={!editing && category === "medicines"}
-                      defaultValue={product?.withdrawal_days_milk ?? (category === "medicines" ? "" : 0)}
+                      required={!editing && WITHDRAWAL_REQUIRED_CATEGORIES.includes(category)}
+                      defaultValue={product?.withdrawal_days_milk ?? (WITHDRAWAL_REQUIRED_CATEGORIES.includes(category) ? "" : 0)}
                       key={`milk-${category}`}
                     />
                   </div>
@@ -366,8 +366,8 @@ export function ProductFormDialog({
                       name="withdrawal_days_meat"
                       type="number"
                       min="0"
-                      required={!editing && category === "medicines"}
-                      defaultValue={product?.withdrawal_days_meat ?? (category === "medicines" ? "" : 0)}
+                      required={!editing && WITHDRAWAL_REQUIRED_CATEGORIES.includes(category)}
+                      defaultValue={product?.withdrawal_days_meat ?? (WITHDRAWAL_REQUIRED_CATEGORIES.includes(category) ? "" : 0)}
                       key={`meat-${category}`}
                     />
                   </div>

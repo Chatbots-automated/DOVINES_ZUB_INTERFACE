@@ -4,7 +4,7 @@ import { todayIso, type CatalogLot, type CatalogProduct } from "@/lib/treatments
 
 // What can be given to an animal as a treatment: medicines, vaccines and
 // treatment materials (biocides, bull semen, hoof products… are not).
-export const TREATMENT_PRODUCT_CATEGORIES = ["medicines", "vakcina", "treatment_materials"] as const;
+export const TREATMENT_PRODUCT_CATEGORIES = ["medicines", "vakcina", "profilaktika", "boliusai", "treatment_materials"] as const;
 
 type ProductRow = Omit<CatalogProduct, "usable_qty" | "expired_qty" | "lots">;
 type BatchRow = CatalogLot & { product_id: string; received_at: string };

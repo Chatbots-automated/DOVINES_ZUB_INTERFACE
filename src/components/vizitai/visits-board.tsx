@@ -9,6 +9,7 @@ import { downloadCsv } from "@/lib/export";
 import { formatDate, formatDateTime } from "@/lib/utils";
 import { VisitCard, type VisitCardData } from "@/components/vizitai/visit-card";
 import type { Product } from "@/components/gyvunai/new-treatment-dialog";
+import type { SemenProduct } from "@/components/seklinimas/new-insemination-dialog";
 import {
   OPEN_VISIT_STATUSES,
   VISIT_PROCEDURE_LABELS,
@@ -25,6 +26,8 @@ type Props = {
   diseases: { id: string; name: string }[];
   treatmentProducts: Product[];
   vaccineProducts: Product[];
+  sperm: SemenProduct[];
+  gloves: SemenProduct[];
   currentVetName: string | null;
   canWrite: boolean;
 };
@@ -55,7 +58,7 @@ export function VisitsBoard({ visits, today, ...cardProps }: Props) {
       if (dateFrom && day < dateFrom) return false;
       if (dateTo && day > dateTo) return false;
       if (term) {
-        const hay = [v.animal_no, v.tag_no, v.group_name, v.notes, v.vet_name].join(" ").toLowerCase();
+        const hay = [v.animal_no, v.tag_no, v.group_name, v.notes, v.vet_name, v.sync?.protocolName, v.sync?.stepTitle].join(" ").toLowerCase();
         if (!hay.includes(term)) return false;
       }
       return true;
@@ -83,7 +86,7 @@ export function VisitsBoard({ visits, today, ...cardProps }: Props) {
   function exportCsv() {
     downloadCsv(
       `vizitai_${today}`,
-      ["Data", "Nr.", "Ausies įsaga", "Grupė", "Būsena", "Procedūros", "Gydytojas", "Temperatūra", "Įrašai", "Kitas vizitas", "Pastabos"],
+      ["Data", "Nr.", "Ausies įsaga", "Grupė", "Būsena", "Procedūros", "Gydytojas", "Temperatūra", "Įrašai", "Protokolas", "Kitas vizitas", "Pastabos"],
       filtered.map((v) => [
         formatDateTime(v.visit_datetime),
         v.animal_no ?? "",
@@ -93,7 +96,8 @@ export function VisitsBoard({ visits, today, ...cardProps }: Props) {
         v.procedures.map((p) => VISIT_PROCEDURE_LABELS[p]).join(", "),
         v.vet_name ?? "",
         v.temperature != null ? String(v.temperature) : "",
-        v.records.map((r) => `${r.label}${r.detail ? ` (${r.detail})` : ""}`).join("; "),
+        v.records.map((r) => `${r.label}${r.detail ? ` (${r.detail})` : ""}${r.lines.length ? `: ${r.lines.join(", ")}` : ""}`).join("; "),
+        v.sync ? `${v.sync.protocolName ?? ""} ${v.sync.stepNo ?? ""}/${v.sync.stepTotal ?? ""} ${v.sync.stepTitle ?? ""}`.trim() : "",
         v.next_visit_date ? formatDate(v.next_visit_date) : "",
         v.notes ?? "",
       ]),
@@ -107,7 +111,7 @@ export function VisitsBoard({ visits, today, ...cardProps }: Props) {
       <div className="flex flex-wrap items-center gap-2">
         <div className="relative min-w-[220px] flex-1">
           <Search className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-text-muted" />
-          <Input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Ieškoti pagal gyvūną, grupę, gydytoją, pastabas..." className="pl-8" />
+          <Input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Ieškoti pagal gyvūną, grupę, gydytoją, protokolą, pastabas..." className="pl-8" />
         </div>
         <Select value={status} onChange={(e) => setStatus(e.target.value as VisitStatus | "all")} className="w-auto" aria-label="Būsena">
           <option value="all">Visos būsenos</option>

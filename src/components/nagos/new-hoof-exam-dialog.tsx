@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { useActionState } from "react";
-import { CheckCircle2, Check, Plus, X } from "lucide-react";
+import { CheckCircle2, Check, CalendarClock, Plus, X } from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogBody, DialogFooter, DialogTrigger } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input, Label, Textarea, Select } from "@/components/ui/input";
@@ -12,6 +12,12 @@ import { HoofZonePicker } from "@/components/nagos/hoof-zone-picker";
 import { HOOF_LEG_LABELS, formatZones, severityTone, type HoofLeg, type ZoneSelection } from "@/lib/hoof";
 import { formatQty } from "@/lib/utils";
 import { createHoofExam, type ActionResult } from "@/lib/actions/hoof";
+import { RouteSelect, WithdrawalChips } from "@/components/gydymas/medicine-line";
+import { CoursePlanner, PlanSummaryPanel, EMPTY_COURSE_PLAN, type CoursePlan } from "@/components/gydymas/course-planner";
+import { catalogFromProps, loadTreatmentCatalog } from "@/lib/treatments/catalog";
+import { assignDayNumbers, summarizePlan, type CatalogProduct, type CourseRow, type MedLine } from "@/lib/treatments/planner";
+import { DRUG_CATEGORIES } from "@/lib/product-categories";
+import type { ProductCategory } from "@/lib/supabase/types";
 
 type AnimalOption = { id: string; tag_no: string; animal_no: string | null };
 type ConditionCode = { code: string; description: string; severity_default: number };
@@ -27,7 +33,7 @@ export type HoofProductOption = {
   stock: number;
 };
 type ProductOption = HoofProductOption;
-type ProductLine = { key: string; product_id: string; qty: string };
+type ProductLine = { key: string; product_id: string; qty: string; route: string };
 
 type Finding = {
   key: string;
@@ -42,7 +48,9 @@ type Finding = {
   followup_required: boolean;
   followup_date: string | null;
   notes: string | null;
-  products: Array<{ product_id: string; qty: number; unit: string | null }>;
+  products: Array<{ product_id: string; qty: number; unit: string | null; administration_route: string | null }>;
+  /** Planned repeat doses (kurso planavimas, 0030) — same shape as create_treatment's course_days. */
+  course_days: Array<{ day_number: number | undefined; scheduled_date: string; product_id: string; qty: number; unit: string | null; administration_route: string | null }>;
 };
 
 type Draft = {
@@ -78,6 +86,12 @@ const today = () => new Date().toISOString().slice(0, 10);
 // trimming/treatment, products used and an optional follow-up date, or a
 // one-click "Sveikas" check. Everything is submitted together and stock is
 // consumed in the same transaction (create_hoof_exam).
+//
+// After each hoof the vet chooses: "Išsaugoti ir pridėti kitą nagą" (keeps the
+// animal / date / vet, resets the editor) or "Baigti apžiūrą" (saves the hoof
+// being edited, if any, and submits the exam). A drug (medicines, vaccines,
+// profilaktika, boliusai) may also get a course plan (kurso planavimas): doses
+// on later dates, consumed only when each dose is given (Gydymo kursai).
 export function NewHoofExamDialog({
   animals,
   conditionCodes,
@@ -110,6 +124,43 @@ export function NewHoofExamDialog({
   const [findings, setFindings] = React.useState<Finding[]>([]);
   const [pickerKey, setPickerKey] = React.useState(0);
   const [localError, setLocalError] = React.useState<string | null>(null);
+  const [justAdded, setJustAdded] = React.useState<string | null>(null);
+  const [plan, setPlan] = React.useState<CoursePlan>(EMPTY_COURSE_PLAN);
+  const formRef = React.useRef<HTMLFormElement>(null);
+  const editorRef = React.useRef<HTMLDivElement>(null);
+  // Set by "Baigti apžiūrą" when it first has to add the hoof being edited: the form is
+  // submitted once `findings` (and so the hidden input) has re-rendered.
+  const submitAfterRender = React.useRef(false);
+
+  // Products with live usable stock + withdrawal data, loaded when the dialog
+  // opens (needed by the course planner and the karencija chips).
+  const [catalog, setCatalog] = React.useState<CatalogProduct[] | null>(null);
+  const [catalogError, setCatalogError] = React.useState(false);
+  React.useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    loadTreatmentCatalog()
+      .then((c) => {
+        if (cancelled) return;
+        setCatalog(c);
+        setCatalogError(false);
+      })
+      .catch((err) => {
+        console.error("[NewHoofExamDialog] catalog load failed:", err);
+        if (cancelled) return;
+        setCatalog(null);
+        setCatalogError(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open]);
+  const catalogLoading = open && catalog === null && !catalogError;
+  const effectiveCatalog = React.useMemo(
+    () => catalog ?? (catalogError ? catalogFromProps(products.map((p) => ({ ...p, withdrawal_days_milk: null, withdrawal_days_meat: null }))) : []),
+    [catalog, catalogError, products],
+  );
+  const catalogById = React.useMemo(() => new Map(effectiveCatalog.map((p) => [p.id, p])), [effectiveCatalog]);
 
   const animalOptions: ComboboxOption[] = React.useMemo(
     () => animals.map((a) => ({ value: a.id, label: a.animal_no ? `${a.animal_no} · ${a.tag_no}` : a.tag_no })),
@@ -149,6 +200,8 @@ export function NewHoofExamDialog({
     setFindings([]);
     setPickerKey((k) => k + 1);
     setLocalError(null);
+    setJustAdded(null);
+    setPlan(EMPTY_COURSE_PLAN);
   }
 
   const [handledState, setHandledState] = React.useState(state);
@@ -179,28 +232,34 @@ export function NewHoofExamDialog({
       if (existing) {
         return { ...d, lines: d.lines.map((l) => (l.product_id === p.id ? { ...l, qty: String((Number(l.qty) || 0) + std) } : l)) };
       }
-      return { ...d, lines: [...d.lines, { key: crypto.randomUUID(), product_id: p.id, qty: String(std) }] };
+      return { ...d, lines: [...d.lines, { key: crypto.randomUUID(), product_id: p.id, qty: String(std), route: "" }] };
     });
   }
 
-  function addFinding() {
-    setLocalError(null);
-    if (!leg || zones.length === 0) {
-      setLocalError("Pasirinkite nagą ir bent vieną zoną.");
-      return;
-    }
-    if (draft.followup_required && !draft.followup_date) {
-      setLocalError("Nurodykite pakartotinio patikrinimo datą.");
-      return;
-    }
+  // Drug lines (medicines, vaccines, profilaktika, boliusai) can carry a route
+  // (karencija is route-aware) and a course plan; hoof-care materials cannot.
+  const isDrug = (productId: string) => DRUG_CATEGORIES.includes((productById.get(productId)?.category ?? "") as ProductCategory);
+  const drugLines: MedLine[] = draft.lines
+    .filter((l) => l.product_id && isDrug(l.product_id))
+    .map((l) => ({ key: l.key, product_id: l.product_id, qty: l.qty, route: l.route }));
+  const hasDrug = drugLines.length > 0;
+  const courseRows: CourseRow[] = plan.enabled && hasDrug ? plan.rows : [];
+  const summary = summarizePlan(examDate, drugLines, courseRows, catalogById);
+
+  // Validates the editor and returns the finding to add, or an error message.
+  function buildFinding(): { finding: Finding } | { error: string } {
+    if (!leg || zones.length === 0) return { error: "Pasirinkite nagą ir bent vieną zoną." };
+    if (draft.followup_required && !draft.followup_date) return { error: "Nurodykite pakartotinio patikrinimo datą." };
     const lines = draft.lines.filter((l) => l.product_id);
-    if (lines.some((l) => !(Number(l.qty) > 0))) {
-      setLocalError("Nurodykite kiekį kiekvienam pasirinktam produktui.");
-      return;
+    if (lines.some((l) => !(Number(l.qty) > 0))) return { error: "Nurodykite kiekį kiekvienam pasirinktam produktui." };
+    if (plan.enabled && hasDrug) {
+      if (plan.rows.length === 0) return { error: "Kursas neturi papildomų dozių — pridėkite dozę arba išjunkite kursą." };
+      if (plan.rows.some((r) => !r.product_id || !(Number(r.qty) > 0) || !r.date)) return { error: "Užpildykite visas kurso eilutes (data, produktas, dozė)." };
+      if (plan.rows.some((r) => r.date <= examDate)) return { error: "Kurso dozių datos turi būti vėlesnės už apžiūros datą." };
     }
-    setFindings((prev) => [
-      ...prev,
-      {
+    const dayNumbers = assignDayNumbers(examDate, courseRows);
+    return {
+      finding: {
         key: crypto.randomUUID(),
         leg,
         zones,
@@ -213,14 +272,75 @@ export function NewHoofExamDialog({
         followup_required: draft.followup_required,
         followup_date: draft.followup_required ? draft.followup_date : null,
         notes: draft.notes.trim() || null,
-        products: lines.map((l) => ({ product_id: l.product_id, qty: Number(l.qty), unit: productById.get(l.product_id)?.unit ?? null })),
+        products: lines.map((l) => ({
+          product_id: l.product_id,
+          qty: Number(l.qty),
+          unit: productById.get(l.product_id)?.unit ?? null,
+          administration_route: isDrug(l.product_id) ? l.route || null : null,
+        })),
+        course_days: [...courseRows]
+          .sort((a, b) => a.date.localeCompare(b.date))
+          .map((r) => ({
+            day_number: dayNumbers.get(r.date),
+            scheduled_date: r.date,
+            product_id: r.product_id,
+            qty: Number(r.qty),
+            unit: productById.get(r.product_id)?.unit ?? null,
+            administration_route: r.route || null,
+          })),
       },
-    ]);
+    };
+  }
+
+  function resetEditor() {
     setLeg(null);
     setZones([]);
     setDraft(emptyDraft());
+    setPlan(EMPTY_COURSE_PLAN);
     setPickerKey((k) => k + 1);
   }
+
+  const editorInProgress = leg !== null || zones.length > 0;
+
+  // "Išsaugoti ir pridėti kitą nagą": keep this hoof, reset the editor for the next one.
+  function saveAndAddAnother() {
+    setLocalError(null);
+    const built = buildFinding();
+    if ("error" in built) {
+      setLocalError(built.error);
+      return;
+    }
+    setFindings((prev) => [...prev, built.finding]);
+    setJustAdded(`${HOOF_LEG_LABELS[built.finding.leg as HoofLeg]} · ${formatZones(built.finding.zones)} išsaugota — pasirinkite kitą nagą.`);
+    resetEditor();
+    editorRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  // "Baigti apžiūrą": add the hoof being edited (if one is selected), then submit the exam.
+  function finishExam() {
+    setLocalError(null);
+    setJustAdded(null);
+    if (editorInProgress) {
+      const built = buildFinding();
+      if ("error" in built) {
+        setLocalError(built.error);
+        return;
+      }
+      submitAfterRender.current = true;
+      setFindings((prev) => [...prev, built.finding]);
+      resetEditor();
+    } else if (findings.length === 0) {
+      setLocalError("Pridėkite bent vieną radinį.");
+    } else {
+      formRef.current?.requestSubmit();
+    }
+  }
+
+  React.useEffect(() => {
+    if (!submitAfterRender.current) return;
+    submitAfterRender.current = false;
+    formRef.current?.requestSubmit();
+  }, [findings]);
 
   function addHealthy() {
     setLocalError(null);
@@ -240,8 +360,10 @@ export function NewHoofExamDialog({
         followup_date: null,
         notes: null,
         products: [],
+        course_days: [],
       },
     ]);
+    setJustAdded("Pažymėta: sveikas.");
   }
 
   return (
@@ -263,7 +385,7 @@ export function NewHoofExamDialog({
         <DialogHeader>
           <DialogTitle>Nauja nagų apžiūra</DialogTitle>
         </DialogHeader>
-        <form action={formAction}>
+        <form ref={formRef} action={formAction}>
           <DialogBody className="space-y-5">
             {((state && !state.ok && state.error) || localError) && (
               <p className="rounded-control bg-danger-soft px-3 py-2 text-[13px] text-danger">{localError ?? (state && !state.ok ? state.error : "")}</p>
@@ -289,6 +411,50 @@ export function NewHoofExamDialog({
                 <Input id="hoof_performed_by" value={performedBy} onChange={(e) => setPerformedBy(e.target.value)} placeholder="Nagų karpytojas / veterinaras" />
               </div>
             </div>
+
+            {findings.length > 0 && (
+              <div className="space-y-2">
+                <p className="text-[13px] font-semibold text-text-primary">Jau išsaugota šiai karvei ({findings.length})</p>
+                {findings.map((f) => (
+                  <div key={f.key} className="flex items-center justify-between gap-3 rounded-control border border-border bg-surface px-3 py-2">
+                    <div className="flex flex-wrap items-center gap-2 text-[13px]">
+                      {f.leg ? <Badge tone="neutral">{HOOF_LEG_LABELS[f.leg]}</Badge> : <Badge tone="success">Sveikas</Badge>}
+                      {f.zones.length > 0 && <span className="text-text-secondary">{formatZones(f.zones)}</span>}
+                      {f.condition_code && f.condition_code !== "OK" && (
+                        <Badge tone={severityTone(f.severity)}>
+                          {codeLabel(f.condition_code).split(" (")[0]} · S{f.severity}
+                        </Badge>
+                      )}
+                      {f.products.length > 0 && (
+                        <span className="text-[12px] text-text-muted">
+                          {f.products.map((p) => `${productById.get(p.product_id)?.name ?? "?"} ${p.qty} ${p.unit ?? ""}`).join(", ")}
+                        </span>
+                      )}
+                      {f.course_days.length > 0 && (
+                        <Badge tone="info">
+                          <CalendarClock className="size-3" /> Kursas: +{f.course_days.length} dozės iki {f.course_days[f.course_days.length - 1].scheduled_date}
+                        </Badge>
+                      )}
+                    </div>
+                    <button
+                      type="button"
+                      aria-label="Pašalinti radinį"
+                      onClick={() => setFindings((prev) => prev.filter((x) => x.key !== f.key))}
+                      className="rounded-control p-1 text-text-muted hover:bg-surface-secondary hover:text-danger"
+                    >
+                      <X className="size-4" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <div ref={editorRef} className="scroll-mt-4" />
+            {justAdded && (
+              <p className="flex items-center gap-2 rounded-control bg-success-soft px-3 py-2 text-[13px] font-medium text-success">
+                <CheckCircle2 className="size-4 shrink-0" /> {justAdded}
+              </p>
+            )}
 
             <div className="rounded-panel border border-border bg-surface-secondary p-4">
               <HoofZonePicker key={pickerKey} leg={leg} onLegChange={setLeg} zones={zones} onZonesChange={setZones} />
@@ -385,7 +551,8 @@ export function NewHoofExamDialog({
               <Label>Panaudoti produktai (nurašomi iš atsargų) · kiti produktai</Label>
               <div className="space-y-2">
                 {draft.lines.map((l) => (
-                  <div key={l.key} className="grid grid-cols-[minmax(0,1fr)_100px_32px] items-center gap-2">
+                  <div key={l.key} className="space-y-1.5">
+                  <div className="grid grid-cols-[minmax(0,1fr)_100px_32px] items-center gap-2">
                     <Combobox options={productOptions} value={l.product_id || null} onChange={(v) => setLine(l.key, { product_id: v })} placeholder="Produktas..." />
                     <Input
                       type="number"
@@ -404,17 +571,44 @@ export function NewHoofExamDialog({
                       <X className="size-4" />
                     </button>
                   </div>
+                  {l.product_id && isDrug(l.product_id) && (
+                    <div className="flex flex-wrap items-center gap-2 pl-0.5">
+                      <RouteSelect value={l.route} onChange={(v) => setLine(l.key, { route: v })} className="w-52" />
+                      {catalogById.get(l.product_id) && <WithdrawalChips product={catalogById.get(l.product_id)!} route={l.route} fromDate={examDate} />}
+                    </div>
+                  )}
+                  </div>
                 ))}
                 <Button
                   type="button"
                   size="sm"
                   variant="outline"
-                  onClick={() => setDraft((d) => ({ ...d, lines: [...d.lines, { key: crypto.randomUUID(), product_id: "", qty: "" }] }))}
+                  onClick={() => setDraft((d) => ({ ...d, lines: [...d.lines, { key: crypto.randomUUID(), product_id: "", qty: "", route: "" }] }))}
                 >
                   <Plus className="size-4" /> Pridėti produktą
                 </Button>
               </div>
             </div>
+
+            {hasDrug && (
+              <div className="space-y-3">
+                {catalogError && (
+                  <p className="rounded-control bg-warning-soft px-3 py-2 text-[12.5px] text-warning">
+                    Nepavyko gauti atsargų likučių — kurso planavimas rodomas be likučių patikros.
+                  </p>
+                )}
+                <CoursePlanner
+                  plan={plan}
+                  onChange={setPlan}
+                  lines={drugLines}
+                  regDate={examDate}
+                  catalog={effectiveCatalog}
+                  productById={catalogById}
+                  loading={catalogLoading}
+                />
+                <PlanSummaryPanel summary={summary} hasCourse={plan.enabled} />
+              </div>
+            )}
 
             <div className="rounded-panel border border-border bg-surface-secondary p-3">
               <label className="flex items-center gap-2 text-[13px] font-medium">
@@ -443,42 +637,7 @@ export function NewHoofExamDialog({
               <Button type="button" variant="outline" onClick={addHealthy} disabled={!animalId}>
                 <CheckCircle2 className="size-4" /> Viskas gerai (sveikas)
               </Button>
-              <Button type="button" onClick={addFinding}>
-                <Plus className="size-4" /> Pridėti radinį
-              </Button>
             </div>
-
-            {findings.length > 0 && (
-              <div className="space-y-2">
-                <p className="text-[13px] font-semibold text-text-primary">Radiniai šioje apžiūroje ({findings.length})</p>
-                {findings.map((f) => (
-                  <div key={f.key} className="flex items-center justify-between gap-3 rounded-control border border-border bg-surface px-3 py-2">
-                    <div className="flex flex-wrap items-center gap-2 text-[13px]">
-                      {f.leg ? <Badge tone="neutral">{HOOF_LEG_LABELS[f.leg]}</Badge> : <Badge tone="success">Sveikas</Badge>}
-                      {f.zones.length > 0 && <span className="text-text-secondary">{formatZones(f.zones)}</span>}
-                      {f.condition_code && f.condition_code !== "OK" && (
-                        <Badge tone={severityTone(f.severity)}>
-                          {codeLabel(f.condition_code).split(" (")[0]} · S{f.severity}
-                        </Badge>
-                      )}
-                      {f.products.length > 0 && (
-                        <span className="text-[12px] text-text-muted">
-                          {f.products.map((p) => `${productById.get(p.product_id)?.name ?? "?"} ${p.qty} ${p.unit ?? ""}`).join(", ")}
-                        </span>
-                      )}
-                    </div>
-                    <button
-                      type="button"
-                      aria-label="Pašalinti radinį"
-                      onClick={() => setFindings((prev) => prev.filter((x) => x.key !== f.key))}
-                      className="rounded-control p-1 text-text-muted hover:bg-surface-secondary hover:text-danger"
-                    >
-                      <X className="size-4" />
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
 
             <div>
               <Label>Bendros apžiūros pastabos</Label>
@@ -486,11 +645,18 @@ export function NewHoofExamDialog({
             </div>
           </DialogBody>
           <DialogFooter>
-            <Button type="button" variant="outline" onClick={() => setOpen(false)}>
+            <p className="mr-auto self-center text-[12px] text-text-muted">
+              {editorInProgress ? "Redaguojama naga dar neišsaugota — pasirinkite veiksmą." : findings.length > 0 ? `Išsaugota radinių: ${findings.length}` : ""}
+            </p>
+            <Button type="button" variant="ghost" onClick={() => setOpen(false)}>
               Atšaukti
             </Button>
-            <Button type="submit" disabled={pending || !animalId || findings.length === 0}>
-              {pending ? "Saugoma..." : `Užregistruoti apžiūrą (${findings.length})`}
+            <Button type="button" variant="outline" disabled={pending || !animalId || !editorInProgress} onClick={saveAndAddAnother}>
+              <Plus className="size-4" /> Išsaugoti ir pridėti kitą nagą
+            </Button>
+            <Button type="button" disabled={pending || !animalId || (!editorInProgress && findings.length === 0)} onClick={finishExam}>
+              <Check className="size-4" />
+              {pending ? "Saugoma..." : `Baigti apžiūrą (${findings.length + (editorInProgress ? 1 : 0)})`}
             </Button>
           </DialogFooter>
         </form>

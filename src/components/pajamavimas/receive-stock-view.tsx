@@ -14,7 +14,7 @@ import { PRODUCT_CATEGORY_LABELS } from "@/lib/product-categories";
 import { formatDate, formatEur } from "@/lib/utils";
 
 // Mirrors receive_invoice() (0015): drugs, vaccines and biocides need serija + galiojimo terminas.
-const LOT_REQUIRED = new Set<string>(["medicines", "vakcina", "biocide"]);
+const LOT_REQUIRED = new Set<string>(["medicines", "vakcina", "profilaktika", "boliusai", "biocide"]);
 import type { Database } from "@/lib/supabase/types";
 
 type Product = Database["public"]["Tables"]["products"]["Row"];

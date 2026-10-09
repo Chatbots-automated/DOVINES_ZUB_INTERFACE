@@ -133,8 +133,16 @@ export type PlanSummary = {
 
 type WithdrawalProduct = Pick<CatalogProduct, "withdrawal_days_milk" | "withdrawal_days_meat"> & Partial<Record<WithdrawalFieldKey, number | null>>;
 
+/**
+ * Last karencija day for a dose given on `date`: date + days + 1 (contract formula,
+ * mirrors fn_withdrawal_until()). 0 days = no karencija at all, so null.
+ */
+export function withdrawalUntil(date: string, days: number): string | null {
+  return days > 0 ? addDays(date, days + 1) : null;
+}
+
 function until(date: string, product: WithdrawalProduct, route: string, kind: "milk" | "meat") {
-  return addDays(date, getRouteWithdrawalDays(product, (route || null) as AdministrationRoute | null, kind) + 1);
+  return withdrawalUntil(date, getRouteWithdrawalDays(product, (route || null) as AdministrationRoute | null, kind));
 }
 
 export function summarizePlan(
@@ -153,7 +161,7 @@ export function summarizePlan(
     const n = Number(v);
     return Number.isFinite(n) && n > 0 ? n : 0;
   };
-  const bump = (m: string | null, c: string) => (m === null || c > m ? c : m);
+  const bump = (m: string | null, c: string | null) => (c === null ? m : m === null || c > m ? c : m);
 
   for (const l of lines) {
     const product = productById.get(l.product_id);

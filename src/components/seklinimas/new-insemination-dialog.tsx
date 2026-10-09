@@ -25,6 +25,7 @@ export function NewInseminationDialog({
   currentVetName,
   trigger,
   onCreated,
+  visitId,
 }: {
   animalId?: string;
   animals?: AnimalOption[];
@@ -34,6 +35,8 @@ export function NewInseminationDialog({
   trigger?: React.ReactNode;
   /** Fires after an insemination is saved — lets a parent card refetch its history. */
   onCreated?: () => void;
+  /** Vizitai (0029): links the saved insemination to this visit (create_insemination_for_visit) and closes it. */
+  visitId?: string;
 }) {
   const [open, setOpen] = React.useState(false);
   const [state, formAction, pending] = useActionState<ActionResult | null, FormData>(createInsemination, null);
@@ -104,6 +107,7 @@ export function NewInseminationDialog({
             {state && !state.ok && state.error && <p className="rounded-control bg-danger-soft px-3 py-2 text-[13px] text-danger">{state.error}</p>}
 
             <input type="hidden" name="animal_id" value={selectedAnimalId ?? ""} />
+            {visitId && <input type="hidden" name="visit_id" value={visitId} />}
             <input type="hidden" name="sperm_product_id" value={spermId ?? ""} />
             <input type="hidden" name="glove_product_id" value={gloveId ?? ""} />
 

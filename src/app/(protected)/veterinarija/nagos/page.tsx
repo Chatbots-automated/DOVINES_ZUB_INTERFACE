@@ -39,6 +39,12 @@ type FindingRow = {
     animals: { id: string; tag_no: string; animal_no: string | null } | null;
   };
   usage_items: Array<{ qty: number; unit: string | null; products: { name: string } | null }>;
+  // Drugs used in a finding are a linked treatment (0030) — with a course when one was planned.
+  treatments: Array<{
+    id: string;
+    usage_items: Array<{ qty: number; unit: string | null; products: { name: string } | null }>;
+    treatment_courses: Array<{ status: string; days: number; course_doses: Array<{ scheduled_date: string; administered: boolean }> }>;
+  }>;
 };
 
 export default async function NagosPage({ searchParams }: { searchParams: Promise<SearchParams> }) {
@@ -59,7 +65,8 @@ export default async function NagosPage({ searchParams }: { searchParams: Promis
     .from("hoof_findings")
     .select(
       "id, leg, zones, condition_code, diagnosis, severity, was_trimmed, was_treated, bandage_applied, followup_required, followup_date, followup_completed, notes, " +
-        "hoof_condition_codes(description), hoof_exams!inner(id, exam_date, performed_by, animal_id, animals(id, tag_no, animal_no)), usage_items(qty, unit, products(name))",
+        "hoof_condition_codes(description), hoof_exams!inner(id, exam_date, performed_by, animal_id, animals(id, tag_no, animal_no)), usage_items(qty, unit, products(name)), " +
+        "treatments(id, usage_items(qty, unit, products(name)), treatment_courses(status, days, course_doses(scheduled_date, administered)))",
     )
     .order("hoof_exams(exam_date)", { ascending: false })
     .limit(300);
@@ -239,13 +246,25 @@ export default async function NagosPage({ searchParams }: { searchParams: Promis
                         </td>
                         <td className="px-5 py-2">{actions || "—"}</td>
                         <td className="px-5 py-2 text-[12px]">
-                          {f.usage_items.length === 0
+                          {f.usage_items.length === 0 && f.treatments.every((t) => t.usage_items.length === 0 && t.treatment_courses.length === 0)
                             ? "—"
-                            : f.usage_items.map((u, i) => (
+                            : [...f.usage_items, ...f.treatments.flatMap((t) => t.usage_items)].map((u, i) => (
                                 <span key={i} className="block">
                                   {u.products?.name ?? "?"} ({formatQty(u.qty, u.unit)})
                                 </span>
                               ))}
+                          {f.treatments.flatMap((t) => t.treatment_courses).map((c, i) => {
+                            const given = c.course_doses.filter((d) => d.administered).length;
+                            const last = c.course_doses.map((d) => d.scheduled_date).sort().at(-1);
+                            return (
+                              <Link key={i} href="/veterinarija/gydymo-kursai" className="mt-1 inline-block hover:underline">
+                                <Badge tone={c.status === "completed" ? "success" : "info"}>
+                                  Kursas {given}/{c.course_doses.length}
+                                  {last ? ` · iki ${formatDate(last)}` : ""}
+                                </Badge>
+                              </Link>
+                            );
+                          })}
                         </td>
                         <td className="px-5 py-2">{f.hoof_exams.performed_by ?? "—"}</td>
                         <td className="px-5 py-2">

@@ -2,10 +2,14 @@
 // or regenerate later with `supabase gen types typescript` once the
 // Supabase CLI is linked to the project.
 
+// 0024: two VIC logins — sėklinimo (stored) and veterinaro (daily animal import).
+export type VicLoginKind = "seklinimas" | "veterinaras";
 export type UserRole = "admin" | "vet" | "tech" | "viewer";
 export type ProductCategory =
   | "medicines"
   | "vakcina"
+  | "profilaktika"
+  | "boliusai"
   | "biocide"
   | "priedas"
   | "reproduction"
@@ -27,9 +31,12 @@ export type DelproSyncJobStatus =
   | "verification_failed";
 export type DelproOutboundMode = "approval" | "auto" | "off";
 // `treatments.procedure_type` — only "gydymas" is enqueued for DelPro.
-export type ProcedureType = "apziura" | "gydymas" | "profilaktika";
+export type ProcedureType = "apziura" | "gydymas" | "profilaktika" | "sinchronizacija";
 // animal_visits (0018_visits.sql) — text + check constraints.
-export type VisitProcedure = "temperatura" | "apziura" | "profilaktika" | "gydymas" | "vakcina" | "kita";
+export type VisitProcedure = "temperatura" | "apziura" | "profilaktika" | "gydymas" | "vakcina" | "sinchronizacija" | "sekinimas" | "kita";
+// sync_protocol_steps.medications / animal_visits.planned_medications (0025_sync_protocols.sql).
+export type SyncStepKind = "veiksmas" | "sekinimas";
+export type SyncStepMedication = { product_id: string; qty: number; unit: Unit; administration_route: AdministrationRoute | null };
 export type VisitStatus = "planuojamas" | "vykdomas" | "baigtas" | "atsauktas" | "neivykes";
 export type WriteOffActStatus = "draft" | "approved" | "cancelled";
 // Farm's three act templates (0012_write_off_templates.sql).
@@ -277,6 +284,8 @@ export interface Database {
           procedure_type: ProcedureType;
           animal_group_snapshot: string | null;
           visit_id: string | null;
+          /** Set when the treatment was created by a nagų apžiūra finding that used a drug / planned a course (0030). */
+          hoof_finding_id: string | null;
           withdrawal_until_milk: string | null;
           withdrawal_until_meat: string | null;
           created_by: string | null;
@@ -369,12 +378,63 @@ export interface Database {
           next_visit_required: boolean;
           next_visit_date: string | null;
           related_visit_id: string | null;
+          sync_application_id: string | null;
+          sync_step_title: string | null;
+          sync_step_no: number | null;
+          sync_step_total: number | null;
+          planned_medications: SyncStepMedication[];
           created_by: string | null;
           created_at: string;
           updated_at: string;
         }>;
         Insert: Insertable<Database["public"]["Tables"]["animal_visits"]["Row"], "animal_id">;
         Update: Updatable<Database["public"]["Tables"]["animal_visits"]["Row"]>;
+        Relationships: [];
+      };
+
+      sync_protocols: {
+        Row: Row<{
+          id: string;
+          name: string;
+          description: string | null;
+          created_by: string | null;
+          created_at: string;
+          updated_at: string;
+        }>;
+        Insert: Insertable<Database["public"]["Tables"]["sync_protocols"]["Row"], "name">;
+        Update: Updatable<Database["public"]["Tables"]["sync_protocols"]["Row"]>;
+        Relationships: [];
+      };
+
+      sync_protocol_steps: {
+        Row: Row<{
+          id: string;
+          protocol_id: string;
+          day_offset: number;
+          title: string;
+          notes: string | null;
+          sort_order: number;
+          kind: SyncStepKind;
+          medications: SyncStepMedication[];
+        }>;
+        Insert: Insertable<Database["public"]["Tables"]["sync_protocol_steps"]["Row"], "protocol_id" | "day_offset" | "title">;
+        Update: Updatable<Database["public"]["Tables"]["sync_protocol_steps"]["Row"]>;
+        Relationships: [];
+      };
+
+      sync_protocol_applications: {
+        Row: Row<{
+          id: string;
+          protocol_id: string | null;
+          protocol_name: string;
+          animal_id: string;
+          start_date: string;
+          applied_by: string | null;
+          created_by: string | null;
+          created_at: string;
+        }>;
+        Insert: Insertable<Database["public"]["Tables"]["sync_protocol_applications"]["Row"], "protocol_name" | "animal_id" | "start_date">;
+        Update: Updatable<Database["public"]["Tables"]["sync_protocol_applications"]["Row"]>;
         Relationships: [];
       };
 
@@ -440,6 +500,7 @@ export interface Database {
           pregnancy_notes: string | null;
           notes: string | null;
           animal_group_snapshot: string | null;
+          visit_id: string | null;
           performed_by: string | null;
           created_at: string;
           updated_at: string;
@@ -753,6 +814,33 @@ export interface Database {
         }>;
         Relationships: [];
       };
+      // 0032_analytics.sql — money = qty × per-unit purchase_price.
+      vw_stock_value_by_category: {
+        Row: Row<{
+          category: ProductCategory;
+          usable_value: number;
+          usable_batches: number;
+          expired_value: number;
+          expired_batches: number;
+          unpriced_batches: number;
+        }>;
+        Relationships: [];
+      };
+      vw_stock_batch_alerts: {
+        Row: Row<{
+          batch_id: string;
+          product_id: string;
+          product_name: string;
+          category: ProductCategory;
+          unit: Unit;
+          lot: string | null;
+          expiry_date: string;
+          days_left: number;
+          qty_left: number;
+          value: number;
+        }>;
+        Relationships: [];
+      };
       vw_withdrawal_status: {
         Row: Row<{
           animal_id: string;
@@ -837,6 +925,7 @@ export interface Database {
           outcome: string | null;
           outcome_date: string | null;
           vet_name: string | null;
+          procedure_type: ProcedureType;
         }>;
         Relationships: [];
       };
@@ -938,6 +1027,19 @@ export interface Database {
     };
 
     Functions: {
+      analytics_monthly: { Args: { p_from: string; p_to: string }; Returns: { month: string; purchased: number; consumed: number }[] };
+      analytics_spend_by_category: { Args: { p_from: string; p_to: string }; Returns: { category: ProductCategory; spent: number; uses: number }[] };
+      analytics_top_products: {
+        Args: { p_from: string; p_to: string; p_limit?: number };
+        Returns: { product_id: string; product_name: string; category: ProductCategory; unit: Unit; qty: number; spent: number; uses: number; is_antimicrobial: boolean }[];
+      };
+      analytics_antimicrobial: {
+        Args: { p_from: string; p_to: string; p_limit?: number };
+        Returns: { product_name: string; active_substance: string | null; unit: Unit; qty: number; uses: number }[];
+      };
+      analytics_treatments_by_month: { Args: { p_from: string; p_to: string }; Returns: { month: string; procedure_type: ProcedureType; n: number }[] };
+      analytics_top_diseases: { Args: { p_from: string; p_to: string; p_limit?: number }; Returns: { name: string; n: number; animals: number }[] };
+      analytics_treatments_by_group: { Args: { p_from: string; p_to: string; p_limit?: number }; Returns: { animal_group: string; n: number; animals: number }[] };
       create_treatment: { Args: { p_data: Record<string, unknown> }; Returns: string };
       administer_course_dose: { Args: { p_dose_id: string; p_date?: string }; Returns: undefined };
       create_vaccinations: { Args: { p_data: Record<string, unknown> }; Returns: number };
@@ -947,12 +1049,19 @@ export interface Database {
       create_biocide_usage: { Args: { p_data: Record<string, unknown> }; Returns: string };
       create_visit: { Args: { p_data: Record<string, unknown> }; Returns: string };
       create_treatment_for_visit: { Args: { p_visit_id: string; p_data: Record<string, unknown> }; Returns: string };
+      create_insemination_for_visit: { Args: { p_visit_id: string; p_data: Record<string, unknown> }; Returns: string };
       create_vaccination_for_visit: { Args: { p_visit_id: string; p_data: Record<string, unknown> }; Returns: number };
+      save_sync_protocol: { Args: { p_data: Record<string, unknown> }; Returns: string };
+      apply_sync_protocol: {
+        Args: { p_protocol_id: string; p_animal_id: string; p_start_date: string; p_start_time?: string; p_vet_name?: string | null };
+        Returns: number;
+      };
+      cancel_sync_application: { Args: { p_application_id: string }; Returns: number };
       receive_invoice: { Args: { p_data: Record<string, unknown> }; Returns: { invoice_id: string | null; batches: number; total: number } };
       delete_invoice: { Args: { p_invoice_id: string }; Returns: undefined };
       create_general_usage: { Args: { p_data: Record<string, unknown> }; Returns: number };
       vic_get_settings: {
-        Args: Record<string, never>;
+        Args: { p_kind: VicLoginKind };
         Returns: {
           vic_username: string;
           vic_farm_code: string | null;
@@ -965,7 +1074,7 @@ export interface Database {
         }[];
       };
       vic_save_credentials: {
-        Args: { p_username: string; p_password: string | null; p_is_active: boolean; p_farm_code?: string | null };
+        Args: { p_kind: VicLoginKind; p_username: string; p_password: string | null; p_is_active: boolean; p_farm_code?: string | null };
         Returns: undefined;
       };
       delpro_approve_jobs: { Args: { p_job_ids: string[] }; Returns: number };

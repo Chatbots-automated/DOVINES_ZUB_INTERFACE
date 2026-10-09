@@ -2,6 +2,7 @@
 
 import { createClient } from "@/lib/supabase/server";
 import { revalidateUsageViews } from "@/lib/revalidate";
+import { applySyncProtocol } from "@/lib/actions/sync-protocols";
 import type { VisitStatus } from "@/lib/supabase/types";
 
 export type ActionResult = { ok: true } | { ok: false; error: string };
@@ -31,6 +32,13 @@ export async function createVisit(_prev: ActionResult | null, formData: FormData
     procedures = [];
   }
   if (!Array.isArray(procedures) || procedures.length === 0) return { ok: false, error: "Pasirinkite bent vieną procedūrą." };
+
+  // "Sinchronizacija" applies a protocol (0025): one planned visit per protocol
+  // step, starting on the chosen date. It is not combined with other procedures.
+  if (procedures.includes("sinchronizacija")) {
+    if (procedures.length > 1) return { ok: false, error: "Sinchronizacijos negalima derinti su kitomis procedūromis." };
+    return applySyncProtocol(null, formData);
+  }
 
   const status = field("status") ?? "planuojamas";
   if (!STATUSES.includes(status as VisitStatus)) return { ok: false, error: "Netinkama būsena." };

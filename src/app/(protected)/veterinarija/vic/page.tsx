@@ -5,52 +5,43 @@ import { getCurrentProfile } from "@/lib/auth";
 import { PageHeader } from "@/components/layout/page-header";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import type { VicLoginKind } from "@/lib/supabase/types";
 import { VicSettingsForm } from "@/components/vic/vic-settings-form";
 import { formatDateTime } from "@/lib/utils";
 
-// Integracija → VIC — shared VIC login, admin only (0013_vic_credentials.sql).
+// Integracija → VIC — sėklinimo + veterinaro logins, admin only (0013, 0024).
 export default async function VicPage() {
   const session = await getCurrentProfile();
   if (session?.profile.role !== "admin") redirect("/veterinarija");
 
   const supabase = await createClient();
-  const { data, error } = await supabase.rpc("vic_get_settings");
-  const current = data?.[0] ?? null;
+  const [{ data: seklData, error: seklError }, { data: vetData, error: vetError }] = await Promise.all([
+    supabase.rpc("vic_get_settings", { p_kind: "seklinimas" }),
+    supabase.rpc("vic_get_settings", { p_kind: "veterinaras" }),
+  ]);
+  const sekl = seklData?.[0] ?? null;
+  const current = vetData?.[0] ?? null; // sync status belongs to the veterinarian login
   const { data: runsData } = await supabase.from("vic_sync_runs").select("*").order("created_at", { ascending: false }).limit(7);
   const runs = runsData ?? [];
 
   return (
     <div className="flex flex-col">
-      <PageHeader title="VIC" description="VIC prisijungimo duomenys" />
+      <PageHeader title="VIC" description="VIC prisijungimo duomenys: sėklinimo ir veterinaro" />
       <div className="px-4 py-6 sm:px-6 lg:px-8">
-        <div className="grid max-w-4xl gap-6 lg:grid-cols-2">
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <KeyRound className="size-4" /> VIC prisijungimas
-              {current ? (
-                <Badge tone={current.is_active ? "success" : "neutral"}>{current.is_active ? "Aktyvus" : "Išjungtas"}</Badge>
-              ) : (
-                <Badge tone="warning">Nesukonfigūruota</Badge>
-              )}
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            {error && <p className="rounded-control bg-danger-soft px-3 py-2 text-[13px] text-danger">{error.message}</p>}
-            <VicSettingsForm
-              username={current?.vic_username ?? ""}
-              farmCode={current?.vic_farm_code ?? ""}
-              passwordSet={current?.password_set ?? false}
-              isActive={current?.is_active ?? true}
-            />
-            {current && (
-              <p className="text-[11px] text-text-muted">
-                Paskutinį kartą atnaujinta {formatDateTime(current.updated_at)}
-                {current.updated_by_name ? ` · ${current.updated_by_name}` : ""}
-              </p>
-            )}
-          </CardContent>
-        </Card>
+        <div className="grid max-w-6xl gap-6 lg:grid-cols-2 xl:grid-cols-3">
+        <LoginCard
+          title="Sėklinimo prisijungimai"
+          kind="seklinimas"
+          current={sekl}
+          error={seklError?.message}
+        />
+        <LoginCard
+          title="Veterinaro prisijungimai"
+          kind="veterinaras"
+          current={current}
+          error={vetError?.message}
+          hint="Naudojami kasdieniam gyvulių importui iš VIC."
+        />
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
@@ -98,5 +89,60 @@ export default async function VicPage() {
         </div>
       </div>
     </div>
+  );
+}
+
+type Settings = {
+  vic_username: string;
+  vic_farm_code: string | null;
+  password_set: boolean;
+  is_active: boolean;
+  updated_at: string;
+  updated_by_name: string | null;
+} | null;
+
+function LoginCard({
+  title,
+  kind,
+  current,
+  error,
+  hint,
+}: {
+  title: string;
+  kind: VicLoginKind;
+  current: Settings;
+  error?: string;
+  hint?: string;
+}) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <KeyRound className="size-4" /> {title}
+          {current ? (
+            <Badge tone={current.is_active ? "success" : "neutral"}>{current.is_active ? "Aktyvus" : "Išjungtas"}</Badge>
+          ) : (
+            <Badge tone="warning">Nesukonfigūruota</Badge>
+          )}
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {hint && <p className="text-[12px] text-text-muted">{hint}</p>}
+        {error && <p className="rounded-control bg-danger-soft px-3 py-2 text-[13px] text-danger">{error}</p>}
+        <VicSettingsForm
+          kind={kind}
+          username={current?.vic_username ?? ""}
+          farmCode={current?.vic_farm_code ?? ""}
+          passwordSet={current?.password_set ?? false}
+          isActive={current?.is_active ?? true}
+        />
+        {current && (
+          <p className="text-[11px] text-text-muted">
+            Paskutinį kartą atnaujinta {formatDateTime(current.updated_at)}
+            {current.updated_by_name ? ` · ${current.updated_by_name}` : ""}
+          </p>
+        )}
+      </CardContent>
+    </Card>
   );
 }

@@ -19,8 +19,8 @@ Netlify. DelPro worker: Node 20+ on the farm's Windows PC. See `AGENTS.md` befor
 | 2.8 | 6 žurnalai + spausdinimas / CSV | Apskaita → Žurnalai ir ataskaitos |
 | 2.9 | Nurašymo aktai pagal ūkio šablonus: vaistų/biocidų, priedų, medžiagų | Apskaita → Nurašymo aktai, Nurašymo grupės (admin) |
 | 2.5 / 2.9 | Sunaudojimas be gyvulio (kiekis arba inventorizacijos likutis) | Apskaita → Sunaudojimas |
-| — | Sėklinimas, Vizitai, Nagos, masinė vakcinacija (ūkio prašymu, ne Priedo dalis) | Veterinarija → atitinkami skirtukai |
-| — | VIC prisijungimas + kasdienis gyvulių importas (ūkio prašymu, ne Priedo dalis) | Integracija → VIC (admin), `n8n/vic-daily-animals.json` |
+| — | Sėklinimas, Vizitai, Nagos, Sinchronizacijos protokolai, masinė vakcinacija (ūkio prašymu, ne Priedo dalis) | Veterinarija → atitinkami skirtukai |
+| — | VIC prisijungimai (sėklinimo + veterinaro) + kasdienis gyvulių importas (ūkio prašymu, ne Priedo dalis) | Integracija → VIC (admin), `n8n/vic-daily-animals.json` |
 | 3 | DelPro → GVET (gyvuliai, grupės) | `delpro-worker/` + `upsert_animals_from_delpro()` |
 | 4 | GVET → DelPro (gydymai) | Veterinarija → DelPro (admin) + `delpro-worker/` |
 

@@ -6,11 +6,13 @@
   table, column or screen, be able to point at the clause it satisfies. Anything else is billed separately (Sutartis §2.5,
   §4.6, Priedas §1.5/§6.3) — flag it, don't build it.
 - **Added at the farm's request (2026-10), NOT in Priedas Nr. 1 — billed separately per Sutartis §2.5/§4.6:** Sėklinimas
-  (0017), Vizitai (0018), Nagos (0019), the bulk vaccination picker/plan, the extended Biocidai tab, VIC login + daily
+  (0017), Vizitai (0018), Nagos (0019), Sinchronizacijos protokolai (0025), the bulk vaccination picker/plan, the extended Biocidai tab, VIC login + daily
   animal import (0013/0014). Don't extend them without confirming scope.
-- **Not in scope** (built in sibling projects, deliberately removed here): sinchronizacijos protokolai, masinis gydymas,
+- **Not in scope** (built in sibling projects, deliberately removed here): masinis gydymas,
   gydymų savikaina, VIC sync beyond the animal import, UNIFORM. Animals come from DelPro, not VIC.
-  The farm asked (2026-10) for an Integracija → VIC tab that only **stores** the VIC login (0013). Its password is
+  The farm asked (2026-10) for an Integracija → VIC tab that only **stores** VIC logins (0013). Since 0024 there are two, one row each in
+  `vic_credentials` keyed by `kind`: `seklinimas` (Sėklinimo prisijungimai — the original login) and `veterinaras`
+  (Veterinaro prisijungimai — what the n8n animal import reads). Its password is
   write-only from the app (no table grants; `vic_get_settings()` returns `password_set`, never the password). Any actual
   VIC sync is out of scope and billed separately — but the farm asked for the **daily animal import (0014)**, built:
   `upsert_animals_from_vic(jsonb)` (unnamed param, service_role only), called by an external n8n workflow
@@ -33,15 +35,44 @@ not look for Žibartoniai's 0013–0021 VIC/UNIFORM history here.
   not `interface`s — supabase-js requires `Record<string, unknown>`-compatible rows, and an interface silently turns
   every table into `never`.
 - **All stock-consuming writes go through plpgsql RPCs** (`create_treatment`, `administer_course_dose`,
-  `create_vaccinations`, `create_biocide_usage` in 0004, `create_general_usage` in 0012, `receive_invoice` / `delete_invoice` in 0015 — pajamavimas; `create_insemination` 0017; `create_visit` + `*_for_visit` 0018; `create_hoof_exam` 0019), never through several PostgREST calls from TypeScript. One
+  `create_vaccinations`, `create_biocide_usage` in 0004, `create_general_usage` in 0012, `receive_invoice` / `delete_invoice` in 0015 — pajamavimas; `create_insemination` 0017; `create_visit` + `*_for_visit` 0018; `create_hoof_exam` 0019; `save_sync_protocol` / `apply_sync_protocol` / `cancel_sync_application` 0025), never through several PostgREST calls from TypeScript. One
   function = one transaction: a stock shortfall rolls back the whole save. Žibartoniai did this client-side and could
   leave a treatment with no medication; here every treatment is also sent to DelPro, so a half-saved one must never exist.
   FEFO lives in `fn_consume_fefo()` (locks batches, skips expired ones).
 - `treatments.animal_group_snapshot` / `vaccinations.animal_group_snapshot` freeze the animal's DelPro group at insert.
   Nurašymo aktų paskirstymas pagal grupes depends on it — don't "fix" it to read the current group.
+- **Sinchronizacijos protokolai** (0025, farm's request, billed separately): `sync_protocols` + `sync_protocol_steps`
+  (day offset from the start date, title, `medications` jsonb) are the farm's own templates. There is **no separate
+  screen**: they are created/edited/deleted from `SyncProtocolPicker` ("Naujas protokolas" / "Redaguoti"), which sits in
+  Naujas vizitas and the animal panel's Sinchronizacija dialog. "Sinchronizacija" is a visit procedure: picking it in Naujas vizitas swaps the form to
+  protocol + start date and `apply_sync_protocol` creates one planned `animal_visits` row per step (time fixed in
+  Europe/Vilnius), logged in `sync_protocol_applications` (name snapshot). A visit **copies** the step
+  (`sync_step_title`, `planned_medications`), so editing/deleting a protocol never rewrites planned visits. Applying
+  consumes **no stock**: the vet records the step from the visit card, which pre-fills the planned medicine into the normal
+  treatment dialog → `create_treatment_for_visit` (`procedure_type='sinchronizacija'`, FEFO, karencija). That type is not
+  queued for DelPro (only `gydymas` is) — ask the farm before changing that. Protocol medicine is limited to the categories
+  the treatment dialog can give (`TREATMENT_PRODUCT_CATEGORIES`, enforced in `fn_sync_clean_medications`). One open
+  protocol per animal; `cancel_sync_application` (button on an open sync visit card) cancels the open steps.
+  A step has a `kind`: `veiksmas` (procedure/medicine) or `sekinimas` (the insemination, usually the last step of a FTAI protocol).
+  A sekinimas step makes a visit with procedure `sekinimas` (also selectable on its own in Naujas vizitas); the card's
+  **Įrašyti sėklinimą** opens `NewInseminationDialog` → `create_insemination_for_visit` (0029: links `insemination_records.visit_id`,
+  FEFO semen + gloves, closes the visit in the same transaction). Deleting a visit keeps the insemination journal row. `applySyncProtocol` (server action) is shared by
+  Naujas vizitas → Sinchronizacija and the animal panel's **Sinchronizacija** button (`ApplySyncProtocolDialog`); the panel's
+  **Profilaktika** button is just `NewTreatmentDialog` locked to `procedure_type='profilaktika'` (same FEFO/karencija, not sent to DelPro).
+- **Profilaktika / Boliusai product types** (0026 enum + 0027 rules, farm's request): drugs like medicines — `fn_is_drug_category()`
+  drives serija+galiojimas on pajamavimas, the vet drug journal and pack-based acts (keep `DRUG_CATEGORIES` in
+  `src/lib/product-categories.ts` in sync). A profilaktika treatment may only use these two types
+  (`PROPHYLAXIS_CATEGORIES`, filtered in `NewTreatmentDialog` — a UI rule, not a DB constraint). Existing products stay in
+  their old category until the farm recategorizes them.
+- **Pagrindinis analytics** (0032): both main pages take `?period=` (`src/lib/analytics-period.ts`). Aggregation lives in
+  security-invoker views (`vw_stock_value_by_category`, `vw_stock_batch_alerts`) and `analytics_*` SQL functions so it stays
+  under PostgREST's 1000-row cap; charts are plain server-rendered CSS (`src/components/analitika/charts.tsx`), no chart lib.
+  Money = `usage_items.qty × batches.purchase_price` (per unit); batches without a price count as 0 € and are flagged.
 - Animal side panel = `src/components/gyvunai/animal-profile.tsx` (shared by the drawer and /gyvunai/[id]). Extra DelPro
   fields (0020: lactation/reproduction/milk/…) arrive through `upsert_animals_from_delpro` with coalesce-patch semantics.
-- Course karencija (0021) = **last dose date** + withdrawal days + 1 (was reg_date-based). `products.subcategory_id`
+- Course karencija (0021) = **last dose date** + withdrawal days + 1 (was reg_date-based). **0 days = no karencija** (0028:
+  `fn_withdrawal_until()` returns NULL, so a 0-day product like Bioestrovet-milk never sets a date; the MAX over a treatment's
+  products ignores it). UI mirror: `withdrawalUntil()` in `src/lib/treatments/planner.ts`. Keep both in sync. `products.subcategory_id`
   + `product_subcategories` (0023); `hoof_care` category lands on the medžiagos act.
 - `usage_items` has one source column per consumer (treatment, course dose, vaccination, biocide, general usage,
   insemination, hoof finding) with a single-source CHECK, and `vw_usage_items_detailed` exposes them all. A new
@@ -64,6 +95,12 @@ not look for Žibartoniai's 0013–0021 VIC/UNIFORM history here.
   „Nepriskirta“, and approval refuses it. Don't hard-code group logic in TS.
 - The farm counts drugs in **packages**, not ml. `products.act_unit` / `act_unit_size` convert stock units to act units
   at generation. `write_off_act_items.unit_label` is the printed unit (free text).
+- **Nagos kurso planavimas** (0030, farm's request): in `create_hoof_exam` a finding's **drug** lines (`fn_is_drug_category`) and any
+  `course_days` go through `create_treatment()` as a linked treatment (`treatments.hoof_finding_id`, `procedure_type='apziura'` → never
+  queued for DelPro), so FEFO, karencija (route-aware; 0-day = none) and the Gydymo kursai board work unchanged; doses 2..N consume stock
+  only on `administer_course_dose`. Hoof-care materials stay on `usage_items.hoof_finding_id`. Deleting an exam cascades to its treatment
+  (guard refuses when any of it is on a nurašymo aktas). The hoof dialog keeps animal/date/vet and offers "Išsaugoti ir pridėti kitą
+  nagą" / "Baigti apžiūrą" per hoof.
 - Usage without an animal (needles, gloves, boluses, hoof bath) is recorded in `general_usage`, either as a quantity or
   as a counted remaining stock (usage = non-expired stock − remaining, as the Excel did).
 - `write_off_act_usage_items.usage_item_id` is UNIQUE: a usage row can be written off by only one non-cancelled act.

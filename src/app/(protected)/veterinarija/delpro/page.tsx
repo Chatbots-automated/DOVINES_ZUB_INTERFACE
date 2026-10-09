@@ -34,7 +34,7 @@ export default async function DelproPage() {
     supabase.from("delpro_sync_runs").select("*").order("created_at", { ascending: false }).limit(15),
     supabase.from("delpro_groups").select("id, name, delpro_group_id, active").order("name"),
     supabase.from("diseases").select("id, name").order("name"),
-    supabase.from("products").select("id, name").eq("is_active", true).in("category", ["medicines", "vakcina"]).order("name"),
+    supabase.from("products").select("id, name").eq("is_active", true).in("category", ["medicines", "vakcina", "profilaktika", "boliusai"]).order("name"),
     supabase.from("delpro_mappings").select("*"),
     supabase.from("animals").select("id", { count: "exact", head: true }).eq("source", "delpro").eq("active", true),
   ]);

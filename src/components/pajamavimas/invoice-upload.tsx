@@ -51,7 +51,7 @@ function sanitizeFilename(filename: string) {
 
 // Drugs, vaccines and biocides must carry a lot + expiry (journals, §2.8);
 // mirrors receive_invoice() in 0015.
-const LOT_REQUIRED = new Set<string>(["medicines", "vakcina", "biocide"]);
+const LOT_REQUIRED = new Set<string>(["medicines", "vakcina", "profilaktika", "boliusai", "biocide"]);
 
 const MAX_RAW_RESPONSE_STRING = 4000;
 

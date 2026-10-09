@@ -134,3 +134,13 @@ h3 {
 .scrollbar-thin::-webkit-scrollbar-track {
   background: transparent;
 }
+
+/* Analitika charts (dataviz): categorical slots 1-4 from the validated default
+   palette (adjacent-pair CVD ΔE ≥ 8). The app has no dark theme. Single-series
+   charts use --accent instead. */
+.viz-root {
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --series-3: #1baf7a;
+  --series-4: #eda100;
+}

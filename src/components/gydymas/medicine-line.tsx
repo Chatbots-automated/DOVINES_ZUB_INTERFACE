@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Input, Label, Select } from "@/components/ui/input";
 import { MedicinePicker } from "@/components/gydymas/medicine-picker";
 import { ADMINISTRATION_ROUTES, getRouteWithdrawalDays } from "@/lib/administration-routes";
-import { addDays, previewFefo, type CatalogProduct, type MedLine } from "@/lib/treatments/planner";
+import { previewFefo, withdrawalUntil, type CatalogProduct, type MedLine } from "@/lib/treatments/planner";
 import { formatDate, formatQty } from "@/lib/utils";
 import type { AdministrationRoute } from "@/lib/supabase/types";
 
@@ -30,14 +30,28 @@ export function WithdrawalChips({ product, route, fromDate }: { product: Catalog
   const r = (route || null) as AdministrationRoute | null;
   const milk = getRouteWithdrawalDays(product, r, "milk");
   const meat = getRouteWithdrawalDays(product, r, "meat");
+  const milkUntil = withdrawalUntil(fromDate, milk);
+  const meatUntil = withdrawalUntil(fromDate, meat);
   return (
     <>
-      <Badge tone="warning" title={`Pienas — karencija iki ${formatDate(addDays(fromDate, milk + 1))}`}>
-        🥛 {milk} d. · iki {formatDate(addDays(fromDate, milk + 1))}
-      </Badge>
-      <Badge tone="danger" title={`Mėsa — karencija iki ${formatDate(addDays(fromDate, meat + 1))}`}>
-        🥩 {meat} d. · iki {formatDate(addDays(fromDate, meat + 1))}
-      </Badge>
+      {milkUntil ? (
+        <Badge tone="warning" title={`Pienas — karencija iki ${formatDate(milkUntil)}`}>
+          🥛 {milk} d. · iki {formatDate(milkUntil)}
+        </Badge>
+      ) : (
+        <Badge tone="success" title="Pienui karencijos nėra">
+          🥛 karencijos nėra
+        </Badge>
+      )}
+      {meatUntil ? (
+        <Badge tone="danger" title={`Mėsa — karencija iki ${formatDate(meatUntil)}`}>
+          🥩 {meat} d. · iki {formatDate(meatUntil)}
+        </Badge>
+      ) : (
+        <Badge tone="success" title="Mėsai karencijos nėra">
+          🥩 karencijos nėra
+        </Badge>
+      )}
     </>
   );
 }

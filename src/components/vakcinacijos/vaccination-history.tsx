@@ -219,8 +219,9 @@ export function VaccinationHistory({
                       <td className="px-3 py-3 text-text-secondary">{formatDate(v.next_booster_date)}</td>
                       <td className="px-3 py-3">
                         <div className="flex flex-wrap gap-1">
-                          <Badge tone="warning">🥛 {formatDate(v.withdrawal_until_milk)}</Badge>
-                          <Badge tone="danger">🥩 {formatDate(v.withdrawal_until_meat)}</Badge>
+                          {v.withdrawal_until_milk && <Badge tone="warning">🥛 {formatDate(v.withdrawal_until_milk)}</Badge>}
+                          {v.withdrawal_until_meat && <Badge tone="danger">🥩 {formatDate(v.withdrawal_until_meat)}</Badge>}
+                          {!v.withdrawal_until_milk && !v.withdrawal_until_meat && <span className="text-text-muted">—</span>}
                         </div>
                       </td>
                       <td className="px-3 py-3 text-text-secondary">{v.vet_name ?? "—"}</td>

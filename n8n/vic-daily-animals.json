@@ -3,9 +3,9 @@
   "nodes": [
     { "name": "Kasdien 03:00", "type": "n8n-nodes-base.scheduleTrigger", "typeVersion": 1.2, "position": [0, 0],
       "parameters": { "rule": { "interval": [{ "field": "days", "triggerAtHour": 3 }] } } },
-    { "name": "VIC prisijungimas", "type": "n8n-nodes-base.httpRequest", "typeVersion": 4.2, "position": [240, 0],
+    { "name": "VIC veterinaro prisijungimas", "type": "n8n-nodes-base.httpRequest", "typeVersion": 4.2, "position": [240, 0],
       "notes": "Service role key. Gauna username, password, farm code.",
-      "parameters": { "url": "={{ $env.SUPABASE_URL }}/rest/v1/vic_credentials?is_active=eq.true&select=vic_username,vic_password,vic_farm_code&limit=1",
+      "parameters": { "url": "={{ $env.SUPABASE_URL }}/rest/v1/vic_credentials?kind=eq.veterinaras&is_active=eq.true&select=vic_username,vic_password,vic_farm_code&limit=1",
         "sendHeaders": true, "headerParameters": { "parameters": [
           { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
           { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}" } ] } } },
@@ -27,8 +27,8 @@
         "sendBody": true, "specifyBody": "json", "jsonBody": "={{ JSON.stringify({ p_error: $json.error?.message ?? 'VIC sinchronizacija nepavyko' }) }}" } }
   ],
   "connections": {
-    "Kasdien 03:00": { "main": [[{ "node": "VIC prisijungimas", "type": "main", "index": 0 }]] },
-    "VIC prisijungimas": { "main": [[{ "node": "Gauti gyvulius iš VIC", "type": "main", "index": 0 }]] },
+    "Kasdien 03:00": { "main": [[{ "node": "VIC veterinaro prisijungimas", "type": "main", "index": 0 }]] },
+    "VIC veterinaro prisijungimas": { "main": [[{ "node": "Gauti gyvulius iš VIC", "type": "main", "index": 0 }]] },
     "Gauti gyvulius iš VIC": { "main": [[{ "node": "upsert_animals_from_vic", "type": "main", "index": 0 }]] }
   }
 }

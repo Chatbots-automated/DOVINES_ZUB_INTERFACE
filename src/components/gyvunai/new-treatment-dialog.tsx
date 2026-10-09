@@ -12,7 +12,8 @@ import type { CreatedDisease } from "@/lib/actions/diseases";
 import { NewDiseaseDialog } from "@/components/gyvunai/new-disease-dialog";
 import { MedicineLine } from "@/components/gydymas/medicine-line";
 import { CoursePlanner, PlanSummaryPanel, EMPTY_COURSE_PLAN, type CoursePlan } from "@/components/gydymas/course-planner";
-import type { ProcedureType } from "@/lib/supabase/types";
+import type { ProcedureType, ProductCategory } from "@/lib/supabase/types";
+import { PROPHYLAXIS_CATEGORIES } from "@/lib/product-categories";
 import { ROUTE_OPTIONS, type WithdrawalFieldKey } from "@/lib/administration-routes";
 import { catalogFromProps, loadTreatmentCatalog } from "@/lib/treatments/catalog";
 import {
@@ -32,6 +33,8 @@ type Disease = { id: string; name: string };
 export type Product = { id: string; name: string; unit: string; withdrawal_days_milk: number | null; withdrawal_days_meat: number | null } & Partial<
   Record<WithdrawalFieldKey, number | null>
 >;
+/** Medicine pre-filled into the first step of the dialog (e.g. a sync protocol step's plan). */
+export type InitialMedication = { product_id: string; qty: number; route: string | null };
 export type AnimalOption = { id: string; tag_no: string; animal_no: string | null; group_name?: string | null };
 
 export function animalLabel(a: { tag_no: string; animal_no: string | null }) {
@@ -102,6 +105,8 @@ export function NewTreatmentDialog({
   submitLabel,
   onCreated,
   visitId,
+  initialMedications,
+  initialDiagnosis,
 }: {
   animalId?: string;
   animals?: AnimalOption[];
@@ -118,18 +123,23 @@ export function NewTreatmentDialog({
   onCreated?: () => void;
   /** Vizitai (0018): links the saved treatment to this visit (atomically, via create_treatment_for_visit). */
   visitId?: string;
+  /** Pre-fills the medicine lines (still editable) — used for planned sync protocol steps. */
+  initialMedications?: InitialMedication[];
+  initialDiagnosis?: string;
 }) {
+  const initialLines = (): MedLine[] =>
+    (initialMedications ?? []).map((m) => ({ key: crypto.randomUUID(), product_id: m.product_id, qty: String(m.qty), route: m.route ?? "" }));
   const [open, setOpen] = React.useState(false);
   const [state, formAction, pending] = useActionState<ActionResult | null, FormData>(createTreatment, null);
   const formRef = React.useRef<HTMLFormElement>(null);
 
   const [selectedAnimalId, setSelectedAnimalId] = React.useState<string | null>(animalId ?? null);
   const [diseaseId, setDiseaseId] = React.useState<string | null>(null);
-  const [diagnosisText, setDiagnosisText] = React.useState("");
+  const [diagnosisText, setDiagnosisText] = React.useState(initialDiagnosis ?? "");
   const [localDiseases, setLocalDiseases] = React.useState<Disease[]>(diseases);
   const [procedureType, setProcedureType] = React.useState<ProcedureType>(fixedProcedureType ?? "gydymas");
   const [regDate, setRegDate] = React.useState(todayIso);
-  const [medLines, setMedLines] = React.useState<MedLine[]>([]);
+  const [medLines, setMedLines] = React.useState<MedLine[]>(initialLines);
   const [plan, setPlan] = React.useState<CoursePlan>(EMPTY_COURSE_PLAN);
 
   // Products with live usable stock — loaded each time the dialog opens so
@@ -157,7 +167,13 @@ export function NewTreatmentDialog({
     };
   }, [open]);
   const catalogLoading = open && catalog === null && !catalogError;
-  const effectiveCatalog = React.useMemo(() => catalog ?? (catalogError ? catalogFromProps(products) : []), [catalog, catalogError, products]);
+  // Profilaktika may only use Profilaktika / Boliusai products (farm's request, 2026-10).
+  // A product without a known category (stock query failed) is left in.
+  const prophylaxisOnly = procedureType === "profilaktika";
+  const effectiveCatalog = React.useMemo(() => {
+    const all = catalog ?? (catalogError ? catalogFromProps(products) : []);
+    return prophylaxisOnly ? all.filter((p) => !p.category || PROPHYLAXIS_CATEGORIES.includes(p.category as ProductCategory)) : all;
+  }, [catalog, catalogError, products, prophylaxisOnly]);
   const productById = React.useMemo(() => new Map(effectiveCatalog.map((p) => [p.id, p])), [effectiveCatalog]);
 
   const [handledDiseases, setHandledDiseases] = React.useState(diseases);
@@ -193,10 +209,10 @@ export function NewTreatmentDialog({
   function resetOwnState() {
     setSelectedAnimalId(animalId ?? null);
     setDiseaseId(null);
-    setDiagnosisText("");
+    setDiagnosisText(initialDiagnosis ?? "");
     setProcedureType(fixedProcedureType ?? "gydymas");
     setRegDate(todayIso());
-    setMedLines([]);
+    setMedLines(initialLines());
     setPlan(EMPTY_COURSE_PLAN);
   }
 
@@ -236,6 +252,9 @@ export function NewTreatmentDialog({
   // ---- Blocking validation (stock shortfall for today is also refused by the DB) ----
   const problems: string[] = [];
   if (!selectedAnimalId) problems.push("Pasirinkite gyvūną.");
+  if (prophylaxisOnly && !catalogLoading && medLines.some((l) => l.product_id && !productById.has(l.product_id))) {
+    problems.push("Profilaktikai tinka tik Profilaktikos ir Boliusų kategorijos produktai.");
+  }
   if (medLines.some((l) => l.product_id && !(Number(l.qty) > 0))) problems.push("Nurodykite vaisto dozę (didesnę už 0).");
   if (medLines.some((l) => !l.product_id && Number(l.qty) > 0)) problems.push("Pasirinkite produktą eilutei su doze.");
   if (summary.totals.some((t) => t.nowShort)) problems.push("Šiandienos dozės viršija atsargas.");
@@ -359,7 +378,7 @@ export function NewTreatmentDialog({
             </section>
 
             <section>
-              <StepHeader n={3} icon={Pill} title="Suteikti vaistai" hint="Rodomi tik produktai su galiojančiomis atsargomis" />
+              <StepHeader n={3} icon={Pill} title="Suteikti vaistai" hint={prophylaxisOnly ? "Tik Profilaktikos ir Boliusų produktai su atsargomis" : "Rodomi tik produktai su galiojančiomis atsargomis"} />
               <div className="rounded-panel border border-border bg-surface-secondary p-4">
                 {medLines.length === 0 ? (
                   <p className="mb-3 text-[13px] text-text-muted">Vaistų nepridėta — gydymas bus įrašytas be vaisto sunaudojimo.</p>

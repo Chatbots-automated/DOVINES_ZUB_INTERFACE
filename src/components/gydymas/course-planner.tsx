@@ -282,8 +282,8 @@ export function PlanSummaryPanel({ summary, hasCourse }: { summary: PlanSummary;
         <span className="text-[12px] font-semibold text-text-secondary">
           {hasCourse ? `Paskutinė kurso diena: ${formatDate(summary.lastDate)} (${summary.doseDays} d.) · ` : ""}Karencija:
         </span>
-        <Badge tone="warning">🥛 pienas iki {formatDate(summary.milkUntil)}</Badge>
-        <Badge tone="danger">🥩 mėsa iki {formatDate(summary.meatUntil)}</Badge>
+        {summary.milkUntil ? <Badge tone="warning">🥛 pienas iki {formatDate(summary.milkUntil)}</Badge> : <Badge tone="success">🥛 pienui karencijos nėra</Badge>}
+        {summary.meatUntil ? <Badge tone="danger">🥩 mėsa iki {formatDate(summary.meatUntil)}</Badge> : <Badge tone="success">🥩 mėsai karencijos nėra</Badge>}
       </div>
     </div>
   );
