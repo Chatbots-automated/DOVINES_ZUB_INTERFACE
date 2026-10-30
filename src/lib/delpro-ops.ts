@@ -32,6 +32,11 @@ export const DELPRO_OPS = [
   "updateCatalogOutboundMode",
   "saveTreatmentTemplate",
   "deleteTreatmentTemplate",
+  // src/lib/actions/delpro-report.ts (0042, Excel reports)
+  "createReportUploadToken",
+  "revokeReportUploadToken",
+  "resolveReportReview",
+  "updateReportField",
 ] as const;
 
 export type DelproOp = (typeof DELPRO_OPS)[number];

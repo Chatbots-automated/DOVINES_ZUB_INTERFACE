@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import * as delpro from "@/lib/actions/delpro";
 import * as catalog from "@/lib/actions/delpro-catalog";
+import * as report from "@/lib/actions/delpro-report";
 import type { DelproActionResult } from "@/lib/actions/delpro";
 import { DELPRO_OPS, type DelproOp } from "@/lib/delpro-ops";
 
@@ -37,6 +38,10 @@ const HANDLERS: Record<DelproOp, Handler> = {
   updateCatalogOutboundMode: catalog.updateCatalogOutboundMode,
   saveTreatmentTemplate: catalog.saveTreatmentTemplate,
   deleteTreatmentTemplate: catalog.deleteTreatmentTemplate,
+  createReportUploadToken: report.createReportUploadToken,
+  revokeReportUploadToken: report.revokeReportUploadToken,
+  resolveReportReview: report.resolveReportReview,
+  updateReportField: report.updateReportField,
 };
 
 const fail = (error: string, status: number) => NextResponse.json({ ok: false, error } satisfies DelproActionResult, { status });

@@ -1,4 +1,5 @@
 import { redirect } from "next/navigation";
+import { headers } from "next/headers";
 import { Activity } from "lucide-react";
 import { createClient } from "@/lib/supabase/server";
 import { getCurrentProfile } from "@/lib/auth";
@@ -10,6 +11,7 @@ import { DelproSettingsForm } from "@/components/delpro/settings-form";
 import { DelproSyncQueue, type QueueJob } from "@/components/delpro/sync-queue";
 import { MappingRow } from "@/components/delpro/mapping-row";
 import { CatalogSyncSection } from "@/components/delpro/catalog-sync";
+import { ReportImportsSection } from "@/components/delpro/report-imports";
 import type { CatalogInboundMode, CatalogOutboundMode } from "@/lib/delpro-catalog";
 import { formatDateTime } from "@/lib/utils";
 import type { DelproOutboundMode } from "@/lib/supabase/types";
@@ -62,6 +64,20 @@ export default async function DelproPage() {
     supabase.from("animals").select("id", { count: "exact", head: true }).eq("active", true),
     supabase.from("animals").select("id", { count: "exact", head: true }).eq("active", true).not("animal_no", "is", null),
   ]);
+  // 0042: DelPro daily Excel reports
+  const [repImportsRes, repFailuresRes, repReviewsRes, repFieldsRes, repTokensRes, repAnimalsRes] = await Promise.all([
+    supabase.from("delpro_report_imports").select("*").order("received_at", { ascending: false }).limit(60),
+    supabase.from("delpro_report_failures").select("*").order("created_at", { ascending: false }).limit(30),
+    supabase.from("delpro_report_reviews").select("*").eq("status", "open").order("created_at", { ascending: false }).limit(200),
+    supabase.from("delpro_report_fields").select("*").order("sort_order").order("label"),
+    supabase.from("delpro_report_upload_tokens").select("*").order("created_at", { ascending: false }),
+    supabase.from("delpro_report_animal_state").select("animal_id", { count: "exact", head: true }),
+  ]);
+  const h = await headers();
+  const host = h.get("x-forwarded-host") ?? h.get("host") ?? "localhost:3000";
+  const proto = h.get("x-forwarded-proto") ?? (host.startsWith("localhost") ? "http" : "https");
+  const reportEndpoint = `${proto}://${host}/.netlify/functions/delpro-report-upload`;
+
   const catNames = { drugs: {} as Record<string, string>, treatments: {} as Record<string, string> };
   for (const n of catNamesRes.data ?? []) (n.object_type === "Drug" ? catNames.drugs : catNames.treatments)[n.delpro_key] = n.name ?? n.delpro_key;
   const catItems = catItemsRes.data ?? [];
@@ -137,6 +153,16 @@ export default async function DelproPage() {
           importPlan={importPlanRes.error ? null : (importPlanRes.data ?? null)}
           singleJob={settings.get("delpro_catalog_write_only_job") || null}
           animalStats={{ active: activeAnimalsRes.count ?? 0, withNumber: numberedAnimalsRes.count ?? 0 }}
+        />
+
+        <ReportImportsSection
+          imports={repImportsRes.data ?? []}
+          failures={repFailuresRes.data ?? []}
+          reviews={repReviewsRes.data ?? []}
+          fields={repFieldsRes.data ?? []}
+          tokens={repTokensRes.data ?? []}
+          endpointUrl={reportEndpoint}
+          animalsWithReport={repAnimalsRes.count ?? 0}
         />
 
         <CollapsibleSection defaultOpen={false} title="Nustatymai">

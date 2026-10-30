@@ -13,6 +13,7 @@ import {
   Dna,
   Droplets,
   ExternalLink,
+  FileSpreadsheet,
   Footprints,
   Gauge,
   HeartPulse,
@@ -46,6 +47,7 @@ import { NewVisitDialog } from "@/components/vizitai/new-visit-dialog";
 import { ApplySyncProtocolDialog } from "@/components/sinchronizacijos/apply-protocol-dialog";
 import { NewInseminationDialog } from "@/components/seklinimas/new-insemination-dialog";
 import { NewHoofExamDialog } from "@/components/nagos/new-hoof-exam-dialog";
+import { DelproReportSummary, DelproReportTab, useDelproReport, type DelproReportData } from "@/components/gyvunai/delpro-report-section";
 import {
   Chip,
   InfoRow,
@@ -87,6 +89,9 @@ import { TREATMENT_TYPE_LABELS, VISIT_PROCEDURE_LABELS, VISIT_STATUS_LABELS, VIS
 import type { ProcedureType, VisitProcedure, VisitStatus } from "@/lib/supabase/types";
 
 type Variant = "drawer" | "page";
+
+// delpro_report = created from a DelPro Excel report (0042) because GVET didn't know the ORN yet
+const SOURCE_LABEL: Record<string, string> = { delpro: "DelPro", vic: "VIC", delpro_report: "DelPro ataskaita", manual: "Rankinis" };
 
 function animalTitle(a: AnimalRow) {
   return a.animal_no ? `Nr. ${a.animal_no}` : a.tag_no;
@@ -204,7 +209,7 @@ function Hero({ animal, variant }: { animal: AnimalRow; variant: Variant }) {
           </span>
         )}
         <span className={heroChip}>
-          <Database className="size-3" /> {animal.source === "delpro" ? "DelPro" : animal.source === "vic" ? "VIC" : "Rankinis"}
+          <Database className="size-3" /> {SOURCE_LABEL[animal.source] ?? "Rankinis"}
         </span>
       </div>
     </div>
@@ -347,7 +352,7 @@ function NotesForm({ animal, canWrite }: { animal: AnimalRow; canWrite: boolean 
   );
 }
 
-function OverviewTab({ animal, canWrite }: { animal: AnimalRow; canWrite: boolean }) {
+function OverviewTab({ animal, canWrite, report }: { animal: AnimalRow; canWrite: boolean; report: { data: DelproReportData; loading: boolean } }) {
   const age = ageFromBirth(animal.birth_date);
   const toCalving = daysUntil(animal.expected_calving_date);
   return (
@@ -379,6 +384,8 @@ function OverviewTab({ animal, canWrite }: { animal: AnimalRow; canWrite: boolea
         />
       </div>
 
+      <DelproReportSummary data={report.data} loading={report.loading} />
+
       <DelproCard animal={animal} />
 
       <SectionCard title="Pagrindinė informacija" icon={Info} tone="accent">
@@ -393,7 +400,7 @@ function OverviewTab({ animal, canWrite }: { animal: AnimalRow; canWrite: boolea
           <InfoRow label="Grupė">{animal.group_name}</InfoRow>
           <InfoRow label="Laktacijos Nr.">{animal.lactation_no}</InfoRow>
           <InfoRow label="Šaltinis">
-            <Badge tone={animal.source === "delpro" ? "info" : "neutral"}>{animal.source === "delpro" ? "DelPro" : animal.source === "vic" ? "VIC" : "Rankinis"}</Badge>
+            <Badge tone={animal.source === "delpro" || animal.source === "delpro_report" ? "info" : "neutral"}>{SOURCE_LABEL[animal.source] ?? "Rankinis"}</Badge>
           </InfoRow>
           <InfoRow label="DelPro ID">{animal.delpro_animal_id}</InfoRow>
           <InfoRow label="Būsena">
@@ -755,6 +762,7 @@ export function AnimalProfile({
   active?: boolean;
 }) {
   const { history, inseminations, loading, refetch } = useAnimalHistory(animal.id, active);
+  const report = useDelproReport(animal.id, active);
   const { canWrite, currentVetName } = lookups;
   const animalOption = { id: animal.id, tag_no: animal.tag_no, animal_no: animal.animal_no, group_name: animal.group_name };
   const lastTreatment = history.treatments[0]?.reg_date ?? null;
@@ -876,6 +884,9 @@ export function AnimalProfile({
           <TabsTrigger value="withdrawal">
             <TabLabel icon={ShieldAlert} label="Karencija" tone="danger" />
           </TabsTrigger>
+          <TabsTrigger value="delpro-report">
+            <TabLabel icon={FileSpreadsheet} label="DelPro ataskaita" tone="info" count={report.loading ? undefined : report.data.rows.length} />
+          </TabsTrigger>
           <TabsTrigger value="treatments">
             <TabLabel icon={Stethoscope} label="Gydymai" tone="danger" count={count(history.treatments.length)} />
           </TabsTrigger>
@@ -896,10 +907,13 @@ export function AnimalProfile({
           </TabsTrigger>
         </TabsList>
         <TabsContent value="overview">
-          <OverviewTab animal={animal} canWrite={canWrite} />
+          <OverviewTab animal={animal} canWrite={canWrite} report={report} />
         </TabsContent>
         <TabsContent value="withdrawal">
           <WithdrawalTab history={history} loading={loading} />
+        </TabsContent>
+        <TabsContent value="delpro-report">
+          <DelproReportTab data={report.data} loading={report.loading} />
         </TabsContent>
         <TabsContent value="treatments">
           <TreatmentsTab history={history} loading={loading} />

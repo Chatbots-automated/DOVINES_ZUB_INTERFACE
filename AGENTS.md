@@ -211,6 +211,19 @@ not look for Žibartoniai's 0013–0021 VIC/UNIFORM history here.
   Switching the channel is a farm decision — no UI toggle on purpose. `animals.delpro_object_guid` (Gateway
   `Animal.ObjectGuid`, matched on the active herd number; ambiguous numbers skipped) is groundwork for the Gateway treatment write.
   `delpro_mappings` (0034 name overrides for the UI script) is separate and unchanged.
+- **DelPro daily Excel reports** (0042, farm's request): the farm PC's own uploader posts each XLSX from
+  `C:\GVET\Ataskaitos\Dienine` to the Netlify function `netlify/functions/delpro-report-upload.mjs` (Bearer = per-farm upload
+  token from `delpro_report_create_token`, only its SHA-256 stored; farm derived from the token, other farms' tokens refused).
+  `netlify/lib/delpro-report.mjs` reads the XLSX itself (ZIP + XML; no spreadsheet library), finds the header row by the ORN column on
+  any sheet, types every cell (Excel serials / text dates; timestamps are Europe/Vilnius wall clock converted in SQL; ORN always
+  text) and skips total rows. `delpro_report_ingest(jsonb)` = ONE transaction, idempotent on (farm, SHA-256): header → field via
+  `delpro_report_fields.aliases`, unknown headers become new fields (`x_<slug>`) — **no migration / code for new columns**; values
+  in JSONB. Per animal `delpro_report_animal_state.fields` is latest-wins **per field** by report time (late older files only add
+  history); a present-but-empty cell clears, a missing column keeps the value with its older report time (shown as historical).
+  Matching = exact `fn_orn_normalize(tag_no)`, never DelPro's short Number; unknown ORN → provisional animal
+  `source='delpro_report'`; several matches / birth-date conflict / repeated differing ORN rows → `delpro_report_reviews`.
+  Observational only: never creates treatments, karencija or DelPro jobs; absent animals are never deactivated.
+  Tests: `npm run test:reports` (parser + the function end to end on PGlite).
 - **DelPro write path** — preferred order: DelPro's own import function → UI automation → direct SQL insert into DelPro's
   database. Direct SQL bypasses DelPro's own logic and may affect DeLaval support: only with the farm's written OK.
   All DelPro-specific SQL lives in `delpro-worker/queries/*.sql`; files marked `TODO(discovery)` are placeholders and

@@ -30,4 +30,12 @@
 #   NEXT_PUBLIC_SUPABASE_URL
 #   NEXT_PUBLIC_SUPABASE_ANON_KEY
 #   SUPABASE_SERVICE_ROLE_KEY   (server-only — used by createAdminClient()
-#                                 for "Naujas vartotojas"; never expose to the client)
+#                                 for "Naujas vartotojas" and by the delpro-report-upload
+#                                 function; never expose to the client)
+
+# DelPro daily Excel reports from the farm PC (0042):
+#   POST /.netlify/functions/delpro-report-upload   (netlify/functions/, Netlify's default directory)
+# Uses SUPABASE_SERVICE_ROLE_KEY + SUPABASE_URL (falls back to NEXT_PUBLIC_SUPABASE_URL).
+# The farm authenticates with its own upload token (GVET → Veterinarija → DelPro), never the service key.
+[functions."delpro-report-upload"]
+  node_bundler = "esbuild"

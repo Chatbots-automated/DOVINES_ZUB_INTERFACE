@@ -100,7 +100,7 @@ export interface Database {
           group_name: string | null;
           lactation_no: number | null;
           active: boolean;
-          source: "manual" | "delpro" | "vic";
+          source: "manual" | "delpro" | "vic" | "delpro_report";
           updated_from_delpro_at: string | null;
           updated_from_vic_at: string | null;
           // DairyPlan-style fields fed by DelPro (0020_animal_delpro_fields.sql)
@@ -694,6 +694,49 @@ export interface Database {
         Update: Updatable<TreatmentTemplateItemRow>;
         Relationships: [];
       };
+      // 0042 — DelPro daily Excel reports (read-only for the app; written by delpro_report_ingest)
+      delpro_report_upload_tokens: {
+        Row: Row<DelproReportTokenRow>;
+        Insert: Insertable<DelproReportTokenRow, never>;
+        Update: Updatable<DelproReportTokenRow>;
+        Relationships: [];
+      };
+      delpro_report_imports: {
+        Row: Row<DelproReportImportRow>;
+        Insert: Insertable<DelproReportImportRow, never>;
+        Update: Updatable<DelproReportImportRow>;
+        Relationships: [];
+      };
+      delpro_report_rows: {
+        Row: Row<DelproReportRowRow>;
+        Insert: Insertable<DelproReportRowRow, never>;
+        Update: Updatable<DelproReportRowRow>;
+        Relationships: [];
+      };
+      delpro_report_animal_state: {
+        Row: Row<DelproReportAnimalStateRow>;
+        Insert: Insertable<DelproReportAnimalStateRow, never>;
+        Update: Updatable<DelproReportAnimalStateRow>;
+        Relationships: [];
+      };
+      delpro_report_fields: {
+        Row: Row<DelproReportFieldRow>;
+        Insert: Insertable<DelproReportFieldRow, never>;
+        Update: Updatable<DelproReportFieldRow>;
+        Relationships: [];
+      };
+      delpro_report_reviews: {
+        Row: Row<DelproReportReviewRow>;
+        Insert: Insertable<DelproReportReviewRow, never>;
+        Update: Updatable<DelproReportReviewRow>;
+        Relationships: [];
+      };
+      delpro_report_failures: {
+        Row: Row<DelproReportFailureRow>;
+        Insert: Insertable<DelproReportFailureRow, never>;
+        Update: Updatable<DelproReportFailureRow>;
+        Relationships: [];
+      };
       delpro_catalog_issues: {
         Row: Row<DelproCatalogIssueRow>;
         Insert: Insertable<DelproCatalogIssueRow, "issue_type" | "object_type" | "fingerprint">;
@@ -1238,6 +1281,14 @@ export interface Database {
       };
       delpro_catalog_create_pilot_drug: { Args: Record<string, never>; Returns: DelproCatalogActionResult & { job_id: string; product_id: string } };
       delpro_catalog_release_single_job: { Args: { p_job_id: string }; Returns: DelproCatalogActionResult };
+      // 0042 — DelPro Excel report admin
+      delpro_report_create_token: { Args: { p_label: string }; Returns: DelproCatalogActionResult & { id: string; token: string } };
+      delpro_report_revoke_token: { Args: { p_id: string }; Returns: DelproCatalogActionResult };
+      delpro_report_resolve_review: { Args: { p_id: string; p_status: "resolved" | "dismissed" }; Returns: DelproCatalogActionResult };
+      delpro_report_update_field: {
+        Args: { p_key: string; p_label: string | null; p_visible: boolean | null; p_sort_order: number | null };
+        Returns: DelproCatalogActionResult;
+      };
       delpro_catalog_import: {
         Args: { p_object_type: "Diagnosis" | "Drug" | "Treatment"; p_delpro_keys: string[] };
         Returns: DelproCatalogActionResult & { created: number; skipped: { key: string; name: string | null; reason: string }[] };
@@ -1416,6 +1467,124 @@ export type DelproCatalogIssueType =
 export type DelproCatalogIssueAction = "confirm" | "take_delpro" | "keep_gvet" | "send" | "unlink" | "reviewed" | "dismiss";
 
 export type DelproCatalogActionResult = { ok: boolean; message: string };
+
+/** 0042: one stored report value. `local` = the Vilnius wall-clock text a timestamp was written as. */
+export type DelproReportValue = {
+  value: string | number | boolean | null;
+  type: "text" | "number" | "date" | "timestamp" | "boolean" | "empty";
+  local?: string;
+  raw: string | null;
+  header: string;
+  /** current state only: which report the value came from */
+  report_at?: string;
+  import_id?: string;
+  row_id?: string;
+};
+
+type DelproReportTokenRow = {
+  id: string;
+  farm_id: string;
+  label: string;
+  token_hash: string;
+  token_hint: string;
+  created_by: string | null;
+  created_at: string;
+  last_used_at: string | null;
+  revoked_at: string | null;
+  revoked_by: string | null;
+};
+
+type DelproReportImportRow = {
+  id: string;
+  farm_id: string;
+  token_id: string | null;
+  report_type: string;
+  filename: string;
+  sha256: string;
+  size_bytes: number | null;
+  report_at: string;
+  report_at_source: "filename" | "workbook" | "received";
+  report_at_local: string | null;
+  sheets: { name: string; header_row: number; rows: number }[];
+  columns: { header: string; key: string; known: boolean; data_type: string }[];
+  rows_received: number;
+  rows_imported: number;
+  footer_rows: number;
+  matched: number;
+  created: number;
+  updated: number;
+  stale: number;
+  conflicts: number;
+  errors: { sheet?: string; row?: number; error: string }[];
+  supersedes_import_id: string | null;
+  received_at: string;
+};
+
+type DelproReportRowRow = {
+  id: string;
+  import_id: string;
+  farm_id: string;
+  animal_id: string | null;
+  orn: string;
+  sheet_name: string | null;
+  row_number: number;
+  report_at: string;
+  fields: Record<string, DelproReportValue>;
+  raw: Record<string, string | null>;
+  outcome: "created" | "updated" | "unchanged" | "stale" | "conflict" | "duplicate" | "invalid";
+};
+
+type DelproReportAnimalStateRow = {
+  animal_id: string;
+  farm_id: string;
+  orn: string;
+  latest_report_at: string;
+  latest_import_id: string | null;
+  latest_row_id: string | null;
+  fields: Record<string, DelproReportValue>;
+  updated_at: string;
+};
+
+type DelproReportFieldRow = {
+  key: string;
+  label: string;
+  aliases: string[];
+  headers_seen: string[];
+  data_type: "text" | "number" | "date" | "timestamp" | "boolean" | "orn";
+  known: boolean;
+  visible: boolean;
+  sort_order: number;
+  first_seen_at: string | null;
+  last_seen_at: string | null;
+  last_import_id: string | null;
+  seen_count: number;
+};
+
+type DelproReportReviewRow = {
+  id: string;
+  farm_id: string;
+  import_id: string | null;
+  row_id: string | null;
+  animal_id: string | null;
+  orn: string | null;
+  kind: "ambiguous_animal" | "birth_date_conflict" | "duplicate_orn_row" | "invalid_orn";
+  details: Record<string, unknown>;
+  status: "open" | "resolved" | "dismissed";
+  resolved_by: string | null;
+  resolved_at: string | null;
+  created_at: string;
+};
+
+type DelproReportFailureRow = {
+  id: string;
+  farm_id: string;
+  token_id: string | null;
+  filename: string | null;
+  sha256: string | null;
+  stage: string;
+  error: string;
+  created_at: string;
+};
 
 /** 0039 import plan: one decision per unlinked DelPro diagnosis / drug. */
 export type DelproImportAction = "create" | "link" | "review" | "blocked" | "linked";
