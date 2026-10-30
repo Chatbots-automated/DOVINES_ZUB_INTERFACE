@@ -47,7 +47,7 @@ import { NewVisitDialog } from "@/components/vizitai/new-visit-dialog";
 import { ApplySyncProtocolDialog } from "@/components/sinchronizacijos/apply-protocol-dialog";
 import { NewInseminationDialog } from "@/components/seklinimas/new-insemination-dialog";
 import { NewHoofExamDialog } from "@/components/nagos/new-hoof-exam-dialog";
-import { DelproReportSummary, DelproReportTab, useDelproReport, type DelproReportData } from "@/components/gyvunai/delpro-report-section";
+import { DelproReportBody, DelproReportTab, useDelproReport, type DelproReportData } from "@/components/gyvunai/delpro-report-section";
 import {
   Chip,
   InfoRow,
@@ -220,8 +220,12 @@ function Hero({ animal, variant }: { animal: AnimalRow; variant: Variant }) {
 // Overview tab
 // ---------------------------------------------------------------------------
 
-function DelproCard({ animal }: { animal: AnimalRow }) {
+// One DelPro section: the daily report (0042, dynamic columns) on top, the herd-sync
+// fields (0020: calving, lactation, insemination, milk) below — each only when DelPro has it.
+function DelproCard({ animal, report }: { animal: AnimalRow; report: { data: DelproReportData; loading: boolean } }) {
   const has = hasDelproFields(animal);
+  const reportState = report.data.state;
+  const updated = [reportState?.updated_at, animal.updated_from_delpro_at].filter((x): x is string => !!x).sort().at(-1) ?? null;
   const toCalving = daysUntil(animal.expected_calving_date);
   const pregDays =
     animal.pregnancy_days ?? (animal.is_pregnant && toCalving !== null ? Math.max(GESTATION_DAYS - toCalving, 0) : null);
@@ -229,100 +233,110 @@ function DelproCard({ animal }: { animal: AnimalRow }) {
 
   return (
     <SectionCard
-      title="DelPro kortelė"
+      title="DelPro"
       icon={Database}
       tone="info"
-      aside={animal.updated_from_delpro_at ? `atnaujinta ${syncRelativeLabel(animal.updated_from_delpro_at)}` : undefined}
+      aside={updated ? `atnaujinta ${syncRelativeLabel(updated)}` : undefined}
     >
-      {!has ? (
-        <EmptyState
-          icon={Database}
-          title="Duomenų iš DelPro dar nėra"
-          description="Veršiavimosi, laktacijos, sėklinimo ir pieno laukai atsiras po kitos DelPro sinchronizacijos."
-          className="py-6"
-        />
+      {!has && !reportState ? (
+        report.loading ? (
+          <p className="py-4 text-center text-[12px] text-text-muted">Kraunama…</p>
+        ) : (
+          <EmptyState
+            icon={Database}
+            title="Duomenų iš DelPro dar nėra"
+            description="Atsiras po dieninės DelPro ataskaitos arba DelPro bandos sinchronizacijos."
+            className="py-6"
+          />
+        )
       ) : (
         <div className="space-y-4">
-          <div className="flex flex-wrap items-center gap-1.5">
-            {animal.reproduction_status && (
-              <Chip tone="alt" icon={Dna}>
-                {animal.reproduction_status}
-              </Chip>
-            )}
-            {animal.produces_milk !== null && (
-              <Chip tone={animal.produces_milk ? "success" : "neutral"} icon={Milk}>
-                {animal.produces_milk ? "Gamina pieną" : "Nemelžiama"}
-              </Chip>
-            )}
-            {animal.is_pregnant !== null && (
-              <Chip tone={animal.is_pregnant ? "alt" : "neutral"} icon={Baby}>
-                {animal.is_pregnant ? "Veršinga" : "Neveršinga"}
-              </Chip>
-            )}
-            {animal.health_alert && (
-              <Chip tone="danger" icon={ShieldAlert}>
-                {animal.health_alert}
-              </Chip>
-            )}
-          </div>
-
-          {animal.is_pregnant && (
-            <div className="rounded-control border border-accent-alt-border bg-accent-alt-soft p-3">
-              <div className="mb-1.5 flex items-baseline justify-between">
-                <p className="text-[12px] font-semibold text-accent-alt">Veršingumas</p>
-                <p className="text-[12px] text-accent-alt">
-                  {pregDays !== null ? `${pregDays} / ${GESTATION_DAYS} d.` : ""}
-                  {toCalving !== null && toCalving >= 0 ? ` · liko ${toCalving} d.` : ""}
-                </p>
+          {reportState && <DelproReportBody data={report.data} />}
+          {reportState && has && <div className="border-t border-border" />}
+          {has && (
+            <div className="space-y-4">
+              <div className="flex flex-wrap items-center gap-1.5">
+                {animal.reproduction_status && (
+                  <Chip tone="alt" icon={Dna}>
+                    {animal.reproduction_status}
+                  </Chip>
+                )}
+                {animal.produces_milk !== null && (
+                  <Chip tone={animal.produces_milk ? "success" : "neutral"} icon={Milk}>
+                    {animal.produces_milk ? "Gamina pieną" : "Nemelžiama"}
+                  </Chip>
+                )}
+                {animal.is_pregnant !== null && (
+                  <Chip tone={animal.is_pregnant ? "alt" : "neutral"} icon={Baby}>
+                    {animal.is_pregnant ? "Veršinga" : "Neveršinga"}
+                  </Chip>
+                )}
+                {animal.health_alert && (
+                  <Chip tone="danger" icon={ShieldAlert}>
+                    {animal.health_alert}
+                  </Chip>
+                )}
               </div>
-              <ProgressBar value={pregDays ?? 0} max={GESTATION_DAYS} tone="alt" label="Veršingumo eiga" />
-              <p className="mt-1.5 text-[12px] text-text-secondary">Numatomas apsiveršiavimas: {formatDate(animal.expected_calving_date)}</p>
-            </div>
-          )}
 
-          <div className="grid gap-4 sm:grid-cols-2">
-            <div>
-              <p className="mb-1 flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wide text-accent-alt">
-                <Dna className="size-3.5" /> Reprodukcija
-              </p>
-              <dl>
-                <InfoRow label="Paskutinis apsiveršiavimas">
-                  {animal.last_calving_date ? `${formatDate(animal.last_calving_date)} (${daysAgoLabel(animal.last_calving_date)})` : null}
-                </InfoRow>
-                <InfoRow label="Paskutinis sėklinimas">
-                  {animal.last_insemination_date ? `${formatDate(animal.last_insemination_date)} (${daysAgoLabel(animal.last_insemination_date)})` : null}
-                </InfoRow>
-                <InfoRow label="Sėklinimų skaičius">{animal.insemination_count}</InfoRow>
-                <InfoRow label="Buliai">{animal.last_bulls}</InfoRow>
-                <InfoRow label="Numatomas veršiavimasis">{animal.expected_calving_date ? formatDate(animal.expected_calving_date) : null}</InfoRow>
-                <InfoRow label="Užtrūkimas">
-                  {animal.dry_off_date ? `${formatDate(animal.dry_off_date)}${toDry !== null && toDry >= 0 ? ` (po ${toDry} d.)` : ""}` : null}
-                </InfoRow>
-              </dl>
-            </div>
-            <div>
-              <p className="mb-1 flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wide text-success">
-                <Milk className="size-3.5" /> Pienas ir kilmė
-              </p>
-              <dl>
-                <InfoRow label="Laktacijos dienos">{animal.days_in_milk !== null ? `${animal.days_in_milk} d.` : null}</InfoRow>
-                <InfoRow label="Pieno vidurkis">{animal.milk_yield_kg !== null ? `${animal.milk_yield_kg} kg/d.` : null}</InfoRow>
-                <InfoRow label="Paskutinis melžimas">
-                  {animal.last_milking_at ? `${formatDateTime(animal.last_milking_at)}${animal.last_milking_kg !== null ? ` · ${animal.last_milking_kg} kg` : ""}` : null}
-                </InfoRow>
-                <InfoRow label="Veislinė vertė">{animal.genetic_worth}</InfoRow>
-                <InfoRow label="Kraujo linija">{animal.blood_line}</InfoRow>
-                <InfoRow label="Grupėje nuo">{animal.group_since ? formatDate(animal.group_since) : null}</InfoRow>
-              </dl>
-            </div>
-          </div>
+              {animal.is_pregnant && (
+                <div className="rounded-control border border-accent-alt-border bg-accent-alt-soft p-3">
+                  <div className="mb-1.5 flex items-baseline justify-between">
+                    <p className="text-[12px] font-semibold text-accent-alt">Veršingumas</p>
+                    <p className="text-[12px] text-accent-alt">
+                      {pregDays !== null ? `${pregDays} / ${GESTATION_DAYS} d.` : ""}
+                      {toCalving !== null && toCalving >= 0 ? ` · liko ${toCalving} d.` : ""}
+                    </p>
+                  </div>
+                  <ProgressBar value={pregDays ?? 0} max={GESTATION_DAYS} tone="alt" label="Veršingumo eiga" />
+                  <p className="mt-1.5 text-[12px] text-text-secondary">Numatomas apsiveršiavimas: {formatDate(animal.expected_calving_date)}</p>
+                </div>
+              )}
 
-          {animal.missing_teats !== null && (
-            <div>
-              <p className="mb-1.5 flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wide text-info">
-                <Droplets className="size-3.5" /> Speniai
-              </p>
-              <TeatGrid missing={animal.missing_teats} />
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div>
+                  <p className="mb-1 flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wide text-accent-alt">
+                    <Dna className="size-3.5" /> Reprodukcija
+                  </p>
+                  <dl>
+                    <InfoRow label="Paskutinis apsiveršiavimas">
+                      {animal.last_calving_date ? `${formatDate(animal.last_calving_date)} (${daysAgoLabel(animal.last_calving_date)})` : null}
+                    </InfoRow>
+                    <InfoRow label="Paskutinis sėklinimas">
+                      {animal.last_insemination_date ? `${formatDate(animal.last_insemination_date)} (${daysAgoLabel(animal.last_insemination_date)})` : null}
+                    </InfoRow>
+                    <InfoRow label="Sėklinimų skaičius">{animal.insemination_count}</InfoRow>
+                    <InfoRow label="Buliai">{animal.last_bulls}</InfoRow>
+                    <InfoRow label="Numatomas veršiavimasis">{animal.expected_calving_date ? formatDate(animal.expected_calving_date) : null}</InfoRow>
+                    <InfoRow label="Užtrūkimas">
+                      {animal.dry_off_date ? `${formatDate(animal.dry_off_date)}${toDry !== null && toDry >= 0 ? ` (po ${toDry} d.)` : ""}` : null}
+                    </InfoRow>
+                  </dl>
+                </div>
+                <div>
+                  <p className="mb-1 flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wide text-success">
+                    <Milk className="size-3.5" /> Pienas ir kilmė
+                  </p>
+                  <dl>
+                    <InfoRow label="Laktacijos dienos">{animal.days_in_milk !== null ? `${animal.days_in_milk} d.` : null}</InfoRow>
+                    <InfoRow label="Pieno vidurkis">{animal.milk_yield_kg !== null ? `${animal.milk_yield_kg} kg/d.` : null}</InfoRow>
+                    <InfoRow label="Paskutinis melžimas">
+                      {animal.last_milking_at ? `${formatDateTime(animal.last_milking_at)}${animal.last_milking_kg !== null ? ` · ${animal.last_milking_kg} kg` : ""}` : null}
+                    </InfoRow>
+                    <InfoRow label="Veislinė vertė">{animal.genetic_worth}</InfoRow>
+                    <InfoRow label="Kraujo linija">{animal.blood_line}</InfoRow>
+                    <InfoRow label="Grupėje nuo">{animal.group_since ? formatDate(animal.group_since) : null}</InfoRow>
+                  </dl>
+                </div>
+              </div>
+
+              {animal.missing_teats !== null && (
+                <div>
+                  <p className="mb-1.5 flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wide text-info">
+                    <Droplets className="size-3.5" /> Speniai
+                  </p>
+                  <TeatGrid missing={animal.missing_teats} />
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -384,9 +398,7 @@ function OverviewTab({ animal, canWrite, report }: { animal: AnimalRow; canWrite
         />
       </div>
 
-      <DelproReportSummary data={report.data} loading={report.loading} />
-
-      <DelproCard animal={animal} />
+      <DelproCard animal={animal} report={report} />
 
       <SectionCard title="Pagrindinė informacija" icon={Info} tone="accent">
         <dl className="grid gap-x-6 sm:grid-cols-2">

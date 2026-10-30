@@ -106,44 +106,83 @@ function Deadline({ kind, value, current }: { kind: "milk" | "meat"; value: Delp
   );
 }
 
-/** Overview card: the newest report at a glance. */
+/** Keys the report body lays out itself; every other current, visible column is listed after them. */
+const BODY_KEYS = new Set(["orn", "latest_diagnosis", "health_event_date", "latest_medicines", "milk_withdrawal_until", "meat_withdrawal_until", "latest_comment"]);
+
+/**
+ * The newest report, fully dynamic: diagnosis / medicines / deadlines / comment get
+ * their own layout when the report has those columns; every other current column
+ * (including ones DelPro adds later) is listed from the field registry.
+ */
+export function DelproReportBody({ data }: { data: DelproReportData }) {
+  const s = data.state;
+  if (!s) return null;
+  const f = s.fields;
+  const has = (k: string) => k in f && isCurrent(f[k], s);
+  const val = (k: string) => (has(k) ? formatReportValue(f[k]) : null);
+  const registry = new Map(data.fields.map((x) => [x.key, x]));
+  const extra = Object.keys(f)
+    .filter((k) => !BODY_KEYS.has(k) && has(k) && registry.get(k)?.visible !== false)
+    .sort((a, b) => (registry.get(a)?.sort_order ?? 9999) - (registry.get(b)?.sort_order ?? 9999) || a.localeCompare(b));
+  const label = (k: string) => registry.get(k)?.label ?? f[k]?.header ?? k;
+
+  return (
+    <div className="space-y-3">
+      {(has("latest_diagnosis") || has("latest_medicines")) && (
+        <div className="grid gap-2 sm:grid-cols-2">
+          {has("latest_diagnosis") && (
+            <div className="flex items-start gap-2">
+              <Stethoscope className="mt-0.5 size-4 shrink-0 text-danger" />
+              <div>
+                <p className="text-[11px] font-semibold text-text-secondary">{label("latest_diagnosis")}</p>
+                <p className="text-[14px] font-semibold text-text-primary">{val("latest_diagnosis") ?? "—"}</p>
+                {val("health_event_date") && <p className="text-[11px] text-text-muted">įvykis {val("health_event_date")}</p>}
+              </div>
+            </div>
+          )}
+          {has("latest_medicines") && (
+            <div className="flex items-start gap-2">
+              <Pill className="mt-0.5 size-4 shrink-0 text-accent-alt" />
+              <div>
+                <p className="text-[11px] font-semibold text-text-secondary">{label("latest_medicines")}</p>
+                <p className="text-[14px] font-semibold text-text-primary">{val("latest_medicines") ?? "—"}</p>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+      {("milk_withdrawal_until" in f || "meat_withdrawal_until" in f) && (
+        <div className="grid gap-2 sm:grid-cols-2">
+          {"milk_withdrawal_until" in f && <Deadline kind="milk" value={f.milk_withdrawal_until} current={has("milk_withdrawal_until")} />}
+          {"meat_withdrawal_until" in f && <Deadline kind="meat" value={f.meat_withdrawal_until} current={has("meat_withdrawal_until")} />}
+        </div>
+      )}
+      {val("latest_comment") && (
+        <p className="flex items-start gap-1.5 text-[12px] text-text-secondary">
+          <MessageSquare className="mt-0.5 size-3.5 shrink-0" /> {val("latest_comment")}
+        </p>
+      )}
+      {extra.length > 0 && (
+        <dl className="grid gap-x-6 sm:grid-cols-2">
+          {extra.map((k) => (
+            <InfoRow key={k} label={label(k)}>
+              {formatReportValue(f[k])}
+            </InfoRow>
+          ))}
+        </dl>
+      )}
+      <SourceLine data={data} />
+    </div>
+  );
+}
+
+/** The report as its own card (DelPro ataskaita tab). */
 export function DelproReportSummary({ data, loading }: { data: DelproReportData; loading: boolean }) {
   const s = data.state;
   if (loading || !s) return null;
-  const f = s.fields;
-  const cur = (k: string) => isCurrent(f[k], s);
-  const val = (k: string) => (cur(k) ? formatReportValue(f[k]) : null);
   return (
-    <SectionCard title="DelPro ataskaita" icon={FileSpreadsheet} tone="info" aside={`ataskaita ${formatDateTime(s.latest_report_at)}`}>
-      <div className="space-y-3">
-        <div className="grid gap-2 sm:grid-cols-2">
-          <div className="flex items-start gap-2">
-            <Stethoscope className="mt-0.5 size-4 shrink-0 text-danger" />
-            <div>
-              <p className="text-[11px] font-semibold text-text-secondary">Naujausia diagnozė</p>
-              <p className="text-[14px] font-semibold text-text-primary">{val("latest_diagnosis") ?? "—"}</p>
-              {val("health_event_date") && <p className="text-[11px] text-text-muted">įvykis {val("health_event_date")}</p>}
-            </div>
-          </div>
-          <div className="flex items-start gap-2">
-            <Pill className="mt-0.5 size-4 shrink-0 text-accent-alt" />
-            <div>
-              <p className="text-[11px] font-semibold text-text-secondary">Vaistai ir dozės (kaip DelPro ataskaitoje)</p>
-              <p className="text-[14px] font-semibold text-text-primary">{val("latest_medicines") ?? "—"}</p>
-            </div>
-          </div>
-        </div>
-        <div className="grid gap-2 sm:grid-cols-2">
-          <Deadline kind="milk" value={f.milk_withdrawal_until} current={cur("milk_withdrawal_until")} />
-          <Deadline kind="meat" value={f.meat_withdrawal_until} current={cur("meat_withdrawal_until")} />
-        </div>
-        {val("latest_comment") && (
-          <p className="flex items-start gap-1.5 text-[12px] text-text-secondary">
-            <MessageSquare className="mt-0.5 size-3.5 shrink-0" /> {val("latest_comment")}
-          </p>
-        )}
-        <SourceLine data={data} />
-      </div>
+    <SectionCard title="Naujausia DelPro ataskaita" icon={FileSpreadsheet} tone="info" aside={`ataskaita ${formatDateTime(s.latest_report_at)}`}>
+      <DelproReportBody data={data} />
     </SectionCard>
   );
 }
