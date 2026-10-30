@@ -76,7 +76,11 @@ export default async function DelproPage() {
   const h = await headers();
   const host = h.get("x-forwarded-host") ?? h.get("host") ?? "localhost:3000";
   const proto = h.get("x-forwarded-proto") ?? (host.startsWith("localhost") ? "http" : "https");
-  const reportEndpoint = `${proto}://${host}/.netlify/functions/delpro-report-upload`;
+  // Netlify sets URL (the site's primary address) at runtime; locally there is no Netlify function.
+  const siteUrl = (process.env.URL ?? "").replace(/\/$/, "") || `${proto}://${host}`;
+  const reportEndpoint = `${siteUrl}/.netlify/functions/delpro-report-upload`;
+  const reportEndpointAlt = `${siteUrl}/api/delpro/report-upload`;
+  const reportEndpointLocal = host.startsWith("localhost") || host.startsWith("127.");
 
   const catNames = { drugs: {} as Record<string, string>, treatments: {} as Record<string, string> };
   for (const n of catNamesRes.data ?? []) (n.object_type === "Drug" ? catNames.drugs : catNames.treatments)[n.delpro_key] = n.name ?? n.delpro_key;
@@ -162,6 +166,8 @@ export default async function DelproPage() {
           fields={repFieldsRes.data ?? []}
           tokens={repTokensRes.data ?? []}
           endpointUrl={reportEndpoint}
+          endpointAltUrl={reportEndpointAlt}
+          endpointIsLocal={reportEndpointLocal}
           animalsWithReport={repAnimalsRes.count ?? 0}
         />
 

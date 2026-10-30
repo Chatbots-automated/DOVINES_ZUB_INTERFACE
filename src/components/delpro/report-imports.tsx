@@ -35,6 +35,8 @@ export function ReportImportsSection({
   fields,
   tokens,
   endpointUrl,
+  endpointAltUrl,
+  endpointIsLocal,
   animalsWithReport,
 }: {
   imports: ReportImport[];
@@ -43,6 +45,8 @@ export function ReportImportsSection({
   fields: ReportField[];
   tokens: ReportToken[];
   endpointUrl: string;
+  endpointAltUrl: string;
+  endpointIsLocal: boolean;
   animalsWithReport: number;
 }) {
   const last = imports[0] ?? null;
@@ -88,6 +92,15 @@ export function ReportImportsSection({
               <code className="font-mono">Authorization: Bearer …</code>, <code className="font-mono">X-GVET-Report-Filename</code>,{" "}
               <code className="font-mono">X-GVET-Report-SHA256</code>, <code className="font-mono">X-GVET-Report-Type: daily-health</code>.
             </p>
+            <p className="text-text-secondary">
+              Tas pats priėmimas ir per <code className="rounded bg-surface-secondary px-1.5 py-0.5 font-mono">POST {endpointAltUrl}</code>.
+            </p>
+            {endpointIsLocal && (
+              <p className="text-warning">
+                Puslapis atidarytas lokaliai: ūkio kompiuteriui naudokite Netlify svetainės https adresą. Lokaliai veikia tik /api/delpro/report-upload
+                (/.netlify/functions/… veikia tik Netlify).
+              </p>
+            )}
             <ReportTokenForm />
             {tokens.length > 0 && (
               <table className="w-full">

@@ -15,6 +15,6 @@ export const config = {
      * - images and other static files
      * - api routes (don't run middleware on API routes)
      */
-    "/((?!_next/static|_next/image|favicon.ico|api/|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)",
+    "/((?!_next/static|_next/image|favicon.ico|api/|\\.netlify/|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)",
   ],
 };

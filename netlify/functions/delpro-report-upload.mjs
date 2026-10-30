@@ -86,7 +86,13 @@ export function serverEnv(source = process.env) {
 }
 
 export async function handleUpload(req, env = serverEnv()) {
-  if (req.method !== "POST") return fail(405, "method_not_allowed", "Naudokite POST.");
+  if (req.method !== "POST") {
+    // Usually a redirect (http -> https, another domain, /login) turned the POST into a GET.
+    const res = fail(405, "method_not_allowed",
+      `Gauta ${req.method}, laukiama POST. Jei siuntėte POST, adresas jus nukreipė (http→https, kitas domenas ar /login) — naudokite tikslų https adresą.`);
+    res.headers.set("Allow", "POST");
+    return res;
+  }
   if (!env) return fail(500, "server_not_configured", "Serveryje nenustatyti SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY.");
 
   const auth = req.headers.get("authorization") ?? "";
