@@ -9,15 +9,6 @@ import { CatalogWritePanel, type CatalogJob } from "@/components/delpro/catalog-
 import { CatalogImportPanel } from "@/components/delpro/catalog-import";
 import { TreatmentTemplates, type TemplateProduct, type TemplateRow } from "@/components/delpro/treatment-templates";
 import {
-  confirmCatalogSuggestions,
-  enqueueCatalogCreate,
-  importCatalogRecords,
-  linkCatalogRecord,
-  requestCatalogSync,
-  resolveCatalogIssue,
-  unlinkCatalogRecord,
-} from "@/lib/actions/delpro-catalog";
-import {
   CATALOG_ACTION_CONFIRM,
   CATALOG_ACTION_LABEL,
   CATALOG_CLINICAL_FIELDS,
@@ -139,7 +130,7 @@ function IssueRow({ issue, names }: { issue: CatalogIssue; names: CatalogNames }
                 ) : (
                   <ActionButton
                     key={c.gvet_id}
-                    action={linkCatalogRecord}
+                    action="linkCatalogRecord"
                     fields={{ object_type: issue.object_type, delpro_key: issue.delpro_key ?? "", gvet_id: c.gvet_id }}
                     label={`Susieti su „${c.name}“`}
                   />
@@ -168,7 +159,7 @@ function IssueRow({ issue, names }: { issue: CatalogIssue; names: CatalogNames }
         {CATALOG_ISSUE_ACTIONS[issue.issue_type].map((a) => (
           <ActionButton
             key={a}
-            action={resolveCatalogIssue}
+            action="resolveCatalogIssue"
             fields={{ issue_id: issue.id, action: a }}
             label={CATALOG_ACTION_LABEL[a]}
             variant={a === "dismiss" ? "ghost" : a === "confirm" || a === "reviewed" ? "primary" : "outline"}
@@ -272,14 +263,14 @@ export function CatalogSyncSection({
         <div className="flex flex-wrap items-start gap-2">
           {suggestions > 0 && (
             <ActionButton
-              action={confirmCatalogSuggestions}
+              action="confirmCatalogSuggestions"
               fields={{}}
               label={`Patvirtinti pasiūlymus (${suggestions})`}
               confirm={`Susieti ${suggestions} DelPro įrašus su to paties pavadinimo GVET įrašais?`}
             />
           )}
           <ActionButton
-            action={requestCatalogSync}
+            action="requestCatalogSync"
             fields={{}}
             variant="primary"
             label={
@@ -383,7 +374,7 @@ export function CatalogSyncSection({
                     {i.active === false && <span className="ml-1 text-[11px] text-text-muted">(neaktyvus)</span>}
                   </span>
                   <ActionButton
-                    action={importCatalogRecords}
+                    action="importCatalogRecords"
                     fields={{ object_type: i.object_type, delpro_keys: JSON.stringify([i.delpro_key]) }}
                     label="Importuoti į GVET"
                     confirm="Sukurti GVET gydymo šabloną iš DelPro? Jo vaistai turi būti susieti; dozes ir karenciją reikės patikrinti."
@@ -403,7 +394,7 @@ export function CatalogSyncSection({
                   {i.name ?? "—"} <span className="text-text-secondary">↔ {i.gvet_name}</span>
                   {i.link_origin === "imported" && <span className="ml-1 text-[11px] text-text-muted">(importuota)</span>}
                 </span>
-                <ActionButton action={unlinkCatalogRecord} fields={{ link_id: i.link_id ?? "" }} label="Atsieti" variant="ghost" confirm={CATALOG_ACTION_CONFIRM.unlink} />
+                <ActionButton action="unlinkCatalogRecord" fields={{ link_id: i.link_id ?? "" }} label="Atsieti" variant="ghost" confirm={CATALOG_ACTION_CONFIRM.unlink} />
               </div>
             ))}
           </div>
@@ -426,7 +417,7 @@ export function CatalogSyncSection({
                   {job ? (
                     <Badge tone="info">Eilėje</Badge>
                   ) : (
-                    <ActionButton action={enqueueCatalogCreate} fields={{ object_type: g.object_type, gvet_id: g.gvet_id }} label="Sukurti DelPro" />
+                    <ActionButton action="enqueueCatalogCreate" fields={{ object_type: g.object_type, gvet_id: g.gvet_id }} label="Sukurti DelPro" />
                   )}
                 </div>
               );

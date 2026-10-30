@@ -2,15 +2,6 @@ import { Badge } from "@/components/ui/badge";
 import { ActionButton } from "@/components/delpro/action-button";
 import { CatalogOutboundModeForm, UncertainStepForm } from "@/components/delpro/catalog-controls";
 import {
-  catalogJobAction,
-  createCatalogTestJob,
-  createPilotDrug,
-  markCatalogValidated,
-  releaseSingleCatalogJob,
-  setCatalogWriteEnabled,
-  unvalidateCatalogOperation,
-} from "@/lib/actions/delpro-catalog";
-import {
   CATALOG_JOB_STATUS_LABEL,
   CATALOG_JOB_STATUS_TONE,
   CATALOG_OBJECT_LABEL,
@@ -72,7 +63,7 @@ function PilotDrug({ job, singleJob, validated }: { job: CatalogJob | null; sing
         rašyti <strong>tik jai</strong>; po jos rašymas išsijungia pats. Kitos katalogo ir gydymų rašymo užduotys lieka išjungtos.
       </p>
       {!job ? (
-        <ActionButton action={createPilotDrug} fields={{}} label="Sukurti bandomąjį vaistą" confirm="Sukurti neaktyvų GVET vaistą „GVET TEST vaistas …“ ir jo DelPro užduotį?" />
+        <ActionButton action="createPilotDrug" fields={{}} label="Sukurti bandomąjį vaistą" confirm="Sukurti neaktyvų GVET vaistą „GVET TEST vaistas …“ ir jo DelPro užduotį?" />
       ) : (
         <div className="space-y-2 text-[12px]">
           <div className="flex flex-wrap items-center gap-2">
@@ -88,7 +79,7 @@ function PilotDrug({ job, singleJob, validated }: { job: CatalogJob | null; sing
           <UncertainSteps job={job} />
           {job.status === "queued" && !released && (
             <ActionButton
-              action={releaseSingleCatalogJob}
+              action="releaseSingleCatalogJob"
               fields={{ job_id: job.id }}
               label="Leisti įrašyti tik šią užduotį"
               variant="primary"
@@ -116,7 +107,7 @@ function PilotDrug({ job, singleJob, validated }: { job: CatalogJob | null; sing
               ))}
               {!validated && (
                 <ActionButton
-                  action={markCatalogValidated}
+                  action="markCatalogValidated"
                   fields={{ job_id: job.id }}
                   label="Pažymėti „Vaistas: sukūrimas“ patikrinta"
                   confirm="Ar DelPro programoje patikrinote šį vaistą? Po to vaistų sukūrimo užduotys galės būti vykdomos (kai rašymas įjungtas)."
@@ -125,7 +116,7 @@ function PilotDrug({ job, singleJob, validated }: { job: CatalogJob | null; sing
             </div>
           )}
           {["queued", "failed", "needs_review", "verification_failed"].includes(job.status) && (
-            <ActionButton action={catalogJobAction} fields={{ job_id: job.id, action: "cancel" }} label="Atšaukti bandymą" variant="ghost" />
+            <ActionButton action="catalogJobAction" fields={{ job_id: job.id, action: "cancel" }} label="Atšaukti bandymą" variant="ghost" />
           )}
         </div>
       )}
@@ -163,7 +154,7 @@ export function CatalogWritePanel({
         <span className="text-[13px] text-text-secondary">Rašymas į DelPro katalogą</span>
         <Badge tone={writeEnabled ? "warning" : "neutral"}>{writeEnabled ? "Įjungtas" : "Išjungtas"}</Badge>
         <ActionButton
-          action={setCatalogWriteEnabled}
+          action="setCatalogWriteEnabled"
           fields={{ enabled: writeEnabled ? "0" : "1" }}
           label={writeEnabled ? "Išjungti" : "Įjungti"}
           variant={writeEnabled ? "outline" : "primary"}
@@ -221,10 +212,10 @@ export function CatalogWritePanel({
                   <td className="px-2 py-1.5">
                     <div className="flex flex-wrap justify-end gap-2">
                       {isValidated ? (
-                        <ActionButton action={unvalidateCatalogOperation} fields={{ operation: op }} label="Atšaukti patikrinimą" variant="ghost" />
+                        <ActionButton action="unvalidateCatalogOperation" fields={{ operation: op }} label="Atšaukti patikrinimą" variant="ghost" />
                       ) : test?.status === "success" ? (
                         <ActionButton
-                          action={markCatalogValidated}
+                          action="markCatalogValidated"
                           fields={{ job_id: test.id }}
                           label="Pažymėti patikrinta"
                           variant="primary"
@@ -232,7 +223,7 @@ export function CatalogWritePanel({
                         />
                       ) : null}
                       {!isValidated && test?.status !== "queued" && test?.status !== "processing" && (
-                        <ActionButton action={createCatalogTestJob} fields={{ operation: op }} label="Bandomasis įrašas" />
+                        <ActionButton action="createCatalogTestJob" fields={{ operation: op }} label="Bandomasis įrašas" />
                       )}
                     </div>
                   </td>
@@ -287,14 +278,14 @@ export function CatalogWritePanel({
                       <div className="flex flex-wrap justify-end gap-2">
                         {["failed", "needs_review", "verification_failed"].includes(j.status) && uncertainSteps(j).length === 0 && (
                           <ActionButton
-                            action={catalogJobAction}
+                            action="catalogJobAction"
                             fields={{ job_id: j.id, action: "retry" }}
                             label="Kartoti"
                             confirm="Kartoti? Jau įrašyti ir patikrinti žingsniai praleidžiami."
                           />
                         )}
                         {["queued", "failed", "needs_review", "verification_failed"].includes(j.status) && (
-                          <ActionButton action={catalogJobAction} fields={{ job_id: j.id, action: "cancel" }} label="Atšaukti" variant="ghost" />
+                          <ActionButton action="catalogJobAction" fields={{ job_id: j.id, action: "cancel" }} label="Atšaukti" variant="ghost" />
                         )}
                       </div>
                     </td>

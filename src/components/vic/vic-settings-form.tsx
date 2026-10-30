@@ -72,8 +72,15 @@ export function VicSettingsForm({
       </div>
       <div className="grid gap-4 sm:grid-cols-2">
         <div>
-          <Label htmlFor={`vic_farm_id_${kind}`}>VIC ūkio ID{kind === "veterinaras" ? " *" : ""}</Label>
-          <Input id={`vic_farm_id_${kind}`} name="vic_farm_id" autoComplete="off" required={kind === "veterinaras"} defaultValue={farmId} />
+          <Label htmlFor={`vic_farm_id_${kind}`}>Ūkio ID (GVET, VIC skaitytuvui)</Label>
+          <Input
+            id={`vic_farm_id_${kind}`}
+            readOnly
+            value={farmId}
+            onFocus={(e) => e.currentTarget.select()}
+            title="Sugeneruotas GVET; nekeičiamas. Siunčiamas kaip farm.id, grąžinti gyvuliai su kitu farm_id atmetami."
+            className="font-mono text-[12px]"
+          />
         </div>
         <div>
           <Label htmlFor={`vic_client_personal_code_${kind}`}>Kliento asmens / įmonės kodas{kind === "veterinaras" ? " *" : ""}</Label>

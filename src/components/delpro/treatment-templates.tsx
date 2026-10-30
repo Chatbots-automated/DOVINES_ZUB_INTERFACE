@@ -1,15 +1,13 @@
 "use client";
 
 import * as React from "react";
-import { useActionState } from "react";
 import { Plus, Trash2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input, Label, Select } from "@/components/ui/input";
 import { ActionButton } from "@/components/delpro/action-button";
-import { deleteTreatmentTemplate, saveTreatmentTemplate } from "@/lib/actions/delpro-catalog";
-import type { DelproActionResult } from "@/lib/actions/delpro";
 import type { Database, Unit } from "@/lib/supabase/types";
+import { useDelproAction } from "@/lib/use-delpro-action";
 
 // GVET treatment templates (0037) — the GVET side of DelPro's Treatment +
 // TreatmentDrugUsage templates. Saved through save_treatment_template(); a
@@ -58,7 +56,7 @@ function TemplateEditor({
   diseases: { id: string; name: string }[];
   onDone: () => void;
 }) {
-  const [state, formAction, pending] = useActionState<DelproActionResult | null, FormData>(saveTreatmentTemplate, null);
+  const [state, formAction, pending] = useDelproAction("saveTreatmentTemplate");
   const [name, setName] = React.useState(template?.name ?? "");
   const [active, setActive] = React.useState(template?.active ?? true);
   const [type, setType] = React.useState(template?.treatment_type ?? "");
@@ -253,7 +251,7 @@ export function TreatmentTemplates({
                   Redaguoti
                 </Button>
                 {!t.delpro_key && (
-                  <ActionButton action={deleteTreatmentTemplate} fields={{ id: t.id }} label="Ištrinti" variant="ghost" confirm={`Ištrinti šabloną „${t.name}“?`} />
+                  <ActionButton action="deleteTreatmentTemplate" fields={{ id: t.id }} label="Ištrinti" variant="ghost" confirm={`Ištrinti šabloną „${t.name}“?`} />
                 )}
               </div>
             </div>

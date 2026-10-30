@@ -1,12 +1,10 @@
 "use client";
 
 import * as React from "react";
-import { useActionState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { applyCatalogImport } from "@/lib/actions/delpro-catalog";
-import type { DelproActionResult } from "@/lib/actions/delpro";
 import type { DelproImportAction, DelproImportPlanRow } from "@/lib/supabase/types";
+import { useDelproAction } from "@/lib/use-delpro-action";
 
 const ACTION_LABEL: Record<DelproImportAction, string> = {
   create: "Sukurti GVET",
@@ -68,7 +66,7 @@ function Detail({ row }: { row: DelproImportPlanRow }) {
  * changed since (stale preview), and skips rows already linked (idempotent).
  */
 export function CatalogImportPanel({ rows, drugParametersComplete }: { rows: DelproImportPlanRow[]; drugParametersComplete: boolean }) {
-  const [state, formAction, pending] = useActionState<DelproActionResult | null, FormData>(applyCatalogImport, null);
+  const [state, formAction, pending] = useDelproAction("applyCatalogImport");
   const [type, setType] = React.useState<"Diagnosis" | "Drug">("Diagnosis");
   const [selected, setSelected] = React.useState<Set<string>>(() => new Set(rows.filter(preselected).map(rowId)));
   const [showLinked, setShowLinked] = React.useState(false);

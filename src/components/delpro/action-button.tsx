@@ -1,13 +1,11 @@
 "use client";
 
 import * as React from "react";
-import { useActionState } from "react";
 import { Button } from "@/components/ui/button";
-import type { DelproActionResult } from "@/lib/actions/delpro";
+import { useDelproAction } from "@/lib/use-delpro-action";
+import type { DelproOp } from "@/lib/delpro-ops";
 
-type Action = (prev: DelproActionResult | null, formData: FormData) => Promise<DelproActionResult>;
-
-/** A single-button form bound to a DelPro server action, with inline error. */
+/** A single-button form bound to a DelPro operation (/api/delpro/action), with inline error. */
 export function ActionButton({
   action,
   fields,
@@ -16,14 +14,15 @@ export function ActionButton({
   variant = "outline",
   confirm,
 }: {
-  action: Action;
+  /** /api/delpro/action operation (src/lib/delpro-ops.ts) */
+  action: DelproOp;
   fields: Record<string, string>;
   label: React.ReactNode;
   pendingLabel?: string;
   variant?: "primary" | "outline" | "ghost" | "danger";
   confirm?: string;
 }) {
-  const [state, formAction, pending] = useActionState<DelproActionResult | null, FormData>(action, null);
+  const [state, formAction, pending] = useDelproAction(action);
   return (
     <form
       action={formAction}

@@ -1,17 +1,16 @@
 "use client";
 
 import * as React from "react";
-import { useActionState } from "react";
 import { AlertTriangle, CheckCircle2, Send, WifiOff } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { createClient } from "@/lib/supabase/client";
-import { confirmDelproTransfer, type DelproActionResult } from "@/lib/actions/delpro";
 import { ADMINISTRATION_ROUTES } from "@/lib/administration-routes";
 import { DELPRO_CONFIRMABLE, delproStatusLabel, delproStatusTone, problemLabel } from "@/lib/delpro-status";
 import { formatDate, formatDateTime, formatQty } from "@/lib/utils";
 import type { DelproSyncJobStatus, DelproTransferState, DelproUiEntry } from "@/lib/supabase/types";
+import { useDelproAction } from "@/lib/use-delpro-action";
 
 type LoadedState = Extract<DelproTransferState, { found: true }>;
 
@@ -195,7 +194,7 @@ export function DelproTransferDialog({
   const [open, setOpen] = React.useState(false);
   const [reloadKey, setReloadKey] = React.useState(0);
   const [loaded, setLoaded] = React.useState<{ key: number; state: DelproTransferState | null; error: string | null } | null>(null);
-  const [result, formAction, pending] = useActionState<DelproActionResult | null, FormData>(confirmDelproTransfer, null);
+  const [result, formAction, pending] = useDelproAction("confirmDelproTransfer");
 
   // After a successful approval, re-read the (now frozen) state.
   const [handledResult, setHandledResult] = React.useState(result);

@@ -1,12 +1,10 @@
 "use client";
 
 import * as React from "react";
-import { useActionState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input, Label, Select } from "@/components/ui/input";
-import { catalogJobAction, linkCatalogRecord, updateCatalogInboundMode, updateCatalogOutboundMode } from "@/lib/actions/delpro-catalog";
-import type { DelproActionResult } from "@/lib/actions/delpro";
 import type { CatalogInboundMode, CatalogOutboundMode } from "@/lib/delpro-catalog";
+import { useDelproAction } from "@/lib/use-delpro-action";
 
 type Option = { value: string; label: string };
 type LinkableType = "Diagnosis" | "Drug" | "Treatment";
@@ -19,7 +17,7 @@ export function CatalogLinkForm({
   delpro: Record<LinkableType, Option[]>;
   gvet: Record<LinkableType, Option[]>;
 }) {
-  const [state, formAction, pending] = useActionState<DelproActionResult | null, FormData>(linkCatalogRecord, null);
+  const [state, formAction, pending] = useDelproAction("linkCatalogRecord");
   const [type, setType] = React.useState<LinkableType>("Diagnosis");
   return (
     <form action={formAction} className="flex flex-wrap items-end gap-3">
@@ -67,7 +65,7 @@ export function CatalogLinkForm({
 }
 
 export function CatalogInboundModeForm({ mode }: { mode: CatalogInboundMode }) {
-  const [state, formAction, pending] = useActionState<DelproActionResult | null, FormData>(updateCatalogInboundMode, null);
+  const [state, formAction, pending] = useDelproAction("updateCatalogInboundMode");
   return (
     <form action={formAction} className="flex flex-wrap items-end gap-3">
       <div className="min-w-[260px] flex-1">
@@ -88,7 +86,7 @@ export function CatalogInboundModeForm({ mode }: { mode: CatalogInboundMode }) {
 }
 
 export function CatalogOutboundModeForm({ mode }: { mode: CatalogOutboundMode }) {
-  const [state, formAction, pending] = useActionState<DelproActionResult | null, FormData>(updateCatalogOutboundMode, null);
+  const [state, formAction, pending] = useDelproAction("updateCatalogOutboundMode");
   return (
     <form action={formAction} className="flex flex-wrap items-end gap-3">
       <div className="min-w-[260px] flex-1">
@@ -124,7 +122,7 @@ export function UncertainStepForm({
   keyProperty: string;
   candidates: { key: string; name: string | null }[];
 }) {
-  const [state, formAction, pending] = useActionState<DelproActionResult | null, FormData>(catalogJobAction, null);
+  const [state, formAction, pending] = useDelproAction("catalogJobAction");
   const listId = `uncertain-${jobId}-${step}`;
   return (
     <form

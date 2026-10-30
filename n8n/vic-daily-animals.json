@@ -14,7 +14,8 @@
       "notes": "TODO(discovery): VIC neturi viešo API. Įvestis: $json = {vet, search_date, farm} iš vic_import_request. Čia įdėti tą patį prisijungimo/nuskaitymo žingsnį, kuris veikia Žibartonių workflow. Turi grąžinti masyvą [{tag_no, sex, breed, birth_date}] — vienas item su {animals:[...]}.",
       "parameters": { "jsCode": "throw new Error('TODO(discovery): VIC nuskaitymas neįdiegtas');" } },
     { "name": "upsert_animals_from_vic", "type": "n8n-nodes-base.httpRequest", "typeVersion": 4.2, "position": [720, 0],
-      "parameters": { "method": "POST", "url": "={{ $env.SUPABASE_URL }}/rest/v1/rpc/upsert_animals_from_vic",
+      "notes": "upsert_animals_for_client (0041): masyvas / {rows:[...]} / viena eilutė; eilutės su kitu farm_id praleidžiamos; ne pilnas sąrašas, nebent full_snapshot:true.",
+      "parameters": { "method": "POST", "url": "={{ $env.SUPABASE_URL }}/rest/v1/rpc/upsert_animals_for_client",
         "sendHeaders": true, "headerParameters": { "parameters": [
           { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
           { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}" } ] },

@@ -22,7 +22,10 @@
   only `source='vic'` animals; empty snapshots are refused.
   0040: each login also stores the VIC farm (`vic_farm_id`, `vic_farm_name`, `vic_client_personal_code`); n8n gets its VIC request
   from `vic_import_request(jsonb)` (service_role) as `{vet:{vic_username,vic_password}, search_date, farm:{id,name,client_personal_code}}`
-  and it refuses while any farm field is empty (never sends "[undefined]").
+  and it refuses while any farm field is empty (never sends "[undefined]"). 0041: `farm.id` is GVET's own uuid
+  (`system_settings.vic_farm_id`, generated once, read-only in the UI). The scraper posts animals to
+  `upsert_animals_for_client(jsonb)` (unnamed jsonb, service_role; array / `{rows}` / single row): rows with another `farm_id` are
+  skipped, the rest go through `upsert_animals_from_vic` with `full_snapshot` false unless the body says true.
 - Single-farm, single-tenant: no `farm_id` anywhere. A second farm = its own Supabase project + its own worker; never point two
   farms' workers at one project (herd snapshots deactivate each other's animals, DelPro catalog keys collide).
 
@@ -219,6 +222,9 @@ not look for Žibartoniai's 0013–0021 VIC/UNIFORM history here.
   403. Use `useActionState` + `<form action>` (all actions here), or a Route Handler + `fetch()` for direct calls
   (`/api/pajamavimas/*`, `/api/gydymo-kursai/administer-dose`, `/api/vartotojai/set-frozen`). Route Handlers do a
   manual Origin/Host check.
+- The DelPro screen (`src/components/delpro/*`) calls `/api/delpro/action` (`useDelproAction(op)`, ops in `src/lib/delpro-ops.ts`)
+  instead of Server Actions: its action POSTs came back non-RSC ("An unexpected response was received from the server.") locally.
+  The functions in `src/lib/actions/delpro*.ts` are unchanged and only called from that route; add a new one to `DELPRO_OPS` too.
 - `getCurrentProfile()` (`src/lib/auth.ts`) is `cache()`d and reads the `x-zub-session` header middleware forwards —
   always use it for "who is logged in"; keep `encodeSessionHeader()` / `decodeSessionHeader()` in sync.
 - `(protected)/layout.tsx` forces `dynamic = "force-dynamic"` (opennextjs-netlify static-detection bug).

@@ -1,17 +1,16 @@
 "use client";
 
 import * as React from "react";
-import { useActionState } from "react";
 import { CheckCheck, RefreshCw } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { ActionButton } from "@/components/delpro/action-button";
-import { approveDelproJobs, confirmDelproTransfer, rejectDelproJob, retryDelproJob, type DelproActionResult } from "@/lib/actions/delpro";
 import { DELPRO_STATUS_LABEL as STATUS_LABEL, DELPRO_STATUS_TONE as STATUS_TONE, problemLabel } from "@/lib/delpro-status";
 import { formatDate, formatDateTime, formatQty } from "@/lib/utils";
 import type { Database, DelproPayload, DelproSyncJobStatus } from "@/lib/supabase/types";
+import { useDelproAction } from "@/lib/use-delpro-action";
 
 export type QueueJob = Database["public"]["Views"]["vw_delpro_sync_jobs"]["Row"];
 
@@ -87,7 +86,7 @@ function ResultDiff({ job }: { job: QueueJob }) {
 
 function PendingList({ jobs }: { jobs: QueueJob[] }) {
   const [selected, setSelected] = React.useState<Set<string>>(new Set());
-  const [state, formAction, pending] = useActionState<DelproActionResult | null, FormData>(approveDelproJobs, null);
+  const [state, formAction, pending] = useDelproAction("approveDelproJobs");
 
   const [handledState, setHandledState] = React.useState(state);
   if (state !== handledState) {
@@ -141,7 +140,7 @@ function PendingList({ jobs }: { jobs: QueueJob[] }) {
               {j.error && <p className="mt-0.5 text-[11px] text-text-muted">{j.error}</p>}
             </div>
             <ActionButton
-              action={rejectDelproJob}
+              action="rejectDelproJob"
               fields={{ job_id: j.id }}
               label="Atmesti"
               variant="ghost"
@@ -185,13 +184,13 @@ function JobList({ jobs, emptyTitle, retry }: { jobs: QueueJob[]; emptyTitle: st
             </p>
           </div>
           {j.status === "approved" && j.payload_stale && (
-            <ActionButton action={confirmDelproTransfer} fields={{ treatment_id: j.treatment_id, reapprove: "1" }} label="Patvirtinti iš naujo" />
+            <ActionButton action="confirmDelproTransfer" fields={{ treatment_id: j.treatment_id, reapprove: "1" }} label="Patvirtinti iš naujo" />
           )}
           {retry && (
             <div className="flex flex-col items-end gap-1">
-              <ActionButton action={retryDelproJob} fields={{ job_id: j.id }} label="Kartoti" />
+              <ActionButton action="retryDelproJob" fields={{ job_id: j.id }} label="Kartoti" />
               <ActionButton
-                action={retryDelproJob}
+                action="retryDelproJob"
                 fields={{ job_id: j.id, refresh: "1" }}
                 label="Kartoti (nauji duomenys)"
                 variant="ghost"

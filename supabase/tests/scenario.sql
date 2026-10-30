@@ -364,7 +364,7 @@ end $$;
 reset role;
 set role authenticated;
 select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000a',false);
-select vic_save_credentials('veterinaras','vetas','',true,null,'12345','KT Dovinės ŽŪB','300000000');
+select vic_save_credentials('veterinaras','vetas','',true,null,'bandymas-pakeisti','KT Dovinės ŽŪB','300000000');
 do $$ declare blocked boolean := false; begin
   begin perform vic_import_request('{}'::jsonb); exception when others then blocked := true; end;
   if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: the app calling vic_import_request'; end if;
@@ -374,10 +374,49 @@ reset role;
 set role service_role;
 select 'vic_request' as step, vic_import_request('{"search_date":"2026-10-30"}'::jsonb) as r;
 do $$ begin
-  if vic_import_request('{"search_date":"2026-10-30"}'::jsonb) <> '{"vet":{"vic_username":"vetas","vic_password":"vetslapta"},"search_date":"2026-10-30","farm":{"id":"12345","name":"KT Dovinės ŽŪB","client_personal_code":"300000000"}}'::jsonb then
-    raise exception 'vic_import_request shape wrong';
+  if vic_import_request('{"search_date":"2026-10-30"}'::jsonb) <> jsonb_build_object(
+       'vet', '{"vic_username":"vetas","vic_password":"vetslapta"}'::jsonb, 'search_date', '2026-10-30',
+       'farm', jsonb_build_object('id', (select setting_value from system_settings where setting_key = 'vic_farm_id'),
+                                  'name', 'KT Dovinės ŽŪB', 'client_personal_code', '300000000')) then
+    raise exception 'vic_import_request shape wrong (farm id must be GVET''s own, never the typed value)';
+  end if;
+  if (select setting_value from system_settings where setting_key = 'vic_farm_id') !~ '^[0-9a-f-]{36}$' then
+    raise exception 'vic_farm_id must be a generated uuid';
   end if;
 end $$;
+-- 0041: the scraper posts animals back; every body shape, other farms skipped, never a full snapshot unless asked
+select set_config('t.farm', (select setting_value from system_settings where setting_key = 'vic_farm_id'), false);
+select 'vic_client_array' as step, upsert_animals_for_client(jsonb_build_array(
+  jsonb_build_object('tag_no', 'LT 0000 0000 7001', 'farm_id', current_setting('t.farm'), 'sex', 'Karvė', 'breed', 'Holšteinas', 'birth_date', '2023-01-02'),
+  jsonb_build_object('tag_no', 'LT000000007002', 'farm_id', '11111111-1111-1111-1111-111111111111', 'sex', 'Telyčaitė'))) as r;
+select 'vic_client_rows' as step, upsert_animals_for_client(jsonb_build_object('rows', jsonb_build_array(jsonb_build_object('tag_no', 'LT000000007003')))) as r;
+select 'vic_client_single' as step, upsert_animals_for_client('{"tag_no":"LT000000007001","breed":"Kita veislė"}'::jsonb) as r;
+select 'vic_client_empty' as step, upsert_animals_for_client('[]'::jsonb) as r;
+do $$ declare blocked boolean := false; begin
+  begin perform upsert_animals_for_client('{"rows":[],"full_snapshot":true}'::jsonb); exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: empty full snapshot'; end if;
+end $$;
+reset role;
+do $$ begin
+  if not exists (select 1 from animals where tag_no = 'LT000000007001' and source = 'vic' and breed = 'Holšteinas' and birth_date = '2023-01-02')
+     or not exists (select 1 from animals where tag_no = 'LT000000007003' and active) then
+    raise exception 'VIC client rows not stored (or breed overwritten instead of enriched)';
+  end if;
+  if exists (select 1 from animals where tag_no = 'LT000000007002') then
+    raise exception 'another farm''s animal must never be stored';
+  end if;
+  if not (select active from animals where tag_no = 'LT000000007003') or not (select active from animals where tag_no = 'LT000000007001') then
+    raise exception 'a partial post must not deactivate anything';
+  end if;
+end $$;
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000a',false);
+do $$ declare blocked boolean := false; begin
+  begin perform upsert_animals_for_client('[{"tag_no":"LT000000007009"}]'::jsonb); exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: the app calling upsert_animals_for_client'; end if;
+end $$;
+reset role;
+set role service_role;
 reset role;
 set role authenticated;
 select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000a',false);

@@ -1,10 +1,9 @@
 "use client";
 
 import * as React from "react";
-import { useActionState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { saveDelproMapping, type DelproActionResult } from "@/lib/actions/delpro";
+import { useDelproAction } from "@/lib/use-delpro-action";
 
 export function MappingRow({
   kind,
@@ -19,7 +18,7 @@ export function MappingRow({
   code: string | null;
   name: string | null;
 }) {
-  const [state, formAction, pending] = useActionState<DelproActionResult | null, FormData>(saveDelproMapping, null);
+  const [state, formAction, pending] = useDelproAction("saveDelproMapping");
   return (
     <form action={formAction} className="grid grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_minmax(0,0.6fr)_auto] items-center gap-2 px-5 py-2">
       <input type="hidden" name="kind" value={kind} />

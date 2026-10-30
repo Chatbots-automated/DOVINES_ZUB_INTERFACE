@@ -1,14 +1,13 @@
 "use client";
 
 import * as React from "react";
-import { useActionState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input, Label, Select } from "@/components/ui/input";
-import { updateDelproSettings, type DelproActionResult } from "@/lib/actions/delpro";
 import type { DelproOutboundMode } from "@/lib/supabase/types";
+import { useDelproAction } from "@/lib/use-delpro-action";
 
 export function DelproSettingsForm({ mode, delayMinutes }: { mode: DelproOutboundMode; delayMinutes: string }) {
-  const [state, formAction, pending] = useActionState<DelproActionResult | null, FormData>(updateDelproSettings, null);
+  const [state, formAction, pending] = useDelproAction("updateDelproSettings");
   return (
     <form action={formAction} className="flex flex-wrap items-end gap-3">
       <div className="min-w-[220px] flex-1">

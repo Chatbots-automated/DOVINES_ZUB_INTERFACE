@@ -24,7 +24,6 @@ export async function saveVicCredentials(_prev: VicActionResult | null, formData
     p_password: password || null,
     p_is_active: isActive,
     p_farm_code: String(formData.get("vic_farm_code") ?? "").trim() || null,
-    p_farm_id: String(formData.get("vic_farm_id") ?? "").trim() || null,
     p_farm_name: String(formData.get("vic_farm_name") ?? "").trim() || null,
     p_client_personal_code: String(formData.get("vic_client_personal_code") ?? "").trim() || null,
   });
