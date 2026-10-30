@@ -95,6 +95,9 @@ export default async function VicPage() {
 type Settings = {
   vic_username: string;
   vic_farm_code: string | null;
+  vic_farm_id: string | null;
+  vic_farm_name: string | null;
+  vic_client_personal_code: string | null;
   password_set: boolean;
   is_active: boolean;
   updated_at: string;
@@ -133,6 +136,9 @@ function LoginCard({
           kind={kind}
           username={current?.vic_username ?? ""}
           farmCode={current?.vic_farm_code ?? ""}
+          farmId={current?.vic_farm_id ?? ""}
+          farmName={current?.vic_farm_name ?? ""}
+          clientPersonalCode={current?.vic_client_personal_code ?? ""}
           passwordSet={current?.password_set ?? false}
           isActive={current?.is_active ?? true}
         />

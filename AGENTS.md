@@ -20,6 +20,9 @@
   Žibartoniai's workflow, same payload). VIC only *enriches* existing tags (fills nulls; never DelPro values, group or
   active) and inserts unknown tags as `source='vic'`; DelPro's tag fallback later adopts them. Full snapshots deactivate
   only `source='vic'` animals; empty snapshots are refused.
+  0040: each login also stores the VIC farm (`vic_farm_id`, `vic_farm_name`, `vic_client_personal_code`); n8n gets its VIC request
+  from `vic_import_request(jsonb)` (service_role) as `{vet:{vic_username,vic_password}, search_date, farm:{id,name,client_personal_code}}`
+  and it refuses while any farm field is empty (never sends "[undefined]").
 - Single-farm, single-tenant: no `farm_id` anywhere. A second farm = its own Supabase project + its own worker; never point two
   farms' workers at one project (herd snapshots deactivate each other's animals, DelPro catalog keys collide).
 

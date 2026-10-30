@@ -1178,6 +1178,10 @@ export interface Database {
         Returns: {
           vic_username: string;
           vic_farm_code: string | null;
+          // 0040: the farm the veterinarian login imports from
+          vic_farm_id: string | null;
+          vic_farm_name: string | null;
+          vic_client_personal_code: string | null;
           password_set: boolean;
           is_active: boolean;
           updated_at: string;
@@ -1187,7 +1191,16 @@ export interface Database {
         }[];
       };
       vic_save_credentials: {
-        Args: { p_kind: VicLoginKind; p_username: string; p_password: string | null; p_is_active: boolean; p_farm_code?: string | null };
+        Args: {
+          p_kind: VicLoginKind;
+          p_username: string;
+          p_password: string | null;
+          p_is_active: boolean;
+          p_farm_code?: string | null;
+          p_farm_id?: string | null;
+          p_farm_name?: string | null;
+          p_client_personal_code?: string | null;
+        };
         Returns: undefined;
       };
       delpro_approve_jobs: { Args: { p_job_ids: string[] }; Returns: number };

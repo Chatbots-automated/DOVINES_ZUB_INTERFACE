@@ -12,12 +12,18 @@ export function VicSettingsForm({
   kind,
   username,
   farmCode,
+  farmId,
+  farmName,
+  clientPersonalCode,
   passwordSet,
   isActive,
 }: {
   kind: VicLoginKind;
   username: string;
   farmCode: string;
+  farmId: string;
+  farmName: string;
+  clientPersonalCode: string;
   passwordSet: boolean;
   isActive: boolean;
 }) {
@@ -63,6 +69,26 @@ export function VicSettingsForm({
       <div>
         <Label htmlFor={`vic_farm_code_${kind}`}>VIC valdos / ūkio kodas</Label>
         <Input id={`vic_farm_code_${kind}`} name="vic_farm_code" autoComplete="off" defaultValue={farmCode} />
+      </div>
+      <div className="grid gap-4 sm:grid-cols-2">
+        <div>
+          <Label htmlFor={`vic_farm_id_${kind}`}>VIC ūkio ID{kind === "veterinaras" ? " *" : ""}</Label>
+          <Input id={`vic_farm_id_${kind}`} name="vic_farm_id" autoComplete="off" required={kind === "veterinaras"} defaultValue={farmId} />
+        </div>
+        <div>
+          <Label htmlFor={`vic_client_personal_code_${kind}`}>Kliento asmens / įmonės kodas{kind === "veterinaras" ? " *" : ""}</Label>
+          <Input
+            id={`vic_client_personal_code_${kind}`}
+            name="vic_client_personal_code"
+            autoComplete="off"
+            required={kind === "veterinaras"}
+            defaultValue={clientPersonalCode}
+          />
+        </div>
+      </div>
+      <div>
+        <Label htmlFor={`vic_farm_name_${kind}`}>Ūkio pavadinimas VIC{kind === "veterinaras" ? " *" : ""}</Label>
+        <Input id={`vic_farm_name_${kind}`} name="vic_farm_name" autoComplete="off" required={kind === "veterinaras"} defaultValue={farmName} />
       </div>
       <label className="flex items-center gap-2 text-[13px] text-text-secondary">
         <input type="checkbox" name="is_active" defaultChecked={isActive} className="size-4 rounded border-border-strong" />

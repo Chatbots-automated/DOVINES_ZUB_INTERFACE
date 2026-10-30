@@ -354,6 +354,33 @@ end $$;
 select 'assert' as step, 'app cannot call VIC upsert' as what;
 select vic_save_credentials('seklinimas','dovine2','',true,'LT123456');
 select 'vic_settings' as step, vic_farm_code, password_set, last_error from vic_get_settings('seklinimas');
+-- 0040: farm identity for the import; n8n gets exactly the VIC request, never "[undefined]"
+reset role;
+set role service_role;
+do $$ declare blocked boolean := false; begin
+  begin perform vic_import_request('{}'::jsonb); exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: VIC request without farm id/name/code'; end if;
+end $$;
+reset role;
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000a',false);
+select vic_save_credentials('veterinaras','vetas','',true,null,'12345','KT Dovinės ŽŪB','300000000');
+do $$ declare blocked boolean := false; begin
+  begin perform vic_import_request('{}'::jsonb); exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: the app calling vic_import_request'; end if;
+end $$;
+select 'vic_farm' as step, vic_farm_id, vic_farm_name, vic_client_personal_code, password_set from vic_get_settings('veterinaras');
+reset role;
+set role service_role;
+select 'vic_request' as step, vic_import_request('{"search_date":"2026-10-30"}'::jsonb) as r;
+do $$ begin
+  if vic_import_request('{"search_date":"2026-10-30"}'::jsonb) <> '{"vet":{"vic_username":"vetas","vic_password":"vetslapta"},"search_date":"2026-10-30","farm":{"id":"12345","name":"KT Dovinės ŽŪB","client_personal_code":"300000000"}}'::jsonb then
+    raise exception 'vic_import_request shape wrong';
+  end if;
+end $$;
+reset role;
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000a',false);
 reset role;
 
 -- 13. receive_invoice (0015): atomic, duplicate-safe, pack size x count, journals
