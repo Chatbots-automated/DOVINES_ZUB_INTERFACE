@@ -75,6 +75,8 @@ export const CATALOG_TYPES = [
 
 const UPLOAD_BATCH = 500;
 const MAX_PARTITIONS = 10;
+// Referenced records missing from a possibly truncated type are fetched one by one, at most this many.
+const MAX_REF_FETCH = 1000;
 
 // Unparseable values are passed through unchanged: the database re-validates
 // every record and counts the bad ones (stats.<type>.invalid) instead of the
@@ -122,14 +124,20 @@ async function fetchObjects(client, type, where, top) {
 /**
  * Reads one catalog type. `complete` is true only when there is no sign of
  * truncation — only then may GVET mark absent records as removed:
- *   1. the main read returned fewer rows than `top`, and
+ *   1. the main read returned fewer rows than min(`top`, CATALOG_GATEWAY_ROW_CAP)
+ *      — the Gateway has returned exactly 1000 rows on the farm, so 1000 rows
+ *      is never taken as the whole catalog, and
  *   2. re-reading per value of `partitionBy` (values taken from DelPro's own
- *      answer, filtered with the verified <equal> condition) neither finds
- *      more rows in total nor finds keys the main read missed. That catches a
- *      Gateway-side cap below `top`. Rows found that way are kept.
+ *      answer, filtered with the verified <equal> condition) neither hits that
+ *      cap, finds more rows in total, nor finds keys the main read missed.
+ *      Rows found that way are kept. A failed re-read = incomplete.
+ * There is no verified paging in the Gateway, so a type over the cap stays
+ * incomplete (no removals); referenced records are fetched by key separately
+ * (fetchMissingRefs).
  */
-export async function readCatalogType(client, type, { maxRows = config.catalogMaxRows } = {}) {
-  const keyField = Object.entries(type.fields).find(([, [, kind]]) => kind === "key")[0];
+export async function readCatalogType(client, type, { maxRows = config.catalogMaxRows, rowCap = config.catalogGatewayRowCap } = {}) {
+  const cap = Math.min(maxRows, rowCap || maxRows);
+  const keyField = keyFieldOf(type);
   const byKey = new Map();
   const warnings = [];
   let missingKey = 0;
@@ -147,87 +155,220 @@ export async function readCatalogType(client, type, { maxRows = config.catalogMa
 
   const main = await fetchObjects(client, type, [], maxRows);
   add(main);
-  let truncated = main.length >= maxRows;
+  let truncated = main.length >= cap;
   let note = null;
+  let partitions = null;
 
   const values = [...new Set(main.map((o) => o.properties[type.partitionBy]?.value).filter((v) => v != null))];
   if (type.partitionBy && values.length > 0 && values.length <= MAX_PARTITIONS) {
     try {
       let partitionTotal = 0;
+      partitions = {};
       for (const value of values) {
         const part = await fetchObjects(client, type, [{ name: type.partitionBy, value }], maxRows);
+        partitions[value] = part.length;
         partitionTotal += part.length;
-        if (part.length >= maxRows) truncated = true;
+        if (part.length >= cap) truncated = true;
         add(part);
       }
       if (partitionTotal > main.length || byKey.size > main.length) truncated = true;
     } catch (err) {
+      truncated = true;
       note = "partition_check_failed";
-      log.warn(`${type.objectName}: pilnumo patikra nepavyko (${err.message}) — remiamasi tik pagrindine užklausa.`);
+      log.warn(`${type.objectName}: pilnumo patikra nepavyko (${err.message}) — tipas laikomas nepilnu.`);
     }
   }
 
   return {
     records: [...byKey.values()],
+    keyField,
     returned: main.length,
     limit: maxRows,
+    cap,
+    partitions,
     complete: !truncated,
-    note: truncated ? "truncated" : note,
+    note: truncated ? (note ?? "truncated") : null,
     missingKey,
     warnings,
   };
 }
 
-/** Gateway Animal ObjectGuid + Number (for the later treatment write). */
-export async function readAnimalIds(client, { maxRows = config.catalogMaxRows } = {}) {
-  const xml = await client.getDataXml(buildRequestData({ objectName: "Animal", properties: ["ObjectGuid", "Number"], top: maxRows }));
-  return parseDdmData(xml)
-    .filter((o) => o.objectName === "Animal")
-    .map((o) => ({ object_guid: o.properties.ObjectGuid?.value ?? null, number: o.properties.Number?.value ?? null }))
-    .filter((a) => a.object_guid && a.number);
-}
+const keyFieldOf = (type) => Object.entries(type.fields).find(([, [, kind]]) => kind === "key")[0];
 
 /**
- * One catalog synchronization: begin run -> per type read + upload in batches
- * -> animal ids -> finish (GVET marks removals for complete types and
- * reconciles). A failed type is reported incomplete; the others still sync.
+ * A type that may be truncated (e.g. DrugParameters over the cap) can still
+ * be made to contain every record the other types REFERENCE: each missing
+ * key is read with an <equal> on the key property. A lookup that returns a
+ * different or more than one record stops the lookups for that type (the
+ * filter is then not trusted). The type stays incomplete either way.
  */
-export async function runCatalogSync(client) {
-  const { run_id } = await gvet.catalogBeginRun({ worker_id: config.workerId });
+export async function fetchMissingRefs(client, results) {
+  for (const target of CATALOG_TYPES) {
+    const res = results[target.objectName];
+    if (!res || res.error || res.complete) continue;
+    const keyProp = target.fields[res.keyField][0];
+    const have = new Set(res.records.map((r) => r[res.keyField]));
+    const wanted = new Set();
+    for (const source of CATALOG_TYPES) {
+      const src = results[source.objectName];
+      if (!src?.records) continue;
+      for (const [field, [, kind, refType]] of Object.entries(source.fields)) {
+        if (refType !== target.objectName) continue;
+        for (const r of src.records) {
+          const v = r[field];
+          for (const k of kind === "refs" ? (Array.isArray(v) ? v : []) : [v]) if (k != null && typeof k === "string" && !have.has(k)) wanted.add(k);
+        }
+      }
+    }
+    if (!wanted.size) continue;
+
+    const keys = [...wanted].slice(0, MAX_REF_FETCH);
+    let fetched = 0;
+    const missing = [...wanted].slice(MAX_REF_FETCH);
+    for (const key of keys) {
+      const found = await fetchObjects(client, target, [{ name: keyProp, value: key }], 2);
+      const exact = found.filter((o) => (o.properties[keyProp]?.value ?? "").trim() === key);
+      if (found.length > 1 || (found.length === 1 && exact.length !== 1)) {
+        res.note = "ref_lookup_unreliable";
+        log.warn(`${target.objectName}: paieška pagal ${keyProp}=${key} grąžino ${found.length} kitų įrašų — paieška pagal raktą nutraukta.`);
+        missing.push(...keys.slice(keys.indexOf(key)));
+        break;
+      }
+      if (exact.length === 0) {
+        missing.push(key);
+        continue;
+      }
+      const { record } = normalizeRecord(target, exact[0]);
+      res.records.push(record);
+      have.add(key);
+      fetched += 1;
+    }
+    res.refFetched = fetched;
+    res.refMissing = missing;
+    log.info(`${target.objectName}: pagal nuorodas papildomai nuskaityta ${fetched}, DelPro nerasta ${missing.length}.`);
+  }
+}
+
+/** Gateway Animal ObjectGuid + Number (for the later treatment write). Matching only — a capped read never removes anything. */
+export async function readAnimalIds(client, { maxRows = config.catalogMaxRows, rowCap = config.catalogGatewayRowCap } = {}) {
+  const xml = await client.getDataXml(buildRequestData({ objectName: "Animal", properties: ["ObjectGuid", "Number"], top: maxRows }));
+  const objects = parseDdmData(xml).filter((o) => o.objectName === "Animal");
+  const animals = objects
+    .map((o) => ({ object_guid: o.properties.ObjectGuid?.value ?? null, number: o.properties.Number?.value ?? null }))
+    .filter((a) => a.object_guid && a.number);
+  return { animals, returned: objects.length, complete: objects.length < Math.min(maxRows, rowCap || maxRows) };
+}
+
+/** Everything one catalog synchronization reads from DelPro (GetData only). Nothing is sent to GVET here. */
+export async function readCatalog(client) {
   const types = {};
   const errors = [];
-
   for (const type of CATALOG_TYPES) {
     try {
-      const res = await readCatalogType(client, type);
-      for (let i = 0; i < res.records.length; i += UPLOAD_BATCH) {
-        await gvet.catalogUpload({ run_id, object_type: type.objectName, records: res.records.slice(i, i + UPLOAD_BATCH) });
-      }
-      types[type.objectName] = { complete: res.complete, returned: res.returned, limit: res.limit, note: res.note };
-      if (!res.complete) {
-        log.warn(`${type.objectName}: DelPro grąžino ${res.returned} (riba ${res.limit}) — gali būti ne viskas, pašalinimai nevykdomi.`);
-      }
-      if (res.missingKey) log.warn(`${type.objectName}: ${res.missingKey} įrašai be rakto praleisti.`);
-      for (const w of res.warnings.slice(0, 5)) log.warn(w);
+      types[type.objectName] = await readCatalogType(client, type);
     } catch (err) {
       errors.push(`${type.objectName}: ${err.message}`);
-      types[type.objectName] = { complete: false, note: "read_failed" };
+      types[type.objectName] = { error: err.message, complete: false, note: "read_failed" };
       log.error(`DelPro katalogas (${type.objectName}):`, err.message);
     }
   }
-
   try {
-    const animals = await readAnimalIds(client);
-    if (animals.length) {
-      const res = await gvet.ingestAnimalIds({ run_id, animals });
-      log.info(`DelPro gyvulių ObjectGuid → GVET: ${JSON.stringify({ ...res, conflict_samples: undefined })}`);
+    await fetchMissingRefs(client, types);
+  } catch (err) {
+    errors.push(`nuorodos: ${err.message}`);
+    log.error("DelPro katalogas (nuorodos):", err.message);
+  }
+  for (const [name, res] of Object.entries(types)) {
+    if (res.error) continue;
+    if (!res.complete) {
+      log.warn(`${name}: DelPro grąžino ${res.returned} (riba ${res.cap}) — gali būti ne viskas, pašalinimai nevykdomi.`);
     }
+    if (res.missingKey) log.warn(`${name}: ${res.missingKey} įrašai be rakto praleisti.`);
+    for (const w of res.warnings.slice(0, 5)) log.warn(w);
+  }
+
+  let animals = null;
+  try {
+    animals = await readAnimalIds(client);
+    if (!animals.complete) log.warn(`Animal: DelPro grąžino ${animals.returned} — gali būti ne visi gyvuliai (tik susiejama, niekas nešalinama).`);
   } catch (err) {
     errors.push(`Animal: ${err.message}`);
     log.error("DelPro gyvulių ObjectGuid:", err.message);
+  }
+  return { types, animals, errors };
+}
+
+/** What finish_run / preview get per type (no records). */
+const typeInfo = (res) => ({
+  complete: res.complete,
+  returned: res.returned ?? null,
+  limit: res.limit ?? null,
+  note: res.note ?? null,
+  ...(res.refFetched != null ? { ref_fetched: res.refFetched, ref_missing: res.refMissing.length } : {}),
+});
+
+/**
+ * One catalog synchronization: read everything -> begin run -> upload per type
+ * in batches -> animal ids -> finish (GVET marks removals for complete types and
+ * reconciles). A failed type is reported incomplete; the others still sync.
+ */
+export async function runCatalogSync(client) {
+  const read = await readCatalog(client);
+  const { run_id } = await gvet.catalogBeginRun({ worker_id: config.workerId });
+  const types = {};
+  const errors = [...read.errors];
+
+  for (const type of CATALOG_TYPES) {
+    const res = read.types[type.objectName];
+    if (!res.error) {
+      try {
+        for (let i = 0; i < res.records.length; i += UPLOAD_BATCH) {
+          await gvet.catalogUpload({ run_id, object_type: type.objectName, records: res.records.slice(i, i + UPLOAD_BATCH) });
+        }
+      } catch (err) {
+        errors.push(`${type.objectName}: ${err.message}`);
+        types[type.objectName] = { complete: false, note: "upload_failed" };
+        log.error(`DelPro katalogas (${type.objectName}):`, err.message);
+        continue;
+      }
+    }
+    types[type.objectName] = typeInfo(res);
+  }
+
+  if (read.animals?.animals.length) {
+    try {
+      const res = await gvet.ingestAnimalIds({ run_id, animals: read.animals.animals });
+      log.info(`DelPro gyvulių ObjectGuid → GVET: ${JSON.stringify({ ...res, conflict_samples: undefined })}`);
+    } catch (err) {
+      errors.push(`Animal: ${err.message}`);
+      log.error("DelPro gyvulių ObjectGuid:", err.message);
+    }
   }
 
   const result = await gvet.catalogFinishRun({ run_id, types, error: errors.length ? errors.join("; ").slice(0, 2000) : null });
   log.info(`DelPro katalogas → GVET: ${result?.status} ${JSON.stringify(result?.reconcile ?? {})}`);
   return result;
+}
+
+/**
+ * Dry run: the same DelPro reads, then ONE call to delpro_catalog_preview,
+ * which runs the real GVET pipeline and rolls it back. No begin/upload/finish/
+ * ingest call is made, so nothing in GVET or DelPro changes.
+ */
+export async function previewCatalogSync(client) {
+  const read = await readCatalog(client);
+  const types = {};
+  for (const [name, res] of Object.entries(read.types)) {
+    types[name] = res.error ? { complete: false, note: "read_failed" } : { ...typeInfo(res), records: res.records };
+  }
+  const preview = await gvet.catalogPreview({
+    worker_id: config.workerId,
+    types,
+    animals: read.animals?.animals ?? [],
+    error: read.errors.length ? read.errors.join("; ").slice(0, 2000) : null,
+  });
+  if (preview?.dry_run !== true || preview?.rolled_back !== true) {
+    throw new Error("delpro_catalog_preview negrąžino dry_run/rolled_back patvirtinimo — sustabdyta.");
+  }
+  return { read, preview };
 }

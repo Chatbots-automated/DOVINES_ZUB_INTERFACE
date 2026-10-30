@@ -4,7 +4,9 @@ import { CatalogOutboundModeForm, UncertainStepForm } from "@/components/delpro/
 import {
   catalogJobAction,
   createCatalogTestJob,
+  createPilotDrug,
   markCatalogValidated,
+  releaseSingleCatalogJob,
   setCatalogWriteEnabled,
   unvalidateCatalogOperation,
 } from "@/lib/actions/delpro-catalog";
@@ -49,6 +51,88 @@ function opLabel(op: string) {
   return `${CATALOG_OBJECT_LABEL[object as keyof typeof CATALOG_OBJECT_LABEL] ?? object}: ${OP_LABEL[operation] ?? operation}`;
 }
 
+/** The commands an admin runs on the farm PC for the released pilot job (PowerShell 5.1). */
+function pilotCommands(jobId: string) {
+  return [
+    "Set-Location C:\\gvet\\delpro-worker",
+    `npm.cmd run catalog:write-check -- ${jobId}`,
+    `$env:CATALOG_WRITE_ENABLED = 'true'; npm.cmd run catalog:write-one -- ${jobId}; Remove-Item Env:CATALOG_WRITE_ENABLED`,
+  ].join("\n");
+}
+
+// 0039: the first real GVET -> DelPro medicine — one inactive test medicine, one job, released alone.
+function PilotDrug({ job, singleJob, validated }: { job: CatalogJob | null; singleJob: string | null; validated: boolean }) {
+  const released = job !== null && singleJob === job.id;
+  const writes = job ? job.steps.filter((s) => s.operation !== "verify_refs") : [];
+  return (
+    <div className="rounded-md border border-border p-3">
+      <p className="mb-1 text-[13px] font-medium">Pirmas tikras vaistas GVET → DelPro (bandymas)</p>
+      <p className="mb-2 text-[12px] text-text-muted">
+        Sukuriamas vienas neaktyvus GVET vaistas „GVET TEST vaistas …“ (ml, karencija 0 d.) ir jo DelPro sukūrimo užduotis. Ji nevykdoma, kol neleisite
+        rašyti <strong>tik jai</strong>; po jos rašymas išsijungia pats. Kitos katalogo ir gydymų rašymo užduotys lieka išjungtos.
+      </p>
+      {!job ? (
+        <ActionButton action={createPilotDrug} fields={{}} label="Sukurti bandomąjį vaistą" confirm="Sukurti neaktyvų GVET vaistą „GVET TEST vaistas …“ ir jo DelPro užduotį?" />
+      ) : (
+        <div className="space-y-2 text-[12px]">
+          <div className="flex flex-wrap items-center gap-2">
+            <span>{job.label}</span>
+            <Badge tone={CATALOG_JOB_STATUS_TONE[job.status]}>{CATALOG_JOB_STATUS_LABEL[job.status]}</Badge>
+            <span className="text-text-muted">
+              žingsniai {writes.filter((s) => job.progress[s.id]?.key).length}/{writes.length}
+              {job.delpro_key ? ` · DelPro Code ${job.delpro_key}` : ""}
+            </span>
+            {released && <Badge tone="warning">Leista tik šiai užduočiai</Badge>}
+          </div>
+          {job.error && <div className="text-danger">{job.error}</div>}
+          <UncertainSteps job={job} />
+          {job.status === "queued" && !released && (
+            <ActionButton
+              action={releaseSingleCatalogJob}
+              fields={{ job_id: job.id }}
+              label="Leisti įrašyti tik šią užduotį"
+              variant="primary"
+              confirm="Įjungti rašymą į DelPro tik šiai vienai užduočiai (DrugParameters + Drug)? Po jos rašymas išsijungs pats."
+            />
+          )}
+          {job.status === "queued" && (
+            <div>
+              <p className="text-text-secondary">
+                Ūkio kompiuteryje (PowerShell): pirmiausia patikra (tik skaito), tada vienas įrašymas.{" "}
+                {!released && "Įrašymas veiks tik paspaudus „Leisti įrašyti tik šią užduotį“."}
+              </p>
+              <pre className="mt-1 overflow-x-auto rounded bg-surface-secondary p-2 text-[11px]">{pilotCommands(job.id)}</pre>
+            </div>
+          )}
+          {job.status === "success" && (
+            <div className="space-y-1">
+              <p className="text-success">
+                Įrašyta į DelPro ir nuskaityta atgal be neatitikimų; GVET ↔ DelPro susiejimas išsaugotas. Pakartotinis paleidimas nieko nesiunčia.
+              </p>
+              {(job.readback as { object_type: string; record: Record<string, unknown> }[] | null)?.map((r, n) => (
+                <div key={n} className="text-text-muted">
+                  {r.object_type}: {Object.entries(r.record).map(([k, v]) => `${k}=${v === null ? "—" : String(v)}`).join(", ")}
+                </div>
+              ))}
+              {!validated && (
+                <ActionButton
+                  action={markCatalogValidated}
+                  fields={{ job_id: job.id }}
+                  label="Pažymėti „Vaistas: sukūrimas“ patikrinta"
+                  confirm="Ar DelPro programoje patikrinote šį vaistą? Po to vaistų sukūrimo užduotys galės būti vykdomos (kai rašymas įjungtas)."
+                />
+              )}
+            </div>
+          )}
+          {["queued", "failed", "needs_review", "verification_failed"].includes(job.status) && (
+            <ActionButton action={catalogJobAction} fields={{ job_id: job.id, action: "cancel" }} label="Atšaukti bandymą" variant="ghost" />
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // GVET -> DelPro catalog writes (0037): the gate, per-operation validation by
 // test records, and the job queue. Nothing here writes to DelPro directly —
 // the farm-PC worker executes queued jobs only while every gate is open.
@@ -59,6 +143,7 @@ export function CatalogWritePanel({
   outboundMode,
   writeChannel,
   jobs,
+  singleJob,
 }: {
   writeEnabled: boolean;
   workerWriteEnabled: boolean | null;
@@ -66,9 +151,11 @@ export function CatalogWritePanel({
   outboundMode: CatalogOutboundMode;
   writeChannel: string;
   jobs: CatalogJob[];
+  singleJob: string | null;
 }) {
   const latestTest = (op: string) => jobs.find((j) => j.is_test && `${j.object_type}.${j.operation}` === op);
-  const realJobs = jobs.filter((j) => !j.is_test);
+  const realJobs = jobs.filter((j) => !j.is_test && !j.pilot);
+  const pilot = jobs.find((j) => j.pilot && j.status !== "cancelled") ?? null;
 
   return (
     <div className="space-y-5">
@@ -91,6 +178,8 @@ export function CatalogWritePanel({
           {workerWriteEnabled === null ? "nežinoma" : workerWriteEnabled ? "CATALOG_WRITE_ENABLED=true" : "CATALOG_WRITE_ENABLED=false (rašymas neįvyks)"}
         </span>
       </div>
+
+      <PilotDrug job={pilot} singleJob={singleJob} validated={validated.includes("Drug.create")} />
 
       <CatalogOutboundModeForm mode={outboundMode} />
 

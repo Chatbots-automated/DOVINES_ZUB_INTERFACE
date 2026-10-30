@@ -19,7 +19,7 @@ import {
   parseWriteResponse,
   soapEnvelope,
 } from "../src/gateway.js";
-import { CATALOG_TYPES, normalizeRecord, readCatalogType } from "../src/catalog.js";
+import { CATALOG_TYPES, fetchMissingRefs, normalizeRecord, readCatalogType } from "../src/catalog.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const fixture = (name) => fs.readFileSync(path.join(here, "fixtures/gateway", name), "utf8");
@@ -202,6 +202,70 @@ test("catalog read: a Gateway-side cap below `top` is detected (and the extra ro
 test("catalog read: hitting `top` itself is incomplete", async () => {
   const res = await readCatalogType(fakeCatalog(diagnoses(10), 1000), typeOf("Diagnosis"), { maxRows: 10 });
   assert.equal(res.complete, false);
+});
+
+test("catalog read: exactly the Gateway row cap (1000) is never the whole catalog, even below `top`", async () => {
+  // 1500 rows, the Gateway answers at most 1000 per request; many partition values (no cross-check possible)
+  const rows = Array.from({ length: 1500 }, (_, i) => ({ Code: String(i + 1), Name: `D${i + 1}`, Active: String(i % 40) }));
+  const res = await readCatalogType(fakeCatalog(rows, 1000), typeOf("Diagnosis"), { maxRows: 5000, rowCap: 1000 });
+  assert.equal(res.returned, 1000);
+  assert.equal(res.partitions, null, "too many values for the partition check");
+  assert.equal(res.complete, false);
+  assert.equal(res.note, "truncated");
+});
+
+test("catalog read: a failed partition re-read makes the type incomplete", async () => {
+  let n = 0;
+  const inner = fakeCatalog(diagnoses(12), 1000);
+  const client = {
+    async getDataXml(req) {
+      if (++n === 2) throw new Error("Gateway timeout");
+      return inner.getDataXml(req);
+    },
+  };
+  const res = await readCatalogType(client, typeOf("Diagnosis"), { maxRows: 5000 });
+  assert.equal(res.complete, false);
+  assert.equal(res.note, "partition_check_failed");
+});
+
+test("catalog read: referenced records beyond a truncated type are fetched by key, missing ones listed", async () => {
+  const params = (key) =>
+    `<object name="DrugParameters"><property name="Key">${key}</property><property name="UOM">ml</property><property name="ApplicationMethod" /><property name="DumpMilkDays">0</property><property name="MeatWithholdDays">4</property></object>`;
+  const requests = [];
+  const client = {
+    async getDataXml(req) {
+      requests.push(req);
+      const eq = req.match(/<equal name="Key">([^<]*)<\/equal>/);
+      if (eq) return eq[1] === "9001" ? `<ddmData>${params("9001")}</ddmData>` : "<ddmData></ddmData>";
+      return "<ddmData></ddmData>";
+    },
+  };
+  const results = {
+    DrugParameters: { records: [{ key: "1", uom: "ml" }], keyField: "key", complete: false, note: "truncated" },
+    Drug: { records: [{ code: "7", default_parameters: "9001" }, { code: "8", default_parameters: "1" }], keyField: "code", complete: true },
+    TreatmentDrugUsage: { records: [{ key: "197", drug_params: "9002", drug: "7" }], keyField: "key", complete: true },
+  };
+  await fetchMissingRefs(client, results);
+  const dp = results.DrugParameters;
+  assert.deepEqual(dp.records.map((r) => r.key).sort(), ["1", "9001"]);
+  assert.equal(dp.refFetched, 1);
+  assert.deepEqual(dp.refMissing, ["9002"]);
+  assert.equal(dp.complete, false, "still incomplete: fetching references proves nothing about the rest");
+  assert.ok(requests.every((r) => /<equal name="Key">/.test(r) && /top="2"/.test(r)));
+});
+
+test("catalog read: a key lookup the Gateway does not filter stops further lookups", async () => {
+  const two = `<ddmData><object name="DrugParameters"><property name="Key">5</property></object><object name="DrugParameters"><property name="Key">6</property></object></ddmData>`;
+  const client = { requests: 0, async getDataXml() { this.requests += 1; return two; } };
+  const results = {
+    DrugParameters: { records: [], keyField: "key", complete: false },
+    Drug: { records: [{ code: "7", default_parameters: "9001" }, { code: "8", default_parameters: "9002" }], keyField: "code", complete: true },
+  };
+  await fetchMissingRefs(client, results);
+  assert.equal(client.requests, 1);
+  assert.equal(results.DrugParameters.note, "ref_lookup_unreliable");
+  assert.deepEqual(results.DrugParameters.records, []);
+  assert.deepEqual(results.DrugParameters.refMissing.sort(), ["9001", "9002"]);
 });
 
 // --- write paths (pure) ------------------------------------------------------

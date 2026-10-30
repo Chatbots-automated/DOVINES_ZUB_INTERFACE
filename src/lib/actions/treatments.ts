@@ -30,8 +30,6 @@ export async function createTreatment(
   const field = (name: string) =>
     String(formData.get(name) ?? "").trim() || null;
 
-  // Opened from a visit card: same payload, but through the wrapper that links
-  // the treatment to the visit (and advances its status) in one transaction.
   const visit_id = field("visit_id");
   const payload = {
     animal_id,
@@ -46,12 +44,10 @@ export async function createTreatment(
     medications: parseJsonArray(formData.get("medications")),
     course_days: parseJsonArray(formData.get("course_days")),
   };
-  const { error } = visit_id
-    ? await supabase.rpc("create_treatment_for_visit", {
-        p_visit_id: visit_id,
-        p_data: payload,
-      })
-    : await supabase.rpc("create_treatment", { p_data: payload });
+  // One entry for both cases (0035): from a visit card it links that visit; on its
+  // own it also records a finished visit — and every course day becomes a planned
+  // visit either way, so everything shows up in Vizitai.
+  const { error } = await supabase.rpc("create_treatment_with_visits", { p_data: payload, p_visit_id: visit_id ?? undefined });
 
   if (error) {
     console.error("[gydymai] create_treatment failed:", error);

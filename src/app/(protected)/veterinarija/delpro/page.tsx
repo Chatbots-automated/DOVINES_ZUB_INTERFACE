@@ -56,6 +56,12 @@ export default async function DelproPage() {
       .order("name"),
     supabase.from("delpro_catalog_jobs").select("*").order("created_at", { ascending: false }).limit(100),
   ]);
+  // 0039: import plan (admin RPC) + why DelPro animal ids may not match (GVET herd size)
+  const [importPlanRes, activeAnimalsRes, numberedAnimalsRes] = await Promise.all([
+    supabase.rpc("delpro_catalog_import_preview", {}),
+    supabase.from("animals").select("id", { count: "exact", head: true }).eq("active", true),
+    supabase.from("animals").select("id", { count: "exact", head: true }).eq("active", true).not("animal_no", "is", null),
+  ]);
   const catNames = { drugs: {} as Record<string, string>, treatments: {} as Record<string, string> };
   for (const n of catNamesRes.data ?? []) (n.object_type === "Drug" ? catNames.drugs : catNames.treatments)[n.delpro_key] = n.name ?? n.delpro_key;
   const catItems = catItemsRes.data ?? [];
@@ -128,6 +134,9 @@ export default async function DelproPage() {
           validated={(settings.get("delpro_catalog_validated_operations") ?? "").split(",").filter(Boolean)}
           outboundMode={(settings.get("delpro_catalog_outbound_mode") ?? "manual") as CatalogOutboundMode}
           writeChannel={settings.get("delpro_write_channel") ?? "ui_script"}
+          importPlan={importPlanRes.error ? null : (importPlanRes.data ?? null)}
+          singleJob={settings.get("delpro_catalog_write_only_job") || null}
+          animalStats={{ active: activeAnimalsRes.count ?? 0, withNumber: numberedAnimalsRes.count ?? 0 }}
         />
 
         <CollapsibleSection defaultOpen={false} title="Nustatymai">

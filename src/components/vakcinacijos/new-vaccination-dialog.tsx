@@ -67,9 +67,18 @@ export function NewVaccinationDialog({
     if (state?.ok) {
       setOpen(false);
       resetOwnState();
-      onCreated?.();
     }
   }
+
+  // The parent callback sets the parent's state (e.g. AnimalProfile's refetch), which React forbids
+  // while this component renders — so it runs in an effect, once per successful save.
+  const onCreatedRef = React.useRef(onCreated);
+  React.useEffect(() => {
+    onCreatedRef.current = onCreated;
+  });
+  React.useEffect(() => {
+    if (state?.ok) onCreatedRef.current?.();
+  }, [state]);
 
   React.useEffect(() => {
     if (state?.ok) formRef.current?.reset();

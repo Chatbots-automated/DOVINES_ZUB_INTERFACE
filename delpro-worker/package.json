@@ -13,6 +13,9 @@
     "discover": "node src/discover.js",
     "test": "node --test test/",
     "catalog": "node src/index.js --catalog",
+    "catalog:dry-run": "node src/index.js --catalog --dry-run",
+    "catalog:write-check": "node src/index.js --write-check",
+    "catalog:write-one": "node src/index.js --write-one",
     "gateway-discover": "node src/discover-gateway.js"
   },
   "dependencies": {

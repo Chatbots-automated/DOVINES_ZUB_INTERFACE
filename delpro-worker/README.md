@@ -46,13 +46,29 @@ ever put into the SOAP body; they are not logged or written to disk.
    SOAP response and the decoded result (5 rows; `SAMPLE_TOP=200 npm run gateway-discover -- Diagnosis` for more) to
    `discovery/` (git-ignored). Check them once; copy a raw `*.soap-response.xml` into `test/fixtures/gateway/` so the parser
    tests also cover the real outer envelope.
-2. `npm run catalog` — one catalog sync, then look at Veterinarija → DelPro → Katalogo sinchronizacija.
-3. Leave it to the service (`npm start`) afterwards.
+2. `npm run catalog:dry-run` — the same reads, then **one** call to `delpro_catalog_preview` (0038), which runs the real GVET
+   pipeline (upload, animal ids, removals, reconcile) and rolls it back, returning what would change. Nothing is written to GVET
+   or DelPro (no heartbeat either); the report is saved to `dry-run/` (git-ignored).
+3. `npm run catalog` — one catalog sync, then look at Veterinarija → DelPro → Katalogo sinchronizacija.
+4. Leave it to the service (`npm start`) afterwards.
 
-Completeness: each type is read with `top=CATALOG_MAX_ROWS` (default 5000). A read returning that many rows, or one that a
-re-read per value of a field DelPro itself returned (Active / UOM / Frequency, `<equal>` filter) shows to be capped, is sent as
-**incomplete** — GVET then removes nothing for that type. The earlier PowerShell test returned exactly 150 diagnoses at its own
-limit; don't assume that is the whole catalog.
+Completeness: each type is read with `top=CATALOG_MAX_ROWS` (default 5000). A read returning `CATALOG_GATEWAY_ROW_CAP` rows
+(default 1000 — the farm's Gateway returned exactly 1000 DrugParameters) or more, one that a re-read per value of a field DelPro
+itself returned (Active / UOM / Frequency, `<equal>` filter) shows to be capped, or one whose re-read failed, is sent as
+**incomplete** — GVET then removes nothing for that type. The Gateway has no verified paging, so a type over the cap stays
+incomplete; records the other types reference (a drug's DefaultParameters, a usage's DrugParams…) are then read one by one by key,
+so links and templates are not left pointing at missing records. Missing ones are listed (`refMissing`). The earlier PowerShell
+test returned exactly 150 diagnoses at its own limit; don't assume that is the whole catalog.
+
+### Importing DelPro into GVET (0039)
+
+Veterinarija → DelPro → *Importas iš DelPro į GVET* shows the database's plan (`delpro_catalog_import_preview`) for every unlinked
+DelPro diagnosis / drug: **link** an existing GVET record (a farm mapping in `delpro_mappings` by DelPro code or name override, or a
+unique exact name match on both sides — GVET values are never overwritten, differences show as *Skiriasi*), **create** a GVET
+disease / medicine (DelPro unit + withdrawal days, then a clinical review), **review** (several candidates, candidate already
+linked, two DelPro records → one GVET record — never applied), **blocked** (parameters not received, unknown unit, no withdrawal
+days). The admin ticks rows; `delpro_catalog_import_apply` re-plans and applies a row only if its decision and fingerprint are
+unchanged; already linked rows are skipped, so repeating it is safe. Each link keeps its provenance in `import_snapshot`.
 
 ### Writing the catalog (GVET → DelPro)
 
@@ -65,6 +81,10 @@ It only runs when **all** of these hold:
 2. *Rašymas į DelPro katalogą* is switched on in GVET (Veterinarija → DelPro → Katalogo sinchronizacija → Rašymas į DelPro),
 3. the job is a **test job**, or its operation (e.g. `Drug.create`) has been marked *patikrinta* — which GVET only allows
    after that operation's test job (an inactive `GVET TEST …` record) was written and read back correctly.
+
+First real write: the **pilot medicine** (0039) — one inactive GVET medicine whose Drug.create job is released alone
+(`delpro_catalog_release_single_job`) and executed with `npm run catalog:write-one -- <job>` after `npm run catalog:write-check -- <job>`
+(read-only schema check against the live Gateway). Steps in [`DEPLOY-WINDOWS.md`](DEPLOY-WINDOWS.md) §9.
 
 Validation order on the farm: Diagnosis.create → Diagnosis.update → Drug.create → Drug.update → Treatment.create (uses the
 test drug) → Treatment.update. Check each test record in DelPro itself before marking it. Things the test jobs settle:

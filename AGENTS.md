@@ -60,6 +60,13 @@ not look for Žibartoniai's 0013–0021 VIC/UNIFORM history here.
   FEFO semen + gloves, closes the visit in the same transaction). Deleting a visit keeps the insemination journal row. `applySyncProtocol` (server action) is shared by
   Naujas vizitas → Sinchronizacija and the animal panel's **Sinchronizacija** button (`ApplySyncProtocolDialog`); the panel's
   **Profilaktika** button is just `NewTreatmentDialog` locked to `procedure_type='profilaktika'` (same FEFO/karencija, not sent to DelPro).
+- **Everything in Vizitai** (0035, farm's request, billed with Vizitai): every treatment-course day (2..N) is a planned `animal_visits` row
+  (`course_doses.visit_id`, set by a BEFORE INSERT trigger so hoof exams get it too; one visit per course + day). Giving the dose
+  (`administer_course_dose`, from the visit card or Gydymo kursai) closes the visit once all its doses are given — the visit itself
+  never consumes stock, and its card shows **Skirti dozę** instead of "Įrašyti gydymą". The treatment dialog calls
+  `create_treatment_with_visits(data, visit?)`: from a visit card it links that visit, on its own it also records a finished (`baigtas`)
+  day-1 visit. Deleting a treatment removes its planned course visits. Not mirrored yet: standalone vaccinations, inseminations,
+  hoof exams (only when done from a visit card).
 - **Profilaktika / Boliusai product types** (0026 enum + 0027 rules, farm's request): drugs like medicines — `fn_is_drug_category()`
   drives serija+galiojimas on pajamavimas, the vet drug journal and pack-based acts (keep `DRUG_CATEGORIES` in
   `src/lib/product-categories.ts` in sync). A profilaktika treatment may only use these two types
@@ -160,6 +167,20 @@ not look for Žibartoniai's 0013–0021 VIC/UNIFORM history here.
   updates the base, so nothing echoes back. Withdrawal days + UOM + template lines are clinical: never applied automatically
   (`delpro_catalog_inbound_mode` `auto` only covers name / active substance / active / treatment type). Statement triggers on
   diseases / products / templates re-run the reconcile when a shared field changes (guarded by `delpro.reconciling`, never blocking the save).
+  **Dry run** (0038, `npm run catalog:dry-run`): `delpro_catalog_preview(jsonb)` runs the real begin/upload/ingest/finish (+ reconcile)
+  inside a block that always raises `GVPRV` and returns the summary collected before the rollback — never reimplement the sync
+  logic for it. Truncation: a read reaching `CATALOG_GATEWAY_ROW_CAP` (1000, observed on the farm) or a failed partition re-read is
+  incomplete; there is no verified Gateway paging, so referenced records of an incomplete type are fetched by key (`fetchMissingRefs`).
+- **Import DelPro → GVET** (0039): `fn_delpro_catalog_import_plan()` is the single source of the decision (link via `delpro_mappings`
+  code/name or a unique exact name on both sides / create / review / blocked / linked); preview + apply both use it, apply re-checks the
+  row fingerprint (stale preview refused) and skips linked rows (idempotent). A link from the import has no `synced_fields`, so GVET
+  values are never overwritten — differences surface as `field_difference`. A drug whose DrugParameters weren't received is blocked,
+  never guessed. Apply sets `delpro.reconciling` and reconciles once (the statement triggers would otherwise reconcile per insert).
+- **Pilot write** (0039): `delpro_catalog_create_pilot_drug()` = one inactive `GVET TEST vaistas …` + its normal Drug.create job
+  (`pilot`). `delpro_catalog_release_single_job()` sets `delpro_catalog_write_only_job`; while set, `delpro_catalog_claim_job` hands out
+  that job only and only to a worker naming it (`job_id`, `npm run catalog:write-one`). `trg_delpro_catalog_close_single_gate` closes
+  the gate (write off, only_job cleared) once the job leaves queued/processing. `catalog:write-check` validates a job's properties
+  against live GetData before any write.
 - **GVET treatment templates** (0037, `treatment_templates` + `_items`, edited in the DelPro screen) are the GVET side of DelPro
   `Treatment` + `TreatmentDrugUsage`; `diseases.recommended_template_id` ↔ `Diagnosis.RecommendedTreatment` (adopted from DelPro when GVET
   has none). Template lines are compared as an order-independent set keyed by the drug's DelPro code (`fn_delpro_*_usages`).

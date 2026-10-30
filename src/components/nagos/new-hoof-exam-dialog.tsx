@@ -210,9 +210,18 @@ export function NewHoofExamDialog({
     if (state?.ok) {
       setOpen(false);
       resetAll();
-      onCreated?.();
     }
   }
+
+  // The parent callback sets the parent's state (e.g. AnimalProfile's refetch), which React forbids
+  // while this component renders — so it runs in an effect, once per successful save.
+  const onCreatedRef = React.useRef(onCreated);
+  React.useEffect(() => {
+    onCreatedRef.current = onCreated;
+  });
+  React.useEffect(() => {
+    if (state?.ok) onCreatedRef.current?.();
+  }, [state]);
 
   function handleCondition(code: string) {
     const found = conditionCodes.find((c) => c.code === code);

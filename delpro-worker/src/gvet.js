@@ -31,9 +31,13 @@ export const gvet = {
   catalogUpload: (body) => rpc("delpro_catalog_upload", body),
   catalogFinishRun: (body) => rpc("delpro_catalog_finish_run", body),
   catalogSyncRequested: () => rpc("delpro_catalog_sync_requested", {}),
+  // 0038: dry run — runs the real pipeline in GVET and rolls it back.
+  catalogPreview: (body) => rpc("delpro_catalog_preview", body),
   ingestAnimalIds: (body) => rpc("delpro_ingest_animal_ids", body),
   // GVET -> DelPro catalog jobs (0037)
   catalogClaimJob: (body) => rpc("delpro_catalog_claim_job", body),
   catalogJobStep: (body) => rpc("delpro_catalog_job_step", body),
   catalogJobResult: (body) => rpc("delpro_catalog_job_result", body),
+  // 0039: one job as stored (read-only) — for the write check / one-shot write
+  catalogGetJob: (body) => rpc("delpro_catalog_get_job", body),
 };

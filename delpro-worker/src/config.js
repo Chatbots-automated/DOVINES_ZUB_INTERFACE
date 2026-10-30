@@ -55,6 +55,9 @@ export const config = {
   catalogIntervalMin: Number(env("CATALOG_INTERVAL_MIN", "360")),
   // `top` per GetData; a read returning this many rows is treated as truncated.
   catalogMaxRows: Number(env("CATALOG_MAX_ROWS", "5000")),
+  // Rows a single GetData is assumed to be able to return at most (the farm's Gateway
+  // returned exactly 1000). A read reaching it is treated as truncated, never as the whole catalog.
+  catalogGatewayRowCap: Number(env("CATALOG_GATEWAY_ROW_CAP", "1000")),
   // GVET -> DelPro catalog writes (catalog-writer.js). Even when true, GVET only
   // hands out jobs while its own switch is on and the operation was validated
   // with a test job on the farm's Gateway.
@@ -72,6 +75,7 @@ export function requireConfig() {
   if (!["off", "gateway"].includes(config.catalogSource)) missing.push("CATALOG_SOURCE (off|gateway)");
   if (config.catalogSource === "gateway" && !config.gateway.user) missing.push("DELPRO_GATEWAY_USER");
   if (!(config.catalogMaxRows > 0)) missing.push("CATALOG_MAX_ROWS");
+  if (!(config.catalogGatewayRowCap > 0)) missing.push("CATALOG_GATEWAY_ROW_CAP");
   if (missing.length) throw new Error(`Trūksta / neteisinga konfigūracija: ${missing.join(", ")}`);
 }
 

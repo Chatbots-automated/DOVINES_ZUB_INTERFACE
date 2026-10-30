@@ -10,15 +10,16 @@ What the worker does in this profile:
 | | Reads | Writes |
 |---|---|---|
 | `npm run gateway-discover` | Gateway WSDL + 5 rows per catalog type (`GetData`) | local `discovery\` folder only (no Supabase, no credentials) |
-| `npm run catalog` / service | Gateway `GetData` (Drug, DrugParameters, Diagnosis, Treatment, TreatmentDrugUsage, Animal) | GVET: `delpro_catalog_*` mirror + issues, `animals.delpro_object_guid`, heartbeat. GVET diseases/products are **not** changed (inbound mode `review`) |
+| `npm run catalog:dry-run` | Gateway `GetData` (same as below) | **nothing**: one call to `delpro_catalog_preview`, which runs the sync in GVET and rolls it back; report in local `dry-run\` |
+| `npm run catalog` / service | Gateway `GetData` (Drug, DrugParameters, Diagnosis, Treatment, TreatmentDrugUsage, Animal) | GVET: `delpro_catalog_*` mirror + issues, `animals.delpro_object_guid`, heartbeat. GVET diseases/products are **not** changed in inbound mode `review` (only a linked disease without a recommended template adopts DelPro's) |
 
 ## 0. Requirements
 
 - **Node.js ≥ 22** (`package.json` → `"engines": { "node": ">=22" }`). Install the current **24 LTS** (22 also works).
   Node 20 is end-of-life and a patched dependency (`@azure/identity` 4.14.1, via mssql) requires 22.
 - Outbound HTTPS to `<project-ref>.supabase.co` and, for `npm ci`, to `registry.npmjs.org`.
-- The GVET Supabase project of **this farm** already has migrations up to **0037** (section 5). The Gateway discovery
-  (section 3) does not need it; the catalog scan (section 4) does.
+- The GVET Supabase project of **this farm** already has migrations up to **0038** (section 5). The Gateway discovery
+  (section 4) does not need it; the catalog dry run and scan (section 6) do.
 
 > GVET is single-farm: one Supabase project per farm. Never point this PC's worker at another farm's project — herd
 > snapshots would deactivate the other farm's animals and DelPro catalog keys would collide.
@@ -138,7 +139,7 @@ expects. The `discovery\` folder holds farm catalog data, not credentials. It is
 
 ## 5. Apply migrations to this farm's GVET project (developer machine, after a backup)
 
-0037 needs 0033, 0034 and 0036 to be applied before it. Apply from a **clean checkout of the commit**, not a working tree with
+0038 (catalog dry run) needs 0037, which needs 0033, 0034 and 0036. Apply from a **clean checkout of the commit**, not a working tree with
 other uncommitted migrations.
 
 1. **Identify the project.** The project ref is the subdomain of the `NEXT_PUBLIC_SUPABASE_URL` set on this farm's Netlify
@@ -159,14 +160,14 @@ other uncommitted migrations.
    ```bash
    psql "postgresql://postgres.<project-ref>:<db-password>@<pooler-host>:5432/postgres" -c "show server_version"
    pg_dump "postgresql://postgres.<project-ref>:<db-password>@<pooler-host>:5432/postgres" \
-     --format=custom --no-owner --file="gvet-<project-ref>-pre-0037-$(date +%Y%m%d-%H%M).dump"
-   pg_restore --list "gvet-<project-ref>-pre-0037-"*.dump | head      # readable = usable
+     --format=custom --no-owner --file="gvet-<project-ref>-pre-0038-$(date +%Y%m%d-%H%M).dump"
+   pg_restore --list "gvet-<project-ref>-pre-0038-"*.dump | head      # readable = usable
    ```
 
 3. **See what is pending, then apply.**
 
    ```bash
-   npx supabase migration list --linked       # Local vs Remote; 0033/0034/0036/0037 should be the only local-only rows
+   npx supabase migration list --linked       # Local vs Remote; 0033/0034/0036/0037/0038 should be the only local-only rows
    npx supabase db push --linked --dry-run    # lists exactly what would run
    npx supabase db push --linked
    ```
@@ -185,22 +186,57 @@ other uncommitted migrations.
    -- expected: write_enabled = false, validated_operations = '' , outbound_mode = manual,
    --           inbound_mode = review, write_channel = ui_script
    select count(*) as catalog_jobs from delpro_catalog_jobs;   -- 0
+   select count(*) as catalog_runs from delpro_catalog_runs;   -- 0 (no catalog sync has written yet)
+   select has_function_privilege('service_role', 'delpro_catalog_preview(jsonb)', 'execute') as preview_ok,  -- true
+          has_function_privilege('authenticated', 'delpro_catalog_preview(jsonb)', 'execute') as app_can_call;  -- false
    ```
 
    Deploy the GVET app build from the same commit, so the admin screen matches the database. If a worker call returns
    PGRST202 right after the push, run `notify pgrst, 'reload schema';`.
 
-## 6. Read-only catalog scan
+## 6. Catalog: dry run first, then the first real scan
+
+### 6a. Dry run (changes nothing in GVET or DelPro)
 
 On the PC, after section 5:
 
 ```powershell
 Set-Location C:\gvet\delpro-worker
+npm.cmd run catalog:dry-run
+```
+
+This runs `node src/index.js --catalog --dry-run`:
+
+- **DelPro**: `GetData` only, through a client object that has no write method at all. Per type: one read with
+  `top=CATALOG_MAX_ROWS`, one re-read per value of Active / UOM / Frequency (completeness check), and, for a type that may be
+  truncated (DrugParameters), one `<equal Key>` read per record that a Drug or TreatmentDrugUsage references but the capped read
+  didn't return. Then Animal `ObjectGuid` + `Number`.
+- **GVET**: exactly one HTTPS call, `POST https://<project-ref>.supabase.co/rest/v1/rpc/delpro_catalog_preview` (service role).
+  In the database it runs the real begin_run → upload → ingest_animal_ids → finish_run (removals + reconcile) and rolls all of
+  it back before answering. No heartbeat, no other RPC, no outbound or catalog-write queue.
+- **PC**: writes the full report to `C:\gvet\delpro-worker\dry-run\catalog-<time>.json` (farm catalog data, no credentials,
+  git-ignored).
+
+It exits non-zero if anything fails. Check the log:
+
+- `SAUSAS PALEIDIMAS — GVET ir DelPro nepakeisti` must be there.
+- Per type: received / new / changed / invalid, `pilnas=taip|NE`, removals. **DrugParameters will show `pilnas=NE`** while the
+  Gateway answers at most 1000 rows (`CATALOG_GATEWAY_ROW_CAP`): GVET then removes nothing for it. `+N pagal nuorodas` counts the
+  referenced parameter records fetched by key; `nuorodų DelPro nerasta` > 0 means a drug/usage points to a record DelPro didn't
+  return; look at `read.types.DrugParameters.refMissing` in the report.
+- `Nauji klausimai suggested_match / ambiguous_match: N`: what the admin screen would show.
+- `GVET <table>: +a ~b -c`: rows the real run would change outside the mirror. On a first run expect only `animals` (ObjectGuid),
+  `system_settings` (last seen) and nothing in `diseases`, `products`, `treatment_templates`, `delpro_catalog_jobs`, `delpro_sync_jobs`.
+- SQL afterwards: `select count(*) from delpro_catalog_runs;` is still 0.
+
+### 6b. First real scan (after the dry-run report is reviewed and agreed)
+
+```powershell
 npm.cmd run catalog
 ```
 
-This runs `node src/index.js --catalog`: one catalog read via `GetData`, an upload to GVET, then a heartbeat, and exits. It
-does not run the herd sync, the treatment queue or the catalog write queue. Check:
+This runs `node src/index.js --catalog`: the same reads, the upload to GVET, then a heartbeat, and exits. It does not run the
+herd sync, the treatment queue or the catalog write queue. Check:
 
 - The log ends with `DelPro katalogas → GVET: completed {…}`. A `WARN … gali būti ne viskas, pašalinimai nevykdomi` line
   means that type hit a read limit. GVET then treats it as incomplete and removes nothing for it.
@@ -246,6 +282,58 @@ large. (`README.md` also shows the NSSM alternative.)
 
 Updating the worker later: `Stop-ScheduledTask`, replace `src\`, `queries\`, `package.json` and `package-lock.json` from a new
 `git archive`, run `npm.cmd ci --omit=dev`, then `Start-ScheduledTask`. `.env` stays as it is.
+
+## 8. Update an installed worker (keeps `.env`)
+
+```powershell
+Get-ScheduledTask -TaskName 'GVET-DelPro-Worker' -ErrorAction SilentlyContinue | Stop-ScheduledTask
+$zip = "$env:USERPROFILE\Downloads\delpro-worker-<version>.zip"
+$tmp = "$env:TEMP\delpro-worker-new"
+Unblock-File $zip
+Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
+Expand-Archive -Path $zip -DestinationPath $tmp
+Set-Location C:\gvet\delpro-worker
+Copy-Item .env ".env.backup-$(Get-Date -Format yyyyMMdd-HHmm)"
+Remove-Item .\src -Recurse -Force
+Copy-Item "$tmp\src" .\src -Recurse
+Copy-Item "$tmp\queries\*" .\queries -Force
+Copy-Item "$tmp\package.json", "$tmp\package-lock.json", "$tmp\.env.example", "$tmp\README.md", "$tmp\DEPLOY-WINDOWS.md" . -Force
+npm.cmd ci --omit=dev
+Get-ScheduledTask -TaskName 'GVET-DelPro-Worker' -ErrorAction SilentlyContinue | Start-ScheduledTask
+```
+
+`.env` is never in the package and is not touched; the copy is only a safety net (delete it once the worker runs).
+
+## 9. First GVET → DelPro medicine (pilot, 0039)
+
+Writes exactly one inactive medicine `GVET TEST vaistas …` (a DrugParameters record + a Drug record) to DelPro. Everything else stays off.
+
+1. GVET → Veterinarija → DelPro → *Rašymas į DelPro* → **Sukurti bandomąjį vaistą**. The panel shows the job id.
+2. On the PC, read-only check (GetData only; prints the exact `ddmData` per step and checks property names, objectType, boolean format,
+   UOM value and that the name doesn't exist yet in DelPro):
+
+   ```powershell
+   Set-Location C:\gvet\delpro-worker
+   npm.cmd run catalog:write-check -- <job-id>
+   ```
+
+   It must end with `Patikra: OK — DelPro schema atitinka.`
+3. GVET → **Leisti įrašyti tik šią užduotį** (sets `delpro_catalog_write_enabled=true` and `delpro_catalog_write_only_job=<job-id>`;
+   GVET then hands out that job only, and only to a worker that names it).
+4. On the PC, one write. `CATALOG_WRITE_ENABLED` is set for this one process only; `.env` and the scheduled service keep `false`:
+
+   ```powershell
+   $env:CATALOG_WRITE_ENABLED = 'true'; npm.cmd run catalog:write-one -- <job-id>; Remove-Item Env:CATALOG_WRITE_ENABLED
+   ```
+
+   It re-runs the check, then CreateData DrugParameters → read back by Key → compare; CreateData Drug (DefaultParameters = the new
+   key) → read back by Code → compare; GVET saves the link. Expected last line: `Rezultatas: success, DelPro <Code>, susieta (…)`.
+   GVET switches writing off again by itself as soon as the job is no longer queued (success, failure, review, cancel).
+5. Check the record in DelPro itself (inactive, ml, 0/0 days). Then, if it is right, *Pažymėti „Vaistas: sukūrimas“ patikrinta*.
+6. Running step 4 again prints `Užduotis jau success (DelPro …) — nieko nesiunčiama.` and writes nothing.
+
+If the write's outcome is unknown (timeout after sending), the job goes to *Reikia patikrinti ranka*; it is never re-sent and never
+adopted by name (assign the DelPro record or confirm it is absent, as for any catalog job).
 
 ## Not enabled by this guide
 

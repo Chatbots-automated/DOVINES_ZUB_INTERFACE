@@ -170,6 +170,74 @@ test("empty DelPro snapshot is never sent (would deactivate the herd)", async ()
   }
 });
 
+test("catalog dry run: the real pipeline is previewed and rolled back — GVET unchanged", async () => {
+  const fs = await import("node:fs");
+  const { runCatalogDryRun } = await import("../src/index.js");
+  const { config } = await import("../src/config.js");
+  const { escapeXml } = await import("../src/gateway.js");
+  const fx = (name) => fs.readFileSync(path.join(here, "fixtures/gateway", name), "utf8");
+  const results = {
+    DrugParameters: fx("drugparameters-218.result.xml"),
+    TreatmentDrugUsage: fx("tdu-197.result.xml"),
+    Animal: fx("animal-337.result.xml"),
+    Drug: `<ddmData><object name="Drug"><property name="Code">7</property><property name="Name">Penicilinas</property><property name="Active">true</property><property name="MedicineName" /><property name="ActiveSubstance" /><property name="DefaultParameters" objectType="DrugParameters">218</property></object></ddmData>`,
+    Treatment: `<ddmData><object name="Treatment"><property name="Code">40</property><property name="Name">Mastito gydymas</property><property name="Active">true</property><property name="TreatmentType" /><property name="DrugUsages" objectType="TreatmentDrugUsage">197</property></object></ddmData>`,
+    Diagnosis: `<ddmData><object name="Diagnosis"><property name="Code">11</property><property name="Name">Viduriavimas</property><property name="Active">true</property><property name="RecommendedTreatment" objectType="Treatment">40</property></object></ddmData>`,
+  };
+  // a fake Gateway over real HTTP, so the worker's own SOAP client is used; it records every operation
+  const ops = [];
+  const gw = http.createServer(async (req, res) => {
+    let body = "";
+    for await (const chunk of req) body += chunk;
+    const op = String(req.headers.soapaction).replace(/^"?.*\//, "").replace(/"$/, "");
+    ops.push(op);
+    const xmlData = body.match(/<xmlData>([\s\S]*)<\/xmlData>/)[1].replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&amp;/g, "&");
+    const result = results[xmlData.match(/<object name="(\w+)"/)[1]];
+    res.writeHead(200, { "Content-Type": "text/xml" });
+    res.end(`<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body><${op}Response xmlns="http://tempuri.org/"><${op}Result>${escapeXml(result)}</${op}Result></${op}Response></s:Body></s:Envelope>`);
+  });
+  await new Promise((r) => gw.listen(0, r));
+  const saved = { ...config.gateway, catalogSource: config.catalogSource };
+  Object.assign(config.gateway, { url: `http://127.0.0.1:${gw.address().port}/GatewaySoapService`, user: "HerdNav", password: "" });
+  config.catalogSource = "gateway";
+  await db.exec(`insert into animals (tag_no, animal_no, active) values ('LT000000000999', '337', true)`);
+
+  // every table the real run touches, fingerprinted independently of the function under test
+  const TABLES = ["delpro_catalog_runs", "delpro_catalog_items", "delpro_catalog_issues", "delpro_catalog_links", "delpro_catalog_jobs",
+    "animals", "diseases", "products", "treatment_templates", "system_settings", "user_audit_logs"];
+  const state = async () => {
+    const out = {};
+    for (const t of TABLES) out[t] = (await db.query(`select count(*)::int as n, md5(coalesce(string_agg(x::text, '|' order by x::text), '')) as h from ${t} x`)).rows[0];
+    return out;
+  };
+  const before = await state();
+
+  let preview;
+  let file;
+  try {
+    ({ preview, file } = await runCatalogDryRun());
+  } finally {
+    gw.close();
+    Object.assign(config.gateway, saved);
+    config.catalogSource = saved.catalogSource;
+  }
+  assert.deepEqual([...new Set(ops)], ["GetData"], "only GetData reaches DelPro");
+  assert.equal(JSON.parse(fs.readFileSync(file, "utf8")).preview.rolled_back, true);
+  fs.rmSync(file);
+  assert.equal(preview.dry_run, true);
+  assert.equal(preview.rolled_back, true);
+  assert.equal(preview.run.status, "completed");
+  assert.equal(preview.uploads.Drug.inserted, 1);
+  assert.equal(preview.run.stats.TreatmentDrugUsage.complete, true);
+  assert.equal(preview.animals.matched, 1);
+  assert.equal(preview.new_issues.suggested_match.count, 2);
+  assert.equal(preview.gvet_changes.animals.updated, 1);
+  assert.equal(preview.gvet_changes.diseases, undefined, "a first sync only suggests; no GVET disease changes");
+
+  assert.deepEqual(await state(), before, "nothing persisted");
+  await db.exec(`delete from animals where tag_no = 'LT000000000999'`);
+});
+
 test("catalog: Gateway snapshot -> GVET mirror + reconciliation through the HTTP contract", async () => {
   const fs = await import("node:fs");
   const { runCatalogSync } = await import("../src/catalog.js");
@@ -290,5 +358,92 @@ test("catalog writes: gate, test job, validated create, unknown outcome to revie
   } finally {
     config.catalogWriteEnabled = false;
     await db.exec(`update system_settings set setting_value = 'false' where setting_key = 'delpro_catalog_write_enabled'`);
+  }
+});
+
+test("pilot medicine: schema check, single-job release, one write over SOAP, read-back, mapping, no duplicate on re-run", async () => {
+  const { config } = await import("../src/config.js");
+  const { runCatalogWriteCheck, runCatalogWriteOne } = await import("../src/index.js");
+  const { fakeDelpro } = await import("./fake-delpro.js");
+  const { escapeXml } = await import("../src/gateway.js");
+  const asAdmin = async (sql) => {
+    await db.exec(`set role authenticated; select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-0000000000aa', false);`);
+    try {
+      return (await db.query(sql)).rows[0];
+    } finally {
+      await db.exec("reset role");
+    }
+  };
+
+  // DelPro as the farm has it: existing drugs + parameters in the shapes GetData returns
+  const delpro = fakeDelpro();
+  delpro.db.DrugParameters = { 218: { Key: "218", UOM: "ml", ApplicationMethod: "", DumpMilkDays: "0", MeatWithholdDays: "4" } };
+  delpro.db.Drug = { 7: { Code: "7", Name: "Penicilinas", Active: "true", MedicineName: "", ActiveSubstance: "", DefaultParameters: "218" } };
+  // the fake behind the worker's real SOAP client
+  const gw = http.createServer(async (req, res) => {
+    let body = "";
+    for await (const chunk of req) body += chunk;
+    const op = String(req.headers.soapaction).replace(/^"?.*\//, "").replace(/"$/, "");
+    const xmlData = body.match(/<xmlData>([\s\S]*)<\/xmlData>/)[1].replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&amp;/g, "&");
+    let result;
+    if (op === "GetData") result = await delpro.getDataXml(xmlData);
+    else {
+      const r = op === "CreateData" ? await delpro.createData(xmlData) : await delpro.updateData(xmlData);
+      result = `<Response status="OK">${r.created.map((c) => `<CreatedObject type="${c.type}" keyProperty="${c.keyProperty}" keyValue="${c.keyValue}" id="0"/>`).join("")}</Response>`;
+    }
+    res.writeHead(200, { "Content-Type": "text/xml" });
+    res.end(`<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body><${op}Response xmlns="http://tempuri.org/"><${op}Result>${escapeXml(result)}</${op}Result></${op}Response></s:Body></s:Envelope>`);
+  });
+  await new Promise((r) => gw.listen(0, r));
+  const saved = { ...config.gateway, catalogSource: config.catalogSource, write: config.catalogWriteEnabled };
+  Object.assign(config.gateway, { url: `http://127.0.0.1:${gw.address().port}/GatewaySoapService`, user: "HerdNav", password: "" });
+  config.catalogSource = "gateway";
+  const writes = () => delpro.calls.filter(([op]) => op !== "GetData").length;
+
+  try {
+    const jobId = (await asAdmin(`select delpro_catalog_create_pilot_drug()->>'job_id' as id`)).id;
+
+    // 1. read-only check: exact XML + schema evidence from DelPro, nothing written
+    const { check } = await runCatalogWriteCheck(jobId);
+    assert.equal(check.ok, true, check.problems.join("; "));
+    const main = check.steps.find((s) => s.id === "main");
+    assert.match(main.xml, /^<ddmData><object name="Drug"><property name="Name">GVET TEST vaistas [^<]+<\/property><property name="Active">false<\/property><property name="DefaultParameters" objectType="DrugParameters">\{step:params\}<\/property><\/object><\/ddmData>$/);
+    assert.equal(check.steps.find((s) => s.id === "params").xml,
+      `<ddmData><object name="DrugParameters"><property name="UOM">ml</property><property name="DumpMilkDays">0</property><property name="MeatWithholdDays">0</property></object></ddmData>`);
+    assert.equal(writes(), 0);
+
+    // 2. not enabled on the PC / not released in GVET -> refused before any write
+    config.catalogWriteEnabled = false;
+    await assert.rejects(runCatalogWriteOne(jobId), /CATALOG_WRITE_ENABLED=true/);
+    config.catalogWriteEnabled = true;
+    await assert.rejects(runCatalogWriteOne(jobId), /GVET neleido/);
+    assert.equal(writes(), 0);
+
+    // 3. released for this job only -> written, read back, mapped; the gate closes itself
+    await asAdmin(`select delpro_catalog_release_single_job('${jobId}')`);
+    const { job } = await runCatalogWriteOne(jobId);
+    assert.equal(job.status, "success");
+    assert.deepEqual(delpro.calls.filter(([op]) => op !== "GetData").map(([op, xml]) => [op, xml.match(/<object name="(\w+)"/)[1]]),
+      [["CreateData", "DrugParameters"], ["CreateData", "Drug"]]);
+    const created = Object.values(delpro.db.Drug).find((d) => d.Name.startsWith("GVET TEST vaistas"));
+    assert.equal(created.Active, "false");
+    assert.equal(delpro.db.DrugParameters[created.DefaultParameters].UOM, "ml");
+    const link = (await db.query(`select l.delpro_key, l.origin from delpro_catalog_links l join delpro_catalog_jobs j on j.product_id = l.product_id
+      where j.id = '${jobId}' and l.retired_at is null`)).rows[0];
+    assert.deepEqual(link, { delpro_key: created.Code, origin: "created" });
+    const gate = (await db.query(`select setting_key, setting_value from system_settings where setting_key in ('delpro_catalog_write_enabled', 'delpro_catalog_write_only_job') order by 1`)).rows;
+    assert.deepEqual(gate.map((g) => g.setting_value), ["false", ""]);
+
+    // 4. re-running cannot create a duplicate
+    const again = await runCatalogWriteOne(jobId);
+    assert.equal(again.job.status, "success");
+    assert.equal(again.result, null);
+    assert.equal(writes(), 2);
+    assert.equal(Object.values(delpro.db.Drug).filter((d) => d.Name === created.Name).length, 1);
+  } finally {
+    gw.close();
+    Object.assign(config.gateway, saved);
+    config.catalogSource = saved.catalogSource;
+    config.catalogWriteEnabled = saved.write;
   }
 });

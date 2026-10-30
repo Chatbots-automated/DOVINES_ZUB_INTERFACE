@@ -218,8 +218,19 @@ export async function executeCatalogJob(client, job) {
   }
 }
 
-export async function runCatalogWrites(client) {
-  if (!config.catalogWriteEnabled) return 0;
+/**
+ * Claims and executes queued jobs. With `jobId` only that one job is asked for
+ * (GVET then hands out nothing else — the single-job release of 0039) and the
+ * result of executing it is returned.
+ */
+export async function runCatalogWrites(client, { jobId } = {}) {
+  if (!config.catalogWriteEnabled) return jobId ? null : 0;
+  if (jobId) {
+    const job = await gvet.catalogClaimJob({ worker_id: config.workerId, lease_seconds: 300, job_id: jobId });
+    if (!job) return null;
+    if (job.job_id !== jobId) throw new Error(`GVET grąžino kitą užduotį (${job.job_id}) — sustabdyta.`);
+    return executeCatalogJob(client, job);
+  }
   let processed = 0;
   while (processed < MAX_JOBS_PER_TICK) {
     const job = await gvet.catalogClaimJob({ worker_id: config.workerId, lease_seconds: 300 });

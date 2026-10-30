@@ -1,11 +1,14 @@
+import fs from "node:fs";
 import os from "node:os";
+import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { config, requireConfig } from "./config.js";
+import { ROOT, config, requireConfig } from "./config.js";
 import { gvet } from "./gvet.js";
 import { readHerd, outboundReady, writeTreatment } from "./delpro.js";
 import { createGatewayClient } from "./gateway.js";
-import { runCatalogSync } from "./catalog.js";
+import { previewCatalogSync, runCatalogSync } from "./catalog.js";
 import { runCatalogWrites } from "./catalog-writer.js";
+import { checkCatalogJob } from "./catalog-write-check.js";
 import { writeTreatmentEvent } from "./treatment-gateway.js";
 import { GatewayError } from "./gateway.js";
 import { log } from "./log.js";
@@ -66,6 +69,99 @@ export async function runCatalog() {
   const result = await runCatalogSync(createGatewayClient());
   if (result?.status === "completed") state.lastCatalogOk = new Date().toISOString();
   return result;
+}
+
+/**
+ * `npm run catalog:dry-run`: reads the DelPro catalog (GetData only, through a
+ * client that has no write methods at all) and asks GVET what the sync WOULD
+ * do (delpro_catalog_preview runs the real pipeline and rolls it back). No
+ * heartbeat, no begin/upload/finish/ingest call, no outbound or catalog jobs.
+ * The full report is saved under dry-run/ on this PC.
+ */
+export async function runCatalogDryRun() {
+  if (config.catalogSource !== "gateway") throw new Error("CATALOG_SOURCE=gateway reikalingas sausam paleidimui.");
+  const gw = createGatewayClient();
+  const readOnly = { getDataXml: (xml) => gw.getDataXml(xml) };
+  const { read, preview } = await previewCatalogSync(readOnly);
+
+  const dir = path.join(ROOT, "dry-run");
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, `catalog-${new Date().toISOString().replace(/[:.]/g, "-")}.json`);
+  fs.writeFileSync(file, JSON.stringify({ worker_id: config.workerId, read, preview }, null, 2));
+
+  log.info("SAUSAS PALEIDIMAS — GVET ir DelPro nepakeisti (delpro_catalog_preview atšauktas).");
+  for (const [name, t] of Object.entries(preview.run?.stats ?? {})) {
+    if (name === "Animal") continue;
+    const r = read.types[name] ?? {};
+    log.info(
+      `  ${name}: DelPro ${t.received ?? 0} (pagrindinė užklausa ${r.returned ?? "?"}${r.refFetched ? `, +${r.refFetched} pagal nuorodas` : ""}), ` +
+        `nauji ${t.inserted ?? 0}, pakeisti ${t.changed ?? 0}, nepakeisti ${t.unchanged ?? 0}, netinkami ${t.invalid ?? 0}, ` +
+        `pilnas=${t.complete ? "taip" : "NE"}${t.note ? ` (${t.note})` : ""}, būtų pažymėta pašalintais ${t.removed ?? 0}` +
+        `${r.refMissing?.length ? `, nuorodų DelPro nerasta ${r.refMissing.length}` : ""}`,
+    );
+  }
+  if (preview.animals) log.info(`  Animal: ${JSON.stringify({ ...preview.animals, conflict_samples: undefined })}`);
+  log.info(`  Suderinimas: ${JSON.stringify(preview.run?.reconcile ?? {})}`);
+  for (const [kind, v] of Object.entries(preview.new_issues ?? {})) log.info(`  Nauji klausimai ${kind}: ${v.count}`);
+  for (const [table, v] of Object.entries(preview.gvet_changes ?? {})) {
+    log.info(`  GVET ${table}: +${v.inserted} ~${v.updated} -${v.deleted}`);
+  }
+  log.info(`Ataskaita: ${file}`);
+  return { read, preview, file };
+}
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function jobIdArg(flag) {
+  const id = process.argv[process.argv.indexOf(flag) + 1];
+  if (!id || !UUID.test(id)) throw new Error(`Nurodykite užduoties ID: npm run ${flag === "--write-one" ? "catalog:write-one" : "catalog:write-check"} -- <užduoties-id>`);
+  return id.toLowerCase();
+}
+
+/**
+ * `npm run catalog:write-check -- <job>`: read-only. Prints the exact ddmData
+ * each step of the job will send and checks it against the live Gateway
+ * (catalog-write-check.js). Writes nothing anywhere.
+ */
+export async function runCatalogWriteCheck(jobId) {
+  if (config.catalogSource !== "gateway") throw new Error("CATALOG_SOURCE=gateway reikalingas.");
+  const job = await gvet.catalogGetJob({ job_id: jobId });
+  if (!job) throw new Error(`Užduotis ${jobId} nerasta.`);
+  const gw = createGatewayClient();
+  const check = await checkCatalogJob({ getDataXml: (xml) => gw.getDataXml(xml) }, job);
+  log.info(`Užduotis ${job.job_id}: ${job.label ?? ""} (${job.object_type}.${job.operation}), būsena ${job.status}, ` +
+    `leista tik jai: ${job.released ? "taip" : "ne"}, rašymas GVET: ${job.write_enabled ? "įjungtas" : "išjungtas"}`);
+  for (const s of check.steps) log.info(`  ${s.id} ${s.object}.${s.operation}: ${s.xml}`);
+  for (const n of check.notes) log.warn(`  ${n}`);
+  for (const p of check.problems) log.error(`  ${p}`);
+  log.info(check.ok ? "Patikra: OK — DelPro schema atitinka." : `Patikra: ${check.problems.length} problem(os) — rašyti negalima.`);
+  return { job, check };
+}
+
+/**
+ * `npm run catalog:write-one -- <job>`: executes exactly ONE catalog job.
+ * Needs CATALOG_WRITE_ENABLED=true for this process only, the job released in
+ * GVET (delpro_catalog_release_single_job), and a clean write check first.
+ */
+export async function runCatalogWriteOne(jobId) {
+  if (!config.catalogWriteEnabled) {
+    throw new Error("Rašymas išjungtas: šiai komandai nustatykite CATALOG_WRITE_ENABLED=true (tik šiam paleidimui).");
+  }
+  const stored = await gvet.catalogGetJob({ job_id: jobId });
+  if (!stored) throw new Error(`Užduotis ${jobId} nerasta.`);
+  if (stored.status !== "queued") {
+    // success / review / cancelled: never sent again from here (a re-run cannot duplicate)
+    log.info(`Užduotis jau ${stored.status}${stored.delpro_key ? ` (DelPro ${stored.delpro_key})` : ""} — nieko nesiunčiama.`);
+    return { job: stored, result: null };
+  }
+  const { job, check } = await runCatalogWriteCheck(jobId);
+  if (!check.ok) throw new Error("Patikra nepavyko — į DelPro nieko nesiųsta.");
+  if (!job.released || !job.write_enabled) throw new Error("GVET neleido šios užduoties (Veterinarija → DelPro → „Leisti įrašyti tik šią užduotį“).");
+
+  const result = await runCatalogWrites(createGatewayClient({ allowWrites: true }), { jobId });
+  if (!result) throw new Error("GVET užduoties neišdavė (jau vykdoma kitur arba leidimas atšauktas) — į DelPro nieko nesiųsta.");
+  const after = await gvet.catalogGetJob({ job_id: jobId });
+  log.info(`Rezultatas: ${after.status}${after.delpro_key ? `, DelPro ${after.delpro_key}` : ""}${after.link_id ? `, susieta (${after.link_id})` : ""}.`);
+  return { job: after, result };
 }
 
 // Catalog jobs need a write-enabled Gateway client — the only place one is made for the catalog.
@@ -153,11 +249,28 @@ async function safely(name, fn) {
 
 async function main() {
   requireConfig();
+  const dryRun = process.argv.includes("--dry-run");
+  if (process.argv.includes("--write-check")) {
+    const { check } = await runCatalogWriteCheck(jobIdArg("--write-check"));
+    if (!check.ok) process.exitCode = 2;
+    return;
+  }
+  if (process.argv.includes("--write-one")) {
+    const { job } = await runCatalogWriteOne(jobIdArg("--write-one"));
+    if (job.status !== "success") process.exitCode = 2;
+    return;
+  }
+  if (dryRun && !process.argv.includes("--catalog")) throw new Error("--dry-run veikia tik su --catalog (npm run catalog:dry-run).");
   log.info(
     `DelPro darbininkas v${config.version} (${config.workerId}), šaltinis=${config.source}, outbound=${config.outboundMode}, ` +
       `katalogas=${config.catalogSource}, katalogo rašymas=${config.catalogWriteEnabled ? "ĮJUNGTAS" : "išjungtas"}`,
   );
 
+  if (dryRun) {
+    // Errors exit non-zero here: a failed dry run must not look like a clean one.
+    await runCatalogDryRun();
+    return;
+  }
   if (process.argv.includes("--catalog")) {
     await safely("catalog", runCatalog);
     await safely("heartbeat", heartbeat);

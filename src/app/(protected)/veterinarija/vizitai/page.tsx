@@ -62,6 +62,16 @@ type VisitRow = {
     withdrawal_until_meat: string | null;
     products: { name: string } | null;
   }[];
+  course_doses: {
+    id: string;
+    day_number: number;
+    dose_amount: number | null;
+    unit: Unit | null;
+    administered: boolean;
+    administration_route: AdministrationRoute | null;
+    products: { name: string } | null;
+    treatment_courses: { days: number; treatments: { diagnosis: string | null; diseases: { name: string } | null } | null } | null;
+  }[];
   insemination_records: { id: string; bull_name: string | null; pazymejimo_nr: string | null; sperm_quantity: number | null; sperm: { name: string } | null }[];
 };
 
@@ -83,7 +93,7 @@ export default async function VizitaiPage() {
         supabase
           .from("animal_visits")
           .select(
-            "id, animal_id, visit_datetime, procedures, status, temperature, notes, vet_name, next_visit_date, related_visit_id, sync_application_id, sync_step_title, sync_step_no, sync_step_total, planned_medications, sync_protocol_applications(protocol_name), animals(tag_no, animal_no, group_name), treatments(id, procedure_type, reg_date, diagnosis, outcome, withdrawal_until_milk, withdrawal_until_meat, diseases(name), treatment_courses(days, status), usage_items(qty, unit, administration_route, products(name))), vaccinations(id, dose_amount, unit, administration_route, withdrawal_until_milk, withdrawal_until_meat, products(name)), insemination_records(id, bull_name, pazymejimo_nr, sperm_quantity, sperm:products!insemination_records_sperm_product_id_fkey(name))",
+            "id, animal_id, visit_datetime, procedures, status, temperature, notes, vet_name, next_visit_date, related_visit_id, sync_application_id, sync_step_title, sync_step_no, sync_step_total, planned_medications, sync_protocol_applications(protocol_name), animals(tag_no, animal_no, group_name), treatments(id, procedure_type, reg_date, diagnosis, outcome, withdrawal_until_milk, withdrawal_until_meat, diseases(name), treatment_courses(days, status), usage_items(qty, unit, administration_route, products(name))), vaccinations(id, dose_amount, unit, administration_route, withdrawal_until_milk, withdrawal_until_meat, products(name)), course_doses(id, day_number, dose_amount, unit, administered, administration_route, products(name), treatment_courses(days, treatments(diagnosis, diseases(name)))), insemination_records(id, bull_name, pazymejimo_nr, sperm_quantity, sperm:products!insemination_records_sperm_product_id_fkey(name))",
           )
           .order("visit_datetime", { ascending: false })
           .order("id")
@@ -155,6 +165,30 @@ export default async function VizitaiPage() {
         karencijaMilk: x.withdrawal_until_milk,
         karencijaMeat: x.withdrawal_until_meat,
       })),
+      // Planned / given course days (0035): the medicine is booked when the dose is given, not by the visit.
+      ...(v.course_doses.length > 0
+        ? [
+            {
+              kind: "course_dose" as const,
+              id: v.id,
+              label: `Kurso diena ${[...new Set(v.course_doses.map((d) => d.day_number))].join(", ")} iš ${v.course_doses[0].treatment_courses?.days ?? "?"}`,
+              detail:
+                [
+                  v.course_doses[0].treatment_courses?.treatments?.diseases?.name,
+                  v.course_doses[0].treatment_courses?.treatments?.diagnosis,
+                ]
+                  .filter((x, i, a) => x && a.indexOf(x) === i)
+                  .join(" · ") || null,
+              lines: v.course_doses.map(
+                (d) =>
+                  `${d.products?.name ?? "Produktas"} — ${formatQty(d.dose_amount, d.unit)}${routeSuffix(d.administration_route)}${d.administered ? " · duota" : " · dar neduota"}`,
+              ),
+              outcome: null,
+              karencijaMilk: null,
+              karencijaMeat: null,
+            },
+          ]
+        : []),
       ...v.insemination_records.map((i) => ({
         kind: "insemination" as const,
         id: i.id,
@@ -166,6 +200,7 @@ export default async function VizitaiPage() {
         karencijaMeat: null,
       })),
     ],
+    courseDoses: v.course_doses.map((d) => ({ id: d.id, administered: d.administered })),
     treatmentTypes: v.treatments.map((t) => t.procedure_type),
     hasVaccination: v.vaccinations.length > 0,
     hasInsemination: v.insemination_records.length > 0,

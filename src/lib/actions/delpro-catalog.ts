@@ -98,6 +98,43 @@ export async function importCatalogRecords(_prev: DelproActionResult | null, for
   return done(data?.message);
 }
 
+// 0039: applies exactly the rows the admin approved in the import preview (each with the fingerprint it was shown).
+export async function applyCatalogImport(_prev: DelproActionResult | null, formData: FormData): Promise<DelproActionResult> {
+  let items: { object_type: string; delpro_key: string; action: "create" | "link"; fingerprint: string }[] = [];
+  try {
+    items = JSON.parse(String(formData.get("items") ?? "[]"));
+  } catch {
+    items = [];
+  }
+  if (!Array.isArray(items) || items.length === 0) return { ok: false, error: "Nepasirinktas nė vienas įrašas." };
+  const supabase = await createClient();
+  const { data, error } = await supabase.rpc("delpro_catalog_import_apply", { p_items: items });
+  if (error) return { ok: false, error: error.message };
+  revalidatePath("/apskaita/produktai");
+  if (data && data.created + data.linked === 0 && data.skipped.length > 0) {
+    return { ok: false, error: data.skipped.slice(0, 5).map((s) => `${s.name ?? s.key}: ${s.reason}`).join("; ") };
+  }
+  const skipped = data?.skipped.length ? ` ${data.skipped.slice(0, 3).map((s) => `${s.name ?? s.key}: ${s.reason}`).join("; ")}` : "";
+  return done(`${data?.message ?? ""}${skipped}`);
+}
+
+export async function createPilotDrug(): Promise<DelproActionResult> {
+  const supabase = await createClient();
+  const { data, error } = await supabase.rpc("delpro_catalog_create_pilot_drug");
+  if (error) return { ok: false, error: error.message };
+  revalidatePath("/apskaita/produktai");
+  return done(data?.message);
+}
+
+export async function releaseSingleCatalogJob(_prev: DelproActionResult | null, formData: FormData): Promise<DelproActionResult> {
+  const jobId = String(formData.get("job_id") ?? "");
+  if (!jobId) return { ok: false, error: "Nenurodyta užduotis." };
+  const supabase = await createClient();
+  const { data, error } = await supabase.rpc("delpro_catalog_release_single_job", { p_job_id: jobId });
+  if (error) return { ok: false, error: error.message };
+  return done(data?.message);
+}
+
 export async function updateCatalogInboundMode(_prev: DelproActionResult | null, formData: FormData): Promise<DelproActionResult> {
   const mode = String(formData.get("delpro_catalog_inbound_mode") ?? "") as CatalogInboundMode;
   if (!CATALOG_INBOUND_MODES.includes(mode)) return { ok: false, error: "Neteisingas režimas." };

@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { formatDate, formatDateTime, formatQty } from "@/lib/utils";
 import { updateVisitStatus, deleteVisit, type ActionResult } from "@/lib/actions/visits";
 import { cancelSyncApplication } from "@/lib/actions/sync-protocols";
+import { AdministerDoseButton } from "@/components/gydymo-kursai/administer-dose-button";
 import { NewTreatmentDialog, animalLabel, type Product } from "@/components/gyvunai/new-treatment-dialog";
 import { NewVaccinationDialog } from "@/components/vakcinacijos/new-vaccination-dialog";
 import { NewInseminationDialog, type SemenProduct } from "@/components/seklinimas/new-insemination-dialog";
@@ -16,7 +17,7 @@ import { OPEN_VISIT_STATUSES, VISIT_PROCEDURE_LABELS, VISIT_STATUS_LABELS, VISIT
 import type { ProcedureType, SyncStepMedication, VisitProcedure, VisitStatus } from "@/lib/supabase/types";
 
 export type VisitRecord = {
-  kind: "treatment" | "vaccination" | "insemination";
+  kind: "treatment" | "vaccination" | "insemination" | "course_dose";
   id: string;
   label: string;
   /** Diagnosis / disease (treatments), bull + pažymėjimo Nr. (insemination). */
@@ -44,6 +45,8 @@ export type VisitCardData = {
   isFollowUp: boolean;
   /** Linked treatments / vaccinations (visit_id). */
   records: VisitRecord[];
+  /** Doses of a treatment course planned for this visit's day (0035); given from here or from Gydymo kursai. */
+  courseDoses: { id: string; administered: boolean }[];
   /** Procedure types that already have a linked treatment. */
   treatmentTypes: ProcedureType[];
   hasVaccination: boolean;
@@ -102,9 +105,14 @@ export function VisitCard({
 
   const isOpen = OPEN_VISIT_STATUSES.includes(visit.status);
   const isOverdue = isOpen && vilniusDay(visit.visit_datetime) < today;
-  const pendingTreatments = visit.procedures.filter(
-    (p): p is ProcedureType => (TREATMENT_PROCEDURES as string[]).includes(p) && !visit.treatmentTypes.includes(p as ProcedureType),
-  );
+  // A course-day visit is closed by giving its dose(s), not by recording a new treatment.
+  const pendingDoseIds = visit.courseDoses.filter((d) => !d.administered).map((d) => d.id);
+  const isCourseDay = visit.courseDoses.length > 0;
+  const pendingTreatments = isCourseDay
+    ? []
+    : visit.procedures.filter(
+        (p): p is ProcedureType => (TREATMENT_PROCEDURES as string[]).includes(p) && !visit.treatmentTypes.includes(p as ProcedureType),
+      );
   const needsVaccination = visit.procedures.includes("vakcina") && !visit.hasVaccination;
   const needsInsemination = visit.procedures.includes("sekinimas") && !visit.hasInsemination;
   // A sync step with planned medicine is recorded as a treatment (FEFO stock, karencija);
@@ -253,7 +261,10 @@ export function VisitCard({
               }
             />
           )}
-          {isOpen && (
+          {isOpen && isCourseDay && pendingDoseIds.length > 0 && (
+            <AdministerDoseButton doseIds={pendingDoseIds} label={pendingDoseIds.length > 1 ? "Skirti dozes" : "Skirti dozę"} variant="primary" />
+          )}
+          {isOpen && !(isCourseDay && pendingDoseIds.length > 0) && (
             <form action={statusAction}>
               <input type="hidden" name="visit_id" value={visit.id} />
               <Button size="sm" variant="outline" name="status" value="baigtas" disabled={busy}>

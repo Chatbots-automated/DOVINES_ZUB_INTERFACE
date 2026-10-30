@@ -6,6 +6,7 @@ import { CollapsibleSection } from "@/components/ui/collapsible-section";
 import { ActionButton } from "@/components/delpro/action-button";
 import { CatalogInboundModeForm, CatalogLinkForm } from "@/components/delpro/catalog-controls";
 import { CatalogWritePanel, type CatalogJob } from "@/components/delpro/catalog-write";
+import { CatalogImportPanel } from "@/components/delpro/catalog-import";
 import { TreatmentTemplates, type TemplateProduct, type TemplateRow } from "@/components/delpro/treatment-templates";
 import {
   confirmCatalogSuggestions,
@@ -32,7 +33,7 @@ import {
   type CatalogOutboundMode,
 } from "@/lib/delpro-catalog";
 import { formatDateTime } from "@/lib/utils";
-import type { Database, DelproCatalogObjectType } from "@/lib/supabase/types";
+import type { Database, DelproCatalogObjectType, DelproImportPlanRow } from "@/lib/supabase/types";
 
 type Views = Database["public"]["Views"];
 export type CatalogIssue = Views["vw_delpro_catalog_issues"]["Row"];
@@ -210,6 +211,9 @@ export function CatalogSyncSection({
   validated,
   outboundMode,
   writeChannel,
+  importPlan,
+  singleJob,
+  animalStats,
 }: {
   summary: CatalogSummary[];
   issues: CatalogIssue[];
@@ -231,6 +235,9 @@ export function CatalogSyncSection({
   validated: string[];
   outboundMode: CatalogOutboundMode;
   writeChannel: string;
+  importPlan: { rows: DelproImportPlanRow[]; drug_parameters_complete: boolean } | null;
+  singleJob: string | null;
+  animalStats: { active: number; withNumber: number };
 }) {
   const sum = (t: DelproCatalogObjectType) => summary.find((s) => s.object_type === t);
   const lastRun = runs[0] ?? null;
@@ -243,8 +250,6 @@ export function CatalogSyncSection({
   const incomplete = summary.filter((s) => s.items > 0 && !s.complete);
   const requestPending = syncRequestedAt !== null && (!lastRun || new Date(syncRequestedAt) > new Date(lastRun.started_at));
 
-  // Bulk import is offered for diagnoses only; a drug carries withdrawal days and is imported one by one.
-  const importableDiagnoses = unlinkedItems.filter((i) => i.object_type === "Diagnosis" && !issues.some((x) => x.delpro_key === i.delpro_key && x.object_type === "Diagnosis"));
   const delproOptions = (t: string) => unlinkedItems.filter((i) => i.object_type === t).map((i) => ({ value: i.delpro_key, label: `${i.name ?? "—"} (${i.delpro_key})` }));
   const gvetOptions = (t: string) => gvetUnlinked.filter((g) => g.object_type === t).map((g) => ({ value: g.gvet_id, label: g.name }));
   const linkOptions = {
@@ -325,6 +330,14 @@ export function CatalogSyncSection({
           </p>
         )}
         {lastRun?.error && <p className="text-[12px] text-danger">Klaida: {lastRun.error}</p>}
+        {(lastCompleted?.stats.Animal?.received ?? 0) > 0 && (lastCompleted?.stats.Animal?.matched ?? 0) + (lastCompleted?.stats.Animal?.unchanged ?? 0) === 0 && (
+          <p className="text-[12px] text-warning">
+            DelPro grąžino {lastCompleted?.stats.Animal?.received} gyvulių ID, bet nė vienas nesusietas: GVET turi tik {animalStats.active} aktyvių gyvulių, iš jų{" "}
+            {animalStats.withNumber} su bandos numeriu. Gyvuliai susiejami tik pagal DelPro numerį su aktyviu GVET gyvuliu — pirmiausia reikia bandos
+            sinchronizacijos (DELPRO_SOURCE) arba VIC importo. Dviprasmiški numeriai ({lastCompleted?.stats.Animal?.ambiguous ?? 0}) niekada nesusiejami
+            automatiškai.
+          </p>
+        )}
         {lastErrors.map(([t, s]) => (
           <p key={t} className="text-[12px] text-danger">
             {objectLabel(t)}: {s.invalid} netinkami įrašai praleisti
@@ -344,19 +357,25 @@ export function CatalogSyncSection({
           )}
         </CollapsibleSection>
 
-        <CollapsibleSection defaultOpen={false} title={`Nesusieti DelPro įrašai (${unlinkedItems.length})`}>
+        <CollapsibleSection
+          defaultOpen={(importPlan?.rows ?? []).some((r) => r.action === "create" || r.action === "link")}
+          title={`Importas iš DelPro į GVET (${(importPlan?.rows ?? []).filter((r) => r.action !== "linked").length})`}
+        >
+          {importPlan ? (
+            <CatalogImportPanel rows={importPlan.rows} drugParametersComplete={importPlan.drug_parameters_complete} />
+          ) : (
+            <p className="text-[12px] text-danger">Importo peržiūros nepavyko gauti (ar pritaikyta 0039 migracija?).</p>
+          )}
+        </CollapsibleSection>
+
+        <CollapsibleSection
+          defaultOpen={false}
+          title={`Rankinis susiejimas ir DelPro šablonai (${unlinkedItems.filter((i) => i.object_type === "Treatment").length})`}
+        >
           <div className="space-y-4">
             <CatalogLinkForm delpro={linkOptions.delpro} gvet={linkOptions.gvet} />
-            {importableDiagnoses.length > 0 && (
-              <ActionButton
-                action={importCatalogRecords}
-                fields={{ object_type: "Diagnosis", delpro_keys: JSON.stringify(importableDiagnoses.map((i) => i.delpro_key)) }}
-                label={`Importuoti į GVET visas diagnozes be atitikmens (${importableDiagnoses.length})`}
-                confirm={`Sukurti ${importableDiagnoses.length} GVET ligas iš DelPro diagnozių?`}
-              />
-            )}
             <div className="-mx-4 divide-y divide-border border-t border-border">
-              {unlinkedItems.map((i) => (
+              {unlinkedItems.filter((i) => i.object_type === "Treatment").map((i) => (
                 <div key={i.id} className="flex items-center justify-between gap-3 px-4 py-1.5">
                   <span className="min-w-0 truncate text-[13px]">
                     <span className="text-text-muted">{objectLabel(i.object_type)} {i.delpro_key} · </span>
@@ -367,13 +386,7 @@ export function CatalogSyncSection({
                     action={importCatalogRecords}
                     fields={{ object_type: i.object_type, delpro_keys: JSON.stringify([i.delpro_key]) }}
                     label="Importuoti į GVET"
-                    confirm={
-                      i.object_type === "Drug"
-                        ? "Sukurti GVET produktą su DelPro karencija ir vienetu? Karenciją reikės patikrinti."
-                        : i.object_type === "Treatment"
-                          ? "Sukurti GVET gydymo šabloną iš DelPro? Jo vaistai turi būti susieti; dozes ir karenciją reikės patikrinti."
-                          : undefined
-                    }
+                    confirm="Sukurti GVET gydymo šabloną iš DelPro? Jo vaistai turi būti susieti; dozes ir karenciją reikės patikrinti."
                   />
                 </div>
               ))}
@@ -436,6 +449,7 @@ export function CatalogSyncSection({
             outboundMode={outboundMode}
             writeChannel={writeChannel}
             jobs={jobs}
+            singleJob={singleJob}
           />
         </CollapsibleSection>
 
@@ -514,6 +528,7 @@ export function CatalogSyncSection({
                         {r.stats.Animal && (
                           <div className="text-text-muted">
                             Gyvulių ID: susieta {r.stats.Animal.matched ?? 0}, nerasta {r.stats.Animal.unmatched ?? 0}
+                            {(r.stats.Animal.ambiguous ?? 0) > 0 ? `, dviprasmiški ${r.stats.Animal.ambiguous}` : ""}
                             {(r.stats.Animal.conflicts ?? 0) > 0 ? `, konfliktai ${r.stats.Animal.conflicts}` : ""}
                           </div>
                         )}

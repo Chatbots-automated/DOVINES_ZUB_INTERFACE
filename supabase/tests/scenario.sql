@@ -540,6 +540,9 @@ select 'assert' as step, 'viewer cannot inseminate' as what;
 reset role;
 
 -- 14. Vizitai (0018): visit scheduling + stock-consuming records linked atomically
+-- (clean slate: the course-day visits that 0035 created for earlier treatments are covered by their own block at the end)
+reset role;
+delete from animal_visits;
 set role authenticated;
 select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000b',false);
 select 'visit' as step, create_visit(jsonb_build_object('animal_id',(select id from animals where animal_no='513'),
@@ -1369,6 +1372,100 @@ end $$;
 reset role;
 select 'assert' as step, 'retry with refreshed data is validated' as what;
 
+-- ===========================================================================
+-- 0035: course days and standalone treatments show up in Vizitai
+-- ===========================================================================
+reset role;
+update system_settings set setting_value='approval' where setting_key='delpro_outbound_mode';
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000b',false);
+
+-- standalone treatment, 4-day course (days 2,3,4; day 3 has two medicines) -> finished day-1 visit + 3 planned visits
+select create_treatment_with_visits(jsonb_build_object('animal_id',(select id from animals where animal_no='9002'),'reg_date',(now() at time zone 'Europe/Vilnius')::date::text,'diagnosis','T-V-1',
+  'disease_id',(select id from diseases where name='DP Viduriavimas'),
+  'medications', jsonb_build_array(jsonb_build_object('product_id','99999999-0000-0000-0000-0000000000e1','qty',2,'unit','ml')),
+  'course_days', jsonb_build_array(
+    jsonb_build_object('day_number',2,'scheduled_date','2030-03-02','product_id','99999999-0000-0000-0000-0000000000e1','qty',2,'unit','ml'),
+    jsonb_build_object('day_number',3,'scheduled_date','2030-03-03','product_id','99999999-0000-0000-0000-0000000000e1','qty',2,'unit','ml'),
+    jsonb_build_object('day_number',3,'scheduled_date','2030-03-03','product_id','99999999-0000-0000-0000-0000000000e2','qty',1,'unit','ml'),
+    jsonb_build_object('day_number',4,'scheduled_date','2030-03-04','product_id','99999999-0000-0000-0000-0000000000e1','qty',2,'unit','ml')))) as treatment;
+do $$ declare t uuid := (select id from treatments where diagnosis = 'T-V-1'); d1 uuid := (select visit_id from treatments where diagnosis = 'T-V-1'); begin
+  if d1 is null or (select status from animal_visits where id = d1) <> 'baigtas' or (select procedures from animal_visits where id = d1) <> array['gydymas'] then
+    raise exception 'day-1 visit missing / not finished';
+  end if;
+  if (select count(*) from animal_visits where related_visit_id = d1 and status = 'planuojamas' and procedures = array['gydymas']) <> 3 then
+    raise exception 'expected 3 planned course-day visits, got %', (select count(*) from animal_visits where related_visit_id = d1);
+  end if;
+  -- day 3 has two doses but ONE visit
+  if (select count(distinct cd.visit_id) from course_doses cd join treatment_courses tc on tc.id = cd.course_id where tc.treatment_id = t and cd.scheduled_date = '2030-03-03') <> 1 then
+    raise exception 'same-day doses must share one visit';
+  end if;
+  if exists (select 1 from course_doses cd join treatment_courses tc on tc.id = cd.course_id where tc.treatment_id = t and cd.visit_id is null) then raise exception 'dose without visit'; end if;
+  if (select visit_datetime from animal_visits where id = (select visit_id from course_doses cd join treatment_courses tc on tc.id = cd.course_id where tc.treatment_id = t and cd.scheduled_date = '2030-03-02'))
+       <> '2030-03-02 09:00 Europe/Vilnius'::timestamptz then raise exception 'course-day visit time'; end if;
+  -- the visit itself consumed nothing: stock moved only for day 1
+  if (select count(*) from usage_items where course_dose_id in (select cd.id from course_doses cd join treatment_courses tc on tc.id = cd.course_id where tc.treatment_id = t)) <> 0 then
+    raise exception 'planning visits must not consume stock';
+  end if;
+end $$;
+select 'assert' as step, 'standalone treatment: finished day-1 visit + planned course-day visits' as what;
+
+-- giving the doses closes the visits (day 3 only when BOTH of its doses are given)
+select administer_course_dose(id) from course_doses cd where scheduled_date = '2030-03-02' and cd.course_id in (select id from treatment_courses where treatment_id = (select id from treatments where diagnosis = 'T-V-1'));
+select administer_course_dose(id) from course_doses cd where scheduled_date = '2030-03-03' and product_id = '99999999-0000-0000-0000-0000000000e1' and cd.course_id in (select id from treatment_courses where treatment_id = (select id from treatments where diagnosis = 'T-V-1'));
+do $$ declare t uuid := (select id from treatments where diagnosis = 'T-V-1'); begin
+  if (select v.status from animal_visits v where v.id = (select cd.visit_id from course_doses cd join treatment_courses tc on tc.id = cd.course_id where tc.treatment_id = t and cd.scheduled_date = '2030-03-02')) <> 'baigtas' then
+    raise exception 'day 2 visit should be finished';
+  end if;
+  if (select v.status from animal_visits v where v.id = (select cd.visit_id from course_doses cd join treatment_courses tc on tc.id = cd.course_id where tc.treatment_id = t and cd.scheduled_date = '2030-03-03' limit 1)) <> 'planuojamas' then
+    raise exception 'day 3 visit must stay open until both doses are given';
+  end if;
+end $$;
+select administer_course_dose(id) from course_doses cd where scheduled_date = '2030-03-03' and product_id = '99999999-0000-0000-0000-0000000000e2' and cd.course_id in (select id from treatment_courses where treatment_id = (select id from treatments where diagnosis = 'T-V-1'));
+do $$ declare t uuid := (select id from treatments where diagnosis = 'T-V-1'); begin
+  if (select v.status from animal_visits v where v.id = (select cd.visit_id from course_doses cd join treatment_courses tc on tc.id = cd.course_id where tc.treatment_id = t and cd.scheduled_date = '2030-03-03' limit 1)) <> 'baigtas' then
+    raise exception 'day 3 visit should be finished after both doses';
+  end if;
+end $$;
+select 'assert' as step, 'administering course doses closes their visits' as what;
+
+-- rescheduling a dose moves its visit
+update course_doses set scheduled_date = '2030-03-06' where scheduled_date = '2030-03-04' and course_id in (select id from treatment_courses where treatment_id = (select id from treatments where diagnosis = 'T-V-1'));
+do $$ begin
+  if (select v.visit_datetime from animal_visits v where v.id = (select cd.visit_id from course_doses cd where cd.scheduled_date = '2030-03-06')) <> '2030-03-06 09:00 Europe/Vilnius'::timestamptz then
+    raise exception 'visit should follow the rescheduled dose';
+  end if;
+end $$;
+select 'assert' as step, 'rescheduled dose moves its visit' as what;
+
+-- from a visit card: the card's visit is used (no extra day-1 visit); the course days hang off it
+reset role;
+insert into animal_visits (id, animal_id, visit_datetime, procedures, status)
+  values ('99999999-0000-0000-0000-0000000000f1', (select id from animals where animal_no='9002'), now(), array['gydymas'], 'planuojamas');
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000b',false);
+select create_treatment_with_visits(jsonb_build_object('diagnosis','T-V-2','disease_id',(select id from diseases where name='DP Viduriavimas'),
+  'medications', jsonb_build_array(jsonb_build_object('product_id','99999999-0000-0000-0000-0000000000e1','qty',1,'unit','ml')),
+  'course_days', jsonb_build_array(jsonb_build_object('day_number',2,'scheduled_date','2030-04-02','product_id','99999999-0000-0000-0000-0000000000e1','qty',1,'unit','ml'))),
+  '99999999-0000-0000-0000-0000000000f1') as treatment;
+do $$ begin
+  if (select visit_id from treatments where diagnosis = 'T-V-2') <> '99999999-0000-0000-0000-0000000000f1' then raise exception 'must link the card visit'; end if;
+  if (select count(*) from animal_visits where animal_id = (select id from animals where animal_no='9002') and notes is null and status = 'baigtas' and id <> (select visit_id from treatments where diagnosis = 'T-V-1')) <> 1 then
+    raise exception 'no second day-1 visit expected';
+  end if;
+  if (select count(*) from animal_visits where related_visit_id = '99999999-0000-0000-0000-0000000000f1') <> 1 then raise exception 'course day should follow the card visit'; end if;
+end $$;
+select 'assert' as step, 'treatment from a visit card links it and plans the course days' as what;
+
+-- deleting the treatment removes its planned course-day visits, keeps the finished day-1 visit
+reset role;
+delete from treatments where diagnosis = 'T-V-2';
+do $$ begin
+  if exists (select 1 from animal_visits where related_visit_id = '99999999-0000-0000-0000-0000000000f1') then raise exception 'planned course visit must be removed with its treatment'; end if;
+  if not exists (select 1 from animal_visits where id = '99999999-0000-0000-0000-0000000000f1') then raise exception 'the card visit must stay'; end if;
+end $$;
+select 'assert' as step, 'deleting a treatment removes its planned course-day visits' as what;
+
 -- 18. DelPro catalog sync (0036): Gateway snapshot -> mirror -> reconciliation.
 -- TreatmentDrugUsage 197 and DrugParameters 218 are the real Gateway records;
 -- the rest are test data. Nothing is ever linked by name alone.
@@ -1894,3 +1991,198 @@ select 'gw_report' as step, delpro_report_job_result(jsonb_build_object('sync_id
 reset role;
 update system_settings set setting_value = 'ui_script' where setting_key = 'delpro_write_channel';
 select 'assert' as step, 'gateway channel: guid + catalog diagnosis required, marker frozen, read-back verified' as what;
+
+-- 20. DelPro -> GVET import with preview + approval (0039): mappings, exact unique names, review, blocked, idempotent.
+reset role;
+update system_settings set setting_value = 'false' where setting_key = 'delpro_catalog_write_enabled';
+insert into diseases (id, name) values
+  ('39000000-0000-0000-0000-0000000000d1', 'KT Import Esama'),
+  ('39000000-0000-0000-0000-0000000000d2', 'KT Ūkio pavadinimas');
+insert into delpro_mappings (kind, local_id, delpro_code) values ('disease', '39000000-0000-0000-0000-0000000000d2', '903');
+set role service_role;
+select set_config('t.run20', delpro_catalog_begin_run('{"worker_id":"test-pc"}')->>'run_id', false);
+select delpro_catalog_upload(jsonb_build_object('run_id', current_setting('t.run20'), 'object_type', 'DrugParameters', 'records', '[
+  {"key":"9510","uom":"ml","application_method":"7","dump_milk_days":"2","meat_withhold_days":"5"},
+  {"key":"9530","uom":"xyz","dump_milk_days":"0","meat_withhold_days":"0"}]'::jsonb));
+select delpro_catalog_upload(jsonb_build_object('run_id', current_setting('t.run20'), 'object_type', 'Drug', 'records', '[
+  {"code":"951","name":"KT Import Vaistas","active":"true","active_substance":"Ceftiofurum","default_parameters":"9510"},
+  {"code":"952","name":"KT Import Be parametrų","active":"true","default_parameters":"9520"},
+  {"code":"953","name":"KT Import Keistas vienetas","active":"true","default_parameters":"9530"}]'::jsonb));
+select delpro_catalog_upload(jsonb_build_object('run_id', current_setting('t.run20'), 'object_type', 'Diagnosis', 'records', '[
+  {"code":"901","name":"KT Import Nauja","active":"true"},
+  {"code":"902","name":"KT  import esama","active":"true"},
+  {"code":"903","name":"KT DelPro kodu susieta","active":"true"},
+  {"code":"904","name":"KT Import Du","active":"true"},
+  {"code":"905","name":"KT Import Du","active":"false"},
+  {"code":"906","name":"KT Mastitas","active":"true"},
+  {"code":"909","name":"KT Import Vėliau","active":"true"}]'::jsonb));
+-- DrugParameters incomplete (as on the farm): nothing may be removed, unknown parameters never guessed
+select 'imp_run' as step, r->>'status' as status from (select delpro_catalog_finish_run(jsonb_build_object('run_id', current_setting('t.run20'), 'types', jsonb_build_object(
+  'DrugParameters', '{"complete":false,"note":"truncated"}'::jsonb, 'Drug', '{"complete":false}'::jsonb, 'Diagnosis', '{"complete":false}'::jsonb))) as r) x;
+reset role;
+
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000b',false);
+do $$ declare blocked boolean := false; begin
+  begin perform delpro_catalog_import_preview(); exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: a vet previewing the import'; end if;
+end $$;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000a',false);
+select set_config('t.plan', delpro_catalog_import_preview()::text, false);
+reset role;
+select 'imp_plan' as step, r->>'delpro_key' as key, r->>'action' as action, r->>'match_source' as source, r->>'gvet_name' as gvet, r->>'reason' as reason
+from jsonb_array_elements(current_setting('t.plan')::jsonb->'rows') r
+where r->>'delpro_key' in ('901','902','903','904','905','906','909','951','952','953') order by r->>'delpro_key';
+do $$
+declare
+  a jsonb := (select jsonb_object_agg(r->>'delpro_key', r->>'action') from jsonb_array_elements(current_setting('t.plan')::jsonb->'rows') r);
+begin
+  if a->>'901' <> 'create' or a->>'902' <> 'link' or a->>'903' <> 'link' or a->>'904' <> 'review' or a->>'905' <> 'review'
+     or a->>'906' <> 'review' or a->>'951' <> 'create' or a->>'952' <> 'blocked' or a->>'953' <> 'blocked' then
+    raise exception 'import plan wrong: %', a;
+  end if;
+  if (current_setting('t.plan')::jsonb->>'drug_parameters_complete')::boolean then
+    raise exception 'DrugParameters must be reported incomplete';
+  end if;
+end $$;
+
+-- approve: create 901 + 951, link 902 (name) + 903 (farm mapping), and try to sneak in review 904 and blocked 952
+select set_config('t.items', (select jsonb_agg(jsonb_build_object('object_type', r->>'object_type', 'delpro_key', r->>'delpro_key',
+  'action', case when r->>'delpro_key' in ('904', '952') then 'create' else r->>'action' end, 'fingerprint', r->>'fingerprint'))
+  from jsonb_array_elements(current_setting('t.plan')::jsonb->'rows') r where r->>'delpro_key' in ('901','902','903','904','951','952'))::text, false);
+-- a DelPro change after the preview makes that row stale
+set role service_role;
+select fn_delpro_catalog_put_item('Diagnosis', '{"code":"909","name":"KT Import Vėliau pakeista","active":"true"}'::jsonb);
+reset role;
+select set_config('t.items', (current_setting('t.items')::jsonb || (select jsonb_build_object('object_type', 'Diagnosis', 'delpro_key', '909', 'action', 'create', 'fingerprint', r->>'fingerprint')
+  from jsonb_array_elements(current_setting('t.plan')::jsonb->'rows') r where r->>'delpro_key' = '909'))::text, false);
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000a',false);
+select set_config('t.applied', delpro_catalog_import_apply(current_setting('t.items')::jsonb)::text, false);
+reset role;
+select 'imp_apply' as step, current_setting('t.applied')::jsonb->>'created' as created, current_setting('t.applied')::jsonb->>'linked' as linked,
+       (select jsonb_agg(s->>'key' order by s->>'key') from jsonb_array_elements(current_setting('t.applied')::jsonb->'skipped') s) as skipped;
+do $$ begin
+  if (current_setting('t.applied')::jsonb->>'created')::int <> 2 or (current_setting('t.applied')::jsonb->>'linked')::int <> 2 then
+    raise exception 'import apply counts wrong: %', current_setting('t.applied');
+  end if;
+  if (select origin from delpro_catalog_links where object_type = 'Diagnosis' and delpro_key = '901' and retired_at is null) <> 'imported'
+     or (select import_snapshot->>'source' from delpro_catalog_links where delpro_key = '903' and object_type = 'Diagnosis') <> 'mapping'
+     or (select disease_id from delpro_catalog_links where delpro_key = '903' and object_type = 'Diagnosis' and retired_at is null) <> '39000000-0000-0000-0000-0000000000d2' then
+    raise exception 'import provenance / mapping link wrong';
+  end if;
+  -- linking never overwrites GVET: the name stays, the difference is shown for a decision
+  if (select name from diseases where id = '39000000-0000-0000-0000-0000000000d2') <> 'KT Ūkio pavadinimas'
+     or not exists (select 1 from delpro_catalog_issues where status = 'open' and issue_type = 'field_difference' and delpro_key = '903') then
+    raise exception 'linking must keep GVET values and flag the difference';
+  end if;
+  if (select row(unit::text, withdrawal_days_milk, withdrawal_days_meat, active_substance, is_active)::text from products where name = 'KT Import Vaistas')
+     <> row('ml', 2, 5, 'Ceftiofurum', true)::text then
+    raise exception 'imported medicine values wrong';
+  end if;
+  if (select import_snapshot->'params'->>'application_method' from delpro_catalog_links where object_type = 'Drug' and delpro_key = '951') <> '7'
+     or not exists (select 1 from delpro_catalog_issues where status = 'open' and issue_type = 'clinical_review' and delpro_key = '951') then
+    raise exception 'imported medicine must keep its DelPro parameters and get a clinical review';
+  end if;
+  if exists (select 1 from products where name like 'KT Import Be param%') or exists (select 1 from diseases where name like 'KT Import Du%')
+     or exists (select 1 from diseases where name like 'KT Import Vėliau%') then
+    raise exception 'blocked / review / stale rows must not be imported';
+  end if;
+end $$;
+-- the same approval again: nothing new, no duplicates
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000a',false);
+select 'imp_again' as step, r->>'created' as created, r->>'linked' as linked from (select delpro_catalog_import_apply(current_setting('t.items')::jsonb) as r) x;
+reset role;
+do $$ begin
+  if (select count(*) from diseases where name = 'KT Import Nauja') <> 1 or (select count(*) from products where name = 'KT Import Vaistas') <> 1 then
+    raise exception 'repeating the import must not duplicate';
+  end if;
+  if exists (select 1 from fn_delpro_catalog_import_plan('Diagnosis') p where p.delpro_key in ('901','902','903') and p.action <> 'linked') then
+    raise exception 'imported rows must plan as linked';
+  end if;
+end $$;
+select 'assert' as step, 'import: preview, approval, mapping/name/review/blocked, stale, idempotent' as what;
+
+-- 21. First real GVET -> DelPro medicine (pilot): one test medicine, one job, a gate for exactly that job.
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000b',false);
+do $$ declare blocked boolean := false; begin
+  begin perform delpro_catalog_create_pilot_drug(); exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: a vet creating the pilot'; end if;
+end $$;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000a',false);
+select set_config('t.pilot', delpro_catalog_create_pilot_drug()->>'job_id', false);
+do $$ declare blocked boolean := false; begin
+  begin perform delpro_catalog_create_pilot_drug(); exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: a second pilot'; end if;
+end $$;
+select delpro_catalog_create_test_job('Diagnosis.create'); -- another job that must stay untouched
+reset role;
+select 'pilot_job' as step, j.status, j.pilot, j.is_test, p.is_active, p.unit, jsonb_path_query_array(j.steps, '$[*].object') as objects,
+       (select s->'properties' from jsonb_array_elements(j.steps) s where s->>'id' = 'main') as drug_props
+from delpro_catalog_jobs j join products p on p.id = j.product_id where j.id = current_setting('t.pilot')::uuid;
+
+set role service_role;
+select 'pilot_gate_closed' as step, delpro_catalog_claim_job(jsonb_build_object('worker_id', 'pc', 'job_id', current_setting('t.pilot'))) is null as nothing;
+reset role;
+-- the global switch alone does not release an unvalidated Drug.create
+update system_settings set setting_value = 'true' where setting_key = 'delpro_catalog_write_enabled';
+set role service_role;
+select 'pilot_global_only' as step, delpro_catalog_claim_job(jsonb_build_object('worker_id', 'pc', 'job_id', current_setting('t.pilot'))) is null as nothing;
+reset role;
+update system_settings set setting_value = 'false' where setting_key = 'delpro_catalog_write_enabled';
+
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000a',false);
+select delpro_catalog_release_single_job(current_setting('t.pilot')::uuid);
+reset role;
+set role service_role;
+do $$ begin
+  if delpro_catalog_claim_job('{"worker_id":"pc"}') is not null then
+    raise exception 'a released single job must not go to a worker that does not name it';
+  end if;
+  if delpro_catalog_claim_job(jsonb_build_object('worker_id', 'pc', 'job_id',
+       (select id from delpro_catalog_jobs where is_test and status = 'queued' and object_type = 'Diagnosis' order by created_at desc limit 1))) is not null then
+    raise exception 'only the released job may be claimed';
+  end if;
+end $$;
+select set_config('t.claim', delpro_catalog_claim_job(jsonb_build_object('worker_id', 'pc', 'job_id', current_setting('t.pilot')))::text, false);
+select delpro_catalog_job_step(jsonb_build_object('job_id', current_setting('t.pilot'), 'step', 'params', 'phase', 'start'));
+select delpro_catalog_job_step(jsonb_build_object('job_id', current_setting('t.pilot'), 'step', 'params', 'phase', 'done', 'key', '99001'));
+select delpro_catalog_job_step(jsonb_build_object('job_id', current_setting('t.pilot'), 'step', 'main', 'phase', 'start'));
+select delpro_catalog_job_step(jsonb_build_object('job_id', current_setting('t.pilot'), 'step', 'main', 'phase', 'done', 'key', '990'));
+select 'pilot_result' as step, delpro_catalog_job_result(jsonb_build_object('job_id', current_setting('t.pilot'), 'success', true, 'readback', jsonb_build_array(
+  jsonb_build_object('object_type', 'DrugParameters', 'record', '{"key":"99001","uom":"ml","dump_milk_days":0,"meat_withhold_days":0}'::jsonb),
+  jsonb_build_object('object_type', 'Drug', 'record', jsonb_build_object('code', '990', 'name',
+    (select name from products p join delpro_catalog_jobs j on j.product_id = p.id where j.id = current_setting('t.pilot')::uuid),
+    'active', false, 'default_parameters', '99001')))))->>'status' as status;
+select 'pilot_rerun' as step, delpro_catalog_claim_job(jsonb_build_object('worker_id', 'pc', 'job_id', current_setting('t.pilot'))) is null as nothing;
+reset role;
+do $$ begin
+  if (select setting_value from system_settings where setting_key = 'delpro_catalog_write_enabled') <> 'false'
+     or (select setting_value from system_settings where setting_key = 'delpro_catalog_write_only_job') <> '' then
+    raise exception 'the single-job gate must close itself after the job';
+  end if;
+  if (select l.delpro_key from delpro_catalog_links l join delpro_catalog_jobs j on j.product_id = l.product_id
+      where j.id = current_setting('t.pilot')::uuid and l.retired_at is null) <> '990' then
+    raise exception 'pilot mapping GVET <-> DelPro not saved';
+  end if;
+  if (select status from delpro_catalog_jobs where is_test and object_type = 'Diagnosis' order by created_at desc limit 1) <> 'queued' then
+    raise exception 'other jobs must stay queued';
+  end if;
+end $$;
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000a',false);
+do $$ declare blocked boolean := false; begin
+  begin perform delpro_catalog_enqueue_create('Drug', (select product_id from delpro_catalog_jobs where id = current_setting('t.pilot')::uuid));
+  exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: creating the pilot medicine in DelPro twice'; end if;
+end $$;
+do $$ declare blocked boolean := false; begin
+  begin perform delpro_catalog_create_pilot_drug(); exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: a new pilot after a successful one'; end if;
+end $$;
+reset role;
+update delpro_catalog_jobs set status = 'cancelled' where is_test and status = 'queued';
+select 'assert' as step, 'pilot: one job released, gate closes itself, mapping saved, no duplicate' as what;

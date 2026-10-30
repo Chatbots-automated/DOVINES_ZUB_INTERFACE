@@ -331,6 +331,8 @@ export interface Database {
           administered: boolean;
           administered_date: string | null;
           administered_by: string | null;
+          /** The planned visit for this course day (0035). */
+          visit_id: string | null;
           notes: string | null;
           created_at: string;
         }>;
@@ -1158,6 +1160,7 @@ export interface Database {
       generate_pazymejimo_nr: { Args: { p_vet_code: string }; Returns: string };
       create_biocide_usage: { Args: { p_data: Record<string, unknown> }; Returns: string };
       create_visit: { Args: { p_data: Record<string, unknown> }; Returns: string };
+      create_treatment_with_visits: { Args: { p_data: Record<string, unknown>; p_visit_id?: string }; Returns: string };
       create_treatment_for_visit: { Args: { p_visit_id: string; p_data: Record<string, unknown> }; Returns: string };
       create_insemination_for_visit: { Args: { p_visit_id: string; p_data: Record<string, unknown> }; Returns: string };
       create_vaccination_for_visit: { Args: { p_visit_id: string; p_data: Record<string, unknown> }; Returns: number };
@@ -1211,6 +1214,17 @@ export interface Database {
       };
       save_treatment_template: { Args: { p_data: Record<string, unknown> }; Returns: string };
       delete_treatment_template: { Args: { p_id: string }; Returns: undefined };
+      // 0039 — import with preview + approval; the pilot medicine and its single-job release
+      delpro_catalog_import_preview: {
+        Args: { p_object_type?: "Diagnosis" | "Drug" };
+        Returns: { rows: DelproImportPlanRow[]; counts: Record<string, number>; drug_parameters_complete: boolean };
+      };
+      delpro_catalog_import_apply: {
+        Args: { p_items: { object_type: string; delpro_key: string; action: "create" | "link"; fingerprint: string }[] };
+        Returns: DelproCatalogActionResult & { created: number; linked: number; skipped: { key: string; name?: string | null; reason: string }[] };
+      };
+      delpro_catalog_create_pilot_drug: { Args: Record<string, never>; Returns: DelproCatalogActionResult & { job_id: string; product_id: string } };
+      delpro_catalog_release_single_job: { Args: { p_job_id: string }; Returns: DelproCatalogActionResult };
       delpro_catalog_import: {
         Args: { p_object_type: "Diagnosis" | "Drug" | "Treatment"; p_delpro_keys: string[] };
         Returns: DelproCatalogActionResult & { created: number; skipped: { key: string; name: string | null; reason: string }[] };
@@ -1390,6 +1404,34 @@ export type DelproCatalogIssueAction = "confirm" | "take_delpro" | "keep_gvet" |
 
 export type DelproCatalogActionResult = { ok: boolean; message: string };
 
+/** 0039 import plan: one decision per unlinked DelPro diagnosis / drug. */
+export type DelproImportAction = "create" | "link" | "review" | "blocked" | "linked";
+export type DelproImportPlanRow = {
+  object_type: "Diagnosis" | "Drug";
+  delpro_key: string;
+  delpro_name: string | null;
+  delpro_active: boolean | null;
+  action: DelproImportAction;
+  reason: string | null;
+  match_source: "mapping" | "name" | null;
+  gvet_id: string | null;
+  gvet_name: string | null;
+  candidates: { gvet_id: string; name: string; source: "mapping" | "name"; linked: boolean }[];
+  delpro_values: {
+    name: string | null;
+    active: boolean | null;
+    active_substance?: string | null;
+    params_key?: string | null;
+    uom?: string | null;
+    unit?: string | null;
+    milk_days?: number | null;
+    meat_days?: number | null;
+    application_method?: string | null;
+  };
+  gvet_values: Record<string, unknown> | null;
+  fingerprint: string;
+};
+
 /** Per object type in delpro_catalog_runs.stats (plus "Animal" for the ObjectGuid import). */
 export type DelproCatalogRunTypeStats = {
   received?: number;
@@ -1454,6 +1496,8 @@ type DelproCatalogLinkRow = {
   retired_at: string | null;
   retired_by: string | null;
   retire_reason: string | null;
+  /** 0039: provenance of a link made by the DelPro import (DelPro record, parameters, match source, run). */
+  import_snapshot: Record<string, unknown> | null;
 };
 
 /** A field compared on a link: DelPro value, GVET value, last agreed value (null = never agreed). */
@@ -1504,6 +1548,8 @@ type DelproCatalogJobRow = {
   object_type: "Diagnosis" | "Drug" | "Treatment";
   operation: "create" | "update";
   is_test: boolean;
+  /** 0039: the one pilot medicine (first real Drug.create); released alone via delpro_catalog_release_single_job. */
+  pilot: boolean;
   link_id: string | null;
   disease_id: string | null;
   product_id: string | null;
