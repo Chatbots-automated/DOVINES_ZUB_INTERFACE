@@ -37,14 +37,41 @@ export const config = {
   inboundIntervalMin: Number(env("INBOUND_INTERVAL_MIN", "30")),
   outboundIntervalSec: Number(env("OUTBOUND_INTERVAL_SEC", "60")),
   outboundMode: env("OUTBOUND_MODE", "dry-run"),
+
+  // DelPro Gateway SOAP service (local to the farm PC). Credentials stay in .env;
+  // the password may legitimately be empty, so it is read raw.
+  gateway: {
+    url: env("DELPRO_GATEWAY_URL", "http://127.0.0.1:28080/GatewaySoapService"),
+    user: env("DELPRO_GATEWAY_USER"),
+    password: process.env.DELPRO_GATEWAY_PASSWORD ?? "",
+    // any GUID is accepted; a fresh one per process when unset
+    clientId: env("DELPRO_GATEWAY_CLIENT_ID"),
+    timeoutMs: Number(env("DELPRO_GATEWAY_TIMEOUT_MS", "30000")),
+    readRetries: Number(env("DELPRO_GATEWAY_READ_RETRIES", "2")),
+  },
+  // off | gateway — DelPro catalog (Drug, DrugParameters, Diagnosis, Treatment,
+  // TreatmentDrugUsage) + Animal ObjectGuid -> GVET. Read-only towards DelPro.
+  catalogSource: env("CATALOG_SOURCE", "off"),
+  catalogIntervalMin: Number(env("CATALOG_INTERVAL_MIN", "360")),
+  // `top` per GetData; a read returning this many rows is treated as truncated.
+  catalogMaxRows: Number(env("CATALOG_MAX_ROWS", "5000")),
+  // GVET -> DelPro catalog writes (catalog-writer.js). Even when true, GVET only
+  // hands out jobs while its own switch is on and the operation was validated
+  // with a test job on the farm's Gateway.
+  catalogWriteEnabled: env("CATALOG_WRITE_ENABLED", "false") === "true",
 };
 
 export function requireConfig() {
   const missing = [];
   if (!config.supabaseUrl) missing.push("SUPABASE_URL");
   if (!config.serviceKey) missing.push("SUPABASE_SERVICE_ROLE_KEY");
-  if (!["mssql", "json"].includes(config.source)) missing.push("DELPRO_SOURCE (mssql|json)");
-  if (!["off", "dry-run", "sql"].includes(config.outboundMode)) missing.push("OUTBOUND_MODE (off|dry-run|sql)");
+  if (!["mssql", "json", "off"].includes(config.source)) missing.push("DELPRO_SOURCE (mssql|json|off)");
+  if (!["off", "dry-run", "sql", "gateway"].includes(config.outboundMode)) missing.push("OUTBOUND_MODE (off|dry-run|sql|gateway)");
+  if (config.outboundMode === "gateway" && !config.gateway.user) missing.push("DELPRO_GATEWAY_USER");
+  if (config.catalogWriteEnabled && config.catalogSource !== "gateway") missing.push("CATALOG_SOURCE=gateway (CATALOG_WRITE_ENABLED=true)");
+  if (!["off", "gateway"].includes(config.catalogSource)) missing.push("CATALOG_SOURCE (off|gateway)");
+  if (config.catalogSource === "gateway" && !config.gateway.user) missing.push("DELPRO_GATEWAY_USER");
+  if (!(config.catalogMaxRows > 0)) missing.push("CATALOG_MAX_ROWS");
   if (missing.length) throw new Error(`Trūksta / neteisinga konfigūracija: ${missing.join(", ")}`);
 }
 

@@ -4,7 +4,7 @@ Veterinarinės veiklos valdymo sistema Dovinės žemės ūkio bendrovei su dvipu
 Kuriama pagal Paslaugų teikimo sutartį ir **Priedą Nr. 1** (€2 000 vienkartinai + €50/mėn. po priėmimo).
 
 Stack: Next.js 16 (App Router) + TypeScript + Tailwind v4 + Supabase (Postgres/Auth/RLS) via `@supabase/ssr`, deployed on
-Netlify. DelPro worker: Node 20+ on the farm's Windows PC. See `AGENTS.md` before changing anything.
+Netlify. DelPro worker: Node 22+ on the farm's Windows PC (`delpro-worker/DEPLOY-WINDOWS.md`). See `AGENTS.md` before changing anything.
 
 ## Priedas Nr. 1 → where it lives
 
@@ -23,6 +23,7 @@ Netlify. DelPro worker: Node 20+ on the farm's Windows PC. See `AGENTS.md` befor
 | — | VIC prisijungimai (sėklinimo + veterinaro) + kasdienis gyvulių importas (ūkio prašymu, ne Priedo dalis) | Integracija → VIC (admin), `n8n/vic-daily-animals.json` |
 | 3 | DelPro → GVET (gyvuliai, grupės) | `delpro-worker/` + `upsert_animals_from_delpro()` |
 | 4 | GVET → DelPro (gydymai) | Veterinarija → DelPro (admin) + `delpro-worker/` |
+| 4.3 | DelPro katalogas (diagnozės, vaistai, gydymo šablonai) ↔ GVET ligos / produktai / gydymo šablonai: susiejimas, importas, pakeitimų sekimas abiem kryptimis, rašymas į DelPro (su patikrinimu bandomaisiais įrašais) | Veterinarija → DelPro → Katalogo sinchronizacija + `delpro-worker/` (Gateway) |
 
 ## Journals (§2.8)
 
@@ -51,6 +52,13 @@ the data, the layout is app-side.
 - Outbound mode (Veterinarija → DelPro → Nustatymai): `approval` (default — admin approves each treatment), `auto`
   (sent after a settle delay), `off` (Sutartis §11.4 — pause if something looks wrong).
 - Mappings GVET liga/vaistas → DelPro record live on the same screen (§4.3).
+- Catalog sync (0036/0037): the worker reads DelPro's catalog via the local Gateway SOAP service (`GetData`) and GVET
+  reconciles it — suggestions, conflicts and pending changes under Veterinarija → DelPro → Katalogo sinchronizacija. GVET
+  changes go back as queued, read-back-verified Gateway writes, which run only once writing is switched on and each operation
+  has been proven with an inactive test record.
+- Treatments can also be written as DelPro `DiagnosesAndTreatmentEvent` records through the Gateway (`delpro_write_channel`);
+  built but not enabled. That is the diagnosis event only — medicines are text in its Comment; DelPro drug usages
+  (`HealthEventDrugUsage`) are not synchronized yet.
 - Worker install/run: `delpro-worker/README.md`.
 
 ## Getting started
@@ -59,7 +67,7 @@ the data, the layout is app-side.
 npm install
 cp .env.local.example .env.local      # Supabase URL + keys
 npx supabase link --project-ref <ref>
-npx supabase db push                  # migrations 0001-0023
+npx supabase db push                  # migrations 0001-0037
 npm run dev
 ```
 

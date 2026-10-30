@@ -66,18 +66,83 @@ select 'vacc' as step, create_vaccinations(jsonb_build_object('animal_ids',(sele
   'target_group_name','Melžiamos 1','product_id','11111111-0000-0000-0000-000000000002','dose_amount',2,'unit','dose','vaccination_date','2026-09-10','next_booster_date','2026-10-10'));
 select 'bio' as step, create_biocide_usage('{"product_id":"11111111-0000-0000-0000-000000000003","qty":5,"unit":"l","use_date":"2026-09-12","purpose":"Tvartų dezinfekcija"}'::jsonb) is not null;
 
--- 5. vet cannot approve DelPro
+-- 5. DelPro approval (0006 + 0033): who may approve, and what blocks it
+-- viewer cannot approve
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000c',false);
 do $$ declare blocked boolean := false; begin
   begin perform delpro_approve_jobs(array(select id from delpro_sync_jobs)); exception when others then blocked := true; end;
-  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: vet approve blocked'; end if;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: viewer approve blocked'; end if;
 end $$;
-select 'assert' as step, 'vet approve blocked' as what;
-select 'jobs' as step, status, preview_payload->'delpro'->>'milk_withdrawal_days' as milk_days, preview_payload->'delpro'->'products' as products from vw_delpro_sync_jobs;
+select 'assert' as step, 'viewer approve blocked' as what;
+do $$ declare blocked boolean := false; begin
+  begin perform delpro_approve_treatment((select treatment_id from delpro_sync_jobs)); exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: viewer approve_treatment blocked'; end if;
+end $$;
+select 'assert' as step, 'viewer approve_treatment blocked' as what;
 
--- admin approves
-select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000a',false);
-select 'approved' as step, delpro_approve_jobs(array(select id from delpro_sync_jobs));
+-- vet: allowed role. No DelPro mapping is needed (names are the same as in GVET), but the fixture's
+-- planned course days (10 ml) differ from day 1 (25 ml) and the UI script enters ONE dose
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000b',false);
+select 'jobs' as step, status, preview_payload->'delpro'->>'milk_withdrawal_days' as milk_days, preview_payload->'delpro'->'products' as products from vw_delpro_sync_jobs;
+do $$ declare r jsonb; codes text[]; begin
+  r := delpro_approve_treatment((select treatment_id from delpro_sync_jobs));
+  select array_agg(p->>'code') into codes from jsonb_array_elements(r->'problems') p;
+  if (r->>'ok')::boolean or r->>'outcome' <> 'blocked' or codes <> array['course_variants'] then
+    raise exception 'only the course dose variants should block (no mapping needed): %', r;
+  end if;
+  if (select status from delpro_sync_jobs) <> 'pending_approval' or (select approved_payload from delpro_sync_jobs) is not null then
+    raise exception 'blocked approval must not change the job';
+  end if;
+  if delpro_approve_jobs(array(select id from delpro_sync_jobs)) <> 0 then raise exception 'bulk approve must skip the blocked job'; end if;
+end $$;
+select 'assert' as step, 'course dose variants block; mappings not required' as what;
+-- a vet cannot write mappings (admin-write by RLS)
+do $$ declare blocked boolean := false; begin
+  begin insert into delpro_mappings(kind, local_id, delpro_code, delpro_name) values ('disease', gen_random_uuid(), '1', 'x'); exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: vet writes mapping'; end if;
+end $$;
+select 'assert' as step, 'vet cannot write mappings' as what;
 reset role;
+-- the vet re-plans the course with the same dose every day
+update course_doses set dose_amount = 25;
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000b',false);
+
+-- vet approves from the treatment screen; payload is frozen from the database, not from the client
+select 'approved' as step, delpro_approve_treatment((select treatment_id from delpro_sync_jobs)) as r;
+do $$ declare j delpro_sync_jobs%rowtype; u jsonb; begin
+  select * into j from delpro_sync_jobs;
+  u := j.approved_payload->'delpro'->'ui_entry';
+  if j.status <> 'approved' or j.approved_by <> '00000000-0000-0000-0000-00000000000b' or j.approved_at is null then
+    raise exception 'approval not recorded: %', to_jsonb(j);
+  end if;
+  if u->>'animal_number' <> '512' or u->>'diagnosis_name' <> 'Mastitas' or u->>'diagnosis_code' is not null
+     or u->>'medicine_name' <> 'Penicilinas' or (u->>'dose')::numeric <> 25 or (u->>'course_days')::int <> 3
+     or u->>'treatment_id' <> j.treatment_id::text or j.approved_payload->>'sync_id' <> j.id::text then
+    raise exception 'unexpected ui_entry: %', u;
+  end if;
+end $$;
+select 'assert' as step, 'approval frozen with ui_entry and approver' as what;
+
+-- idempotent: a second click / bulk approve changes nothing and creates no second job
+do $$ declare before jsonb; r jsonb; begin
+  select to_jsonb(j) into before from delpro_sync_jobs j;
+  r := delpro_approve_treatment((select treatment_id from delpro_sync_jobs));
+  if r->>'outcome' <> 'already_approved' or not (r->>'ok')::boolean then raise exception 'second approval: %', r; end if;
+  if delpro_approve_jobs(array(select id from delpro_sync_jobs)) <> 0 then raise exception 'bulk approve of approved job counted'; end if;
+  if (select to_jsonb(j) from delpro_sync_jobs j) is distinct from before or (select count(*) from delpro_sync_jobs) <> 1 then
+    raise exception 'duplicate approval changed the job';
+  end if;
+end $$;
+select 'assert' as step, 'repeat approval is idempotent' as what;
+reset role;
+do $$ begin
+  if (select count(*) from user_audit_logs where action = 'delpro_transfer_approved' and record_id = (select id from delpro_sync_jobs)
+        and user_id = '00000000-0000-0000-0000-00000000000b') <> 1 then
+    raise exception 'approval must be audited exactly once';
+  end if;
+end $$;
+select 'assert' as step, 'approval audited once' as what;
 
 -- 6. worker claims + reports
 set role service_role;
@@ -227,7 +292,9 @@ reset role;
 -- 10. auto mode: a fresh gydymas becomes claimable only after the settle delay
 select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000a',false);
 update system_settings set setting_value='auto' where setting_key='delpro_outbound_mode';
+-- auto mode: nothing is claimed before the settle delay
 select create_treatment(jsonb_build_object('animal_id',(select id from animals where animal_no='513'),'reg_date','2026-09-20','diagnosis','Endometritas',
+  'disease_id',(select id from diseases where name='Endometritas'),
   'medications', jsonb_build_array(jsonb_build_object('product_id','11111111-0000-0000-0000-000000000001','qty',2,'unit','ml'))));
 reset role;
 set role service_role;
@@ -968,3 +1035,862 @@ select 'hoof_exam_deleted' as step, (select count(*) from treatments where hoof_
   (select count(*) from course_doses cd join treatment_courses tc on tc.id = cd.course_id where tc.treatment_id not in (select id from treatments)) as orphan_doses,
   (select qty_left from batches where lot='NAGOS-AB1') as drug_left, (select qty_left from batches where lot='NAGOS-TV1') as bandage_left;
 reset role;
+
+-- ===========================================================================
+-- 0033: treatment-level DelPro confirmation (fresh fixtures, labelled T-DP-*)
+-- ===========================================================================
+reset role;
+update system_settings set setting_value='approval' where setting_key='delpro_outbound_mode';
+update system_settings set setting_value=null where setting_key='delpro_worker_last_seen_at';
+-- everything earlier in the file is finished with: park its open jobs so counts below are about our fixtures
+update delpro_sync_jobs set status='rejected' where status in ('pending_approval','approved');
+
+insert into animals (tag_no, animal_no) values ('LT000000009001','9001'), ('LT000000009002','9002'), ('LT000000009003', null);
+insert into diseases (name) values ('DP Viduriavimas'), ('DP Neturi susiejimo');
+insert into products (id,name,category,unit) values
+ ('99999999-0000-0000-0000-0000000000e1','DP Vitamin C','medicines','ml'),
+ ('99999999-0000-0000-0000-0000000000e2','DP Antras vaistas','medicines','ml'),
+ ('99999999-0000-0000-0000-0000000000e3','DP Nesusietas vaistas','medicines','ml');
+insert into batches (product_id,lot,expiry_date,received_qty,purchase_price) values
+ ('99999999-0000-0000-0000-0000000000e1','D1','2030-01-01',500,1),
+ ('99999999-0000-0000-0000-0000000000e2','D2','2030-01-01',500,1),
+ ('99999999-0000-0000-0000-0000000000e3','D3','2030-01-01',500,1);
+
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000a',false);
+insert into delpro_mappings (kind, local_id, delpro_code, delpro_name) values
+ ('disease', (select id from diseases where name='DP Viduriavimas'), '54', 'Viduriavimas'),
+ ('product', '99999999-0000-0000-0000-0000000000e1', null, 'Vitamin C'),
+ ('product', '99999999-0000-0000-0000-0000000000e2', null, 'Antras DelPro vaistas');
+
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000b',false);
+-- T-DP-1 eligible: 1 ml... 3 ml dose, 2-day course with the same dose
+select create_treatment(jsonb_build_object('animal_id',(select id from animals where animal_no='9001'),'reg_date','2026-10-10','diagnosis','T-DP-1',
+  'disease_id',(select id from diseases where name='DP Viduriavimas'),
+  'medications', jsonb_build_array(jsonb_build_object('product_id','99999999-0000-0000-0000-0000000000e1','qty',3,'unit','ml','administration_route','im')),
+  'course_days', jsonb_build_array(jsonb_build_object('scheduled_date','2026-10-11','product_id','99999999-0000-0000-0000-0000000000e1','qty',3,'unit','ml','administration_route','im'))));
+-- T-DP-2 single day, no course
+select create_treatment(jsonb_build_object('animal_id',(select id from animals where animal_no='9002'),'reg_date','2026-10-10','diagnosis','T-DP-2',
+  'disease_id',(select id from diseases where name='DP Viduriavimas'),
+  'medications', jsonb_build_array(jsonb_build_object('product_id','99999999-0000-0000-0000-0000000000e1','qty',2,'unit','ml'))));
+-- T-DP-3 two medicines
+select create_treatment(jsonb_build_object('animal_id',(select id from animals where animal_no='9001'),'reg_date','2026-10-10','diagnosis','T-DP-3',
+  'disease_id',(select id from diseases where name='DP Viduriavimas'),
+  'medications', jsonb_build_array(
+    jsonb_build_object('product_id','99999999-0000-0000-0000-0000000000e1','qty',1,'unit','ml'),
+    jsonb_build_object('product_id','99999999-0000-0000-0000-0000000000e2','qty',1,'unit','ml'))));
+-- T-DP-4 disease without mapping; T-DP-5 no disease at all; T-DP-6 unmapped medicine; T-DP-7 animal without a DelPro number
+select create_treatment(jsonb_build_object('animal_id',(select id from animals where animal_no='9001'),'reg_date','2026-10-10','diagnosis','T-DP-4',
+  'disease_id',(select id from diseases where name='DP Neturi susiejimo'),
+  'medications', jsonb_build_array(jsonb_build_object('product_id','99999999-0000-0000-0000-0000000000e1','qty',1,'unit','ml'))));
+select create_treatment(jsonb_build_object('animal_id',(select id from animals where animal_no='9001'),'reg_date','2026-10-10','diagnosis','T-DP-5',
+  'medications', jsonb_build_array(jsonb_build_object('product_id','99999999-0000-0000-0000-0000000000e1','qty',1,'unit','ml'))));
+select create_treatment(jsonb_build_object('animal_id',(select id from animals where animal_no='9001'),'reg_date','2026-10-10','diagnosis','T-DP-6',
+  'disease_id',(select id from diseases where name='DP Viduriavimas'),
+  'medications', jsonb_build_array(jsonb_build_object('product_id','99999999-0000-0000-0000-0000000000e3','qty',1,'unit','ml'))));
+select create_treatment(jsonb_build_object('animal_id',(select id from animals where tag_no='LT000000009003'),'reg_date','2026-10-10','diagnosis','T-DP-7',
+  'disease_id',(select id from diseases where name='DP Viduriavimas'),
+  'medications', jsonb_build_array(jsonb_build_object('product_id','99999999-0000-0000-0000-0000000000e1','qty',1,'unit','ml'))));
+-- T-DP-8 profilaktika / T-DP-9 apžiūra: never queued
+select create_treatment(jsonb_build_object('animal_id',(select id from animals where animal_no='9001'),'procedure_type','profilaktika','reg_date','2026-10-10','diagnosis','T-DP-8',
+  'medications', jsonb_build_array(jsonb_build_object('product_id','99999999-0000-0000-0000-0000000000e1','qty',1,'unit','ml'))));
+select create_treatment(jsonb_build_object('animal_id',(select id from animals where animal_no='9001'),'procedure_type','apziura','reg_date','2026-10-10','diagnosis','T-DP-9'));
+
+do $$
+declare
+  function_codes text;
+  r jsonb;
+  tid uuid;
+  lbl text;
+  want text;
+begin
+  -- blocked treatments: exactly the expected problem code, and no approval leaks through
+  for lbl, want in values ('T-DP-3','multi_medicine'),('T-DP-5','diagnosis_missing'),('T-DP-7','animal_number') loop
+    select id into tid from treatments where diagnosis = lbl;
+    r := delpro_approve_treatment(tid);
+    if (r->>'ok')::boolean or r->>'outcome' <> 'blocked' or not exists (select 1 from jsonb_array_elements(r->'problems') p where p->>'code' = want) then
+      raise exception '% should be blocked by %: %', lbl, want, r;
+    end if;
+    if (select status from delpro_sync_jobs where treatment_id = tid) <> 'pending_approval' then raise exception '% job changed', lbl; end if;
+  end loop;
+
+  -- profilaktika / apžiūra: no job, approve refuses and creates none
+  for lbl in values ('T-DP-8'),('T-DP-9') loop
+    select id into tid from treatments where diagnosis = lbl;
+    if exists (select 1 from delpro_sync_jobs where treatment_id = tid) then raise exception '% must not be queued', lbl; end if;
+    r := delpro_approve_treatment(tid);
+    if (r->>'ok')::boolean or not exists (select 1 from jsonb_array_elements(r->'problems') p where p->>'code' = 'not_gydymas') then
+      raise exception '% must be refused as not gydymas: %', lbl, r;
+    end if;
+    if exists (select 1 from delpro_sync_jobs where treatment_id = tid) then raise exception '% approve created a job', lbl; end if;
+  end loop;
+end $$;
+select 'assert' as step, 'blocked treatments + ineligible procedure types' as what;
+
+-- no mapping at all: the DelPro names are the GVET disease / product names, code stays empty
+do $$ declare u jsonb; begin
+  u := delpro_treatment_transfer_state((select id from treatments where diagnosis = 'T-DP-4'))->'preview'->'delpro'->'ui_entry';
+  if u->>'diagnosis_name' <> 'DP Neturi susiejimo' or u->>'diagnosis_code' is not null or u->>'medicine_name' <> 'Vitamin C'
+     or jsonb_array_length(delpro_treatment_transfer_state((select id from treatments where diagnosis = 'T-DP-4'))->'problems') <> 0 then
+    raise exception 'unmapped disease should fall back to GVET names: %', u;
+  end if;
+  u := delpro_treatment_transfer_state((select id from treatments where diagnosis = 'T-DP-6'))->'preview'->'delpro'->'ui_entry';
+  if u->>'medicine_name' <> 'DP Nesusietas vaistas' then raise exception 'unmapped medicine should use the product name: %', u; end if;
+end $$;
+select 'assert' as step, 'names default to GVET names, mappings are optional overrides' as what;
+
+-- read model the dialog uses (vet): preview is built by the database, mappings resolved, nothing frozen yet
+do $$
+declare s jsonb; u jsonb;
+begin
+  s := delpro_treatment_transfer_state((select id from treatments where diagnosis = 'T-DP-1'));
+  u := s->'preview'->'delpro'->'ui_entry';
+  if not (s->>'eligible')::boolean or not (s->>'can_approve')::boolean or (s->>'frozen')::boolean or jsonb_array_length(s->'problems') <> 0 then
+    raise exception 'unexpected state: %', s;
+  end if;
+  if u->>'animal_number' <> '9001' or u->>'diagnosis_name' <> 'Viduriavimas' or u->>'diagnosis_code' <> '54'
+     or u->>'medicine_name' <> 'Vitamin C' or (u->>'dose')::numeric <> 3 or (u->>'course_days')::int <> 2 then
+    raise exception 'unexpected ui_entry preview: %', u;
+  end if;
+  -- single-day treatment: CourseDays is derived as 1, not defaulted to something else
+  u := delpro_treatment_transfer_state((select id from treatments where diagnosis = 'T-DP-2'))->'preview'->'delpro'->'ui_entry';
+  if (u->>'course_days')::int <> 1 or (u->>'dose')::numeric <> 2 then raise exception 'single-day ui_entry: %', u; end if;
+  -- the worker is not online (never seen)
+  if (s->'worker'->>'online')::boolean then raise exception 'worker must not look online'; end if;
+end $$;
+select 'assert' as step, 'transfer state read model' as what;
+
+-- unauthorized roles: viewer reads state but cannot approve; the queue table cannot be written from a client
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000c',false);
+do $$ declare blocked boolean := false; s jsonb; begin
+  s := delpro_treatment_transfer_state((select id from treatments where diagnosis = 'T-DP-1'));
+  if (s->>'can_approve')::boolean then raise exception 'viewer must not be able to approve'; end if;
+  begin perform delpro_approve_treatment((select id from treatments where diagnosis = 'T-DP-1')); exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: viewer approve T-DP-1'; end if;
+end $$;
+select 'assert' as step, 'viewer cannot approve' as what;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000a',false);
+do $$ declare blocked boolean := false; n integer; begin
+  -- (the harness re-grants table privileges after the migrations, so here RLS alone must hold: 0 rows touched)
+  begin update delpro_sync_jobs set status = 'success', verified = true; get diagnostics n = row_count; exception when others then n := 0; end;
+  if n <> 0 then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: admin marks job success from client (% rows)', n; end if;
+  begin delete from delpro_sync_jobs; get diagnostics n = row_count; exception when others then n := 0; end;
+  if n <> 0 then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: admin deletes jobs from client (% rows)', n; end if;
+  begin insert into delpro_sync_jobs (treatment_id, status, approved_payload) values ((select id from treatments where diagnosis = 'T-DP-9'), 'approved', '{"x":1}'); exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: admin inserts forged approved job'; end if;
+  blocked := false;
+  begin perform delpro_claim_next_job('hacker'); exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: authenticated claims job'; end if;
+  blocked := false;
+  begin perform delpro_report_job_result(jsonb_build_object('sync_id', (select id from delpro_sync_jobs limit 1), 'success', true)); exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: authenticated reports job result'; end if;
+end $$;
+select 'assert' as step, 'client cannot mark success / forge / claim / report' as what;
+
+-- a frozen account cannot approve
+reset role;
+update users set is_frozen = true where id = '00000000-0000-0000-0000-00000000000b';
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000b',false);
+do $$ declare blocked boolean := false; begin
+  begin perform delpro_approve_treatment((select id from treatments where diagnosis = 'T-DP-1')); exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: frozen vet approves'; end if;
+end $$;
+select 'assert' as step, 'frozen user cannot approve' as what;
+reset role;
+update users set is_frozen = false where id = '00000000-0000-0000-0000-00000000000b';
+
+-- approve T-DP-1 (vet), frozen payload, then worker offline: nothing is lost
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000b',false);
+select 'dp1_approved' as step, delpro_approve_treatment((select id from treatments where diagnosis = 'T-DP-1'))->>'outcome' as outcome;
+do $$ declare j delpro_sync_jobs%rowtype; begin
+  select * into j from delpro_sync_jobs where treatment_id = (select id from treatments where diagnosis = 'T-DP-1');
+  if j.status <> 'approved' or j.verified or j.completed_at is not null or j.started_at is not null then raise exception 'approval must not look completed: %', to_jsonb(j); end if;
+  if (select count(*) from delpro_sync_jobs where treatment_id = j.treatment_id) <> 1 then raise exception 'duplicate job'; end if;
+  if (delpro_treatment_transfer_state(j.treatment_id)->>'frozen')::boolean is not true then raise exception 'state must report frozen'; end if;
+end $$;
+select 'assert' as step, 'approved is not completed; one job per treatment' as what;
+reset role;
+-- worker offline for a day: the approved job is still there, untouched, and the heartbeat says offline
+update system_settings set setting_value = (now() - interval '1 day')::text where setting_key='delpro_worker_last_seen_at';
+do $$ begin
+  if (select status from delpro_sync_jobs where treatment_id = (select id from treatments where diagnosis = 'T-DP-1')) <> 'approved' then raise exception 'job lost'; end if;
+  if (select released from (select delpro_release_stale_jobs() as released) x) <> 0 then raise exception 'approved job must not be released/changed'; end if;
+end $$;
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000b',false);
+do $$ begin
+  if (delpro_treatment_transfer_state((select id from treatments where diagnosis = 'T-DP-1'))->'worker'->>'online')::boolean then
+    raise exception 'worker last seen yesterday must be offline';
+  end if;
+end $$;
+reset role;
+select 'assert' as step, 'offline worker: approved job stays queued' as what;
+
+-- STALE: the diagnosis mapping changes after approval. The frozen payload is untouched and flagged ...
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000a',false);
+update delpro_mappings set delpro_code = '55' where kind='disease' and local_id = (select id from diseases where name='DP Viduriavimas');
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000b',false);
+do $$ declare s jsonb; begin
+  s := delpro_treatment_transfer_state((select id from treatments where diagnosis = 'T-DP-1'));
+  if not (s->>'stale')::boolean then raise exception 'must be stale after mapping change'; end if;
+  if s->'payload'->'delpro'->'ui_entry'->>'diagnosis_code' <> '54' then raise exception 'frozen payload must still say 54: %', s->'payload'; end if;
+  -- clicking confirm again does NOT silently replace it
+  if delpro_approve_treatment((select id from treatments where diagnosis = 'T-DP-1'))->>'outcome' <> 'stale' then raise exception 'stale approval must be refused without reapprove'; end if;
+  if (select approved_payload->'delpro'->'ui_entry'->>'diagnosis_code' from delpro_sync_jobs where treatment_id = (select id from treatments where diagnosis = 'T-DP-1')) <> '54' then
+    raise exception 'frozen payload was replaced';
+  end if;
+  if (select payload_stale from vw_delpro_sync_jobs where treatment_id = (select id from treatments where diagnosis = 'T-DP-1')) is not true then raise exception 'queue view must flag stale'; end if;
+end $$;
+reset role;
+select 'assert' as step, 'edit after approval: payload frozen, flagged, not silently replaced' as what;
+-- ... and the worker is never handed the stale payload: the job goes back to pending_approval
+set role service_role;
+select 'stale_claim' as step, delpro_claim_next_job('farm-pc') is null as empty;
+reset role;
+do $$ begin
+  if (select status from delpro_sync_jobs where treatment_id = (select id from treatments where diagnosis = 'T-DP-1')) <> 'pending_approval'
+     or (select approved_payload from delpro_sync_jobs where treatment_id = (select id from treatments where diagnosis = 'T-DP-1')) is not null then
+    raise exception 'stale job must return to pending_approval';
+  end if;
+  if not exists (select 1 from user_audit_logs where action='delpro_transfer_invalidated') then raise exception 'invalidation not audited'; end if;
+end $$;
+select 'assert' as step, 'claim never releases a stale payload' as what;
+
+-- explicit re-approval with the new data; then a deliberate re-approval of an approved+stale job
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000b',false);
+select delpro_approve_treatment((select id from treatments where diagnosis = 'T-DP-1'));
+reset role;
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000a',false);
+update delpro_mappings set delpro_code = '56' where kind='disease' and local_id = (select id from diseases where name='DP Viduriavimas');
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000b',false);
+do $$ declare r jsonb; begin
+  r := delpro_approve_treatment((select id from treatments where diagnosis = 'T-DP-1'), true);
+  if r->>'outcome' <> 'reapproved' or (select approved_payload->'delpro'->'ui_entry'->>'diagnosis_code' from delpro_sync_jobs where treatment_id = (select id from treatments where diagnosis = 'T-DP-1')) <> '56' then
+    raise exception 'reapproval failed: %', r;
+  end if;
+end $$;
+reset role;
+select 'assert' as step, 'explicit re-approval refreezes' as what;
+
+-- worker claims it, then every later approve click is a no-op on the running/finished job
+set role service_role;
+select 'dp1_claim' as step, delpro_claim_next_job('farm-pc')->'delpro'->'ui_entry' as ui_entry;
+reset role;
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000b',false);
+do $$ declare r jsonb; begin
+  r := delpro_approve_treatment((select id from treatments where diagnosis = 'T-DP-1'), true);
+  if r->>'outcome' <> 'already_processing' then raise exception 'processing job: %', r; end if;
+end $$;
+reset role;
+set role service_role;
+select 'dp1_report' as step, delpro_report_job_result(jsonb_build_object(
+  'sync_id', (select id from delpro_sync_jobs where treatment_id = (select id from treatments where diagnosis = 'T-DP-1')), 'success', true,
+  'actual_result', jsonb_build_object('animal_no','9001','event_date','2026-10-10',
+    'milk_withdrawal_days', (select (approved_payload->'delpro'->>'milk_withdrawal_days')::int from delpro_sync_jobs where treatment_id = (select id from treatments where diagnosis = 'T-DP-1')),
+    'meat_withdrawal_days', (select (approved_payload->'delpro'->>'meat_withdrawal_days')::int from delpro_sync_jobs where treatment_id = (select id from treatments where diagnosis = 'T-DP-1')))))->>'status' as status;
+reset role;
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000b',false);
+do $$ declare r jsonb; begin
+  r := delpro_approve_treatment((select id from treatments where diagnosis = 'T-DP-1'), true);
+  if r->>'outcome' <> 'already_success' or (select status from delpro_sync_jobs where treatment_id = (select id from treatments where diagnosis = 'T-DP-1')) <> 'success' then
+    raise exception 'completed job must stay completed: %', r;
+  end if;
+end $$;
+reset role;
+select 'assert' as step, 'approve after processing / completed is a no-op' as what;
+
+-- failed and rejected jobs are not silently revived by a vet's confirm click
+update delpro_sync_jobs set status='error', error='boom' where treatment_id = (select id from treatments where diagnosis = 'T-DP-2');
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000b',false);
+do $$ declare r jsonb; begin
+  r := delpro_approve_treatment((select id from treatments where diagnosis = 'T-DP-2'));
+  if r->>'outcome' <> 'needs_retry' or (select status from delpro_sync_jobs where treatment_id = (select id from treatments where diagnosis = 'T-DP-2')) <> 'error' then raise exception 'error job: %', r; end if;
+end $$;
+reset role;
+select 'assert' as step, 'failed job is not revived by confirm' as what;
+
+-- integration switched off: nothing can be approved, and a treatment with no job does not get one created
+update delpro_sync_jobs set status='pending_approval', error=null where treatment_id = (select id from treatments where diagnosis = 'T-DP-2');
+update system_settings set setting_value='off' where setting_key='delpro_outbound_mode';
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000b',false);
+do $$ declare r jsonb; begin
+  r := delpro_approve_treatment((select id from treatments where diagnosis = 'T-DP-2'));
+  if (r->>'ok')::boolean or not exists (select 1 from jsonb_array_elements(r->'problems') p where p->>'code' = 'integration_off') then raise exception 'off mode must block: %', r; end if;
+  if (delpro_treatment_transfer_state((select id from treatments where diagnosis = 'T-DP-2'))->>'eligible')::boolean then raise exception 'off mode: not eligible'; end if;
+end $$;
+select create_treatment(jsonb_build_object('animal_id',(select id from animals where animal_no='9002'),'reg_date','2026-10-11','diagnosis','T-DP-10',
+  'disease_id',(select id from diseases where name='DP Viduriavimas'),
+  'medications', jsonb_build_array(jsonb_build_object('product_id','99999999-0000-0000-0000-0000000000e1','qty',1,'unit','ml'))));
+reset role;
+do $$ begin
+  if exists (select 1 from delpro_sync_jobs where treatment_id = (select id from treatments where diagnosis = 'T-DP-10')) then raise exception 'off mode must not enqueue'; end if;
+end $$;
+-- ... switched back on: the treatment recorded while off can still be confirmed (the one job is created on demand)
+update system_settings set setting_value='approval' where setting_key='delpro_outbound_mode';
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000b',false);
+do $$ declare r jsonb; begin
+  r := delpro_approve_treatment((select id from treatments where diagnosis = 'T-DP-10'));
+  if r->>'outcome' <> 'approved' then raise exception 'late job creation: %', r; end if;
+  if (select count(*) from delpro_sync_jobs where treatment_id = (select id from treatments where diagnosis = 'T-DP-10')) <> 1 then raise exception 'exactly one job expected'; end if;
+end $$;
+reset role;
+select 'assert' as step, 'integration off blocks; on-demand job creation is unique' as what;
+
+-- admin queue retry with refreshed data: the optional product mapping is gone -> the GVET product name is used
+update delpro_sync_jobs set status='error', error='boom' where treatment_id = (select id from treatments where diagnosis = 'T-DP-2');
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000a',false);
+delete from delpro_mappings where kind='product' and local_id='99999999-0000-0000-0000-0000000000e1';
+select delpro_retry_job((select id from delpro_sync_jobs where treatment_id = (select id from treatments where diagnosis = 'T-DP-2')), true);
+do $$ begin
+  if (select approved_payload->'delpro'->'ui_entry'->>'medicine_name' from delpro_sync_jobs where treatment_id = (select id from treatments where diagnosis = 'T-DP-2')) <> 'DP Vitamin C' then
+    raise exception 'retry should use the GVET product name';
+  end if;
+end $$;
+-- retry of a multi-medicine job is still refused when refreshing
+reset role;
+update delpro_sync_jobs set status='error', error='boom' where treatment_id = (select id from treatments where diagnosis = 'T-DP-3');
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000a',false);
+do $$ declare blocked boolean := false; begin
+  begin perform delpro_retry_job((select id from delpro_sync_jobs where treatment_id = (select id from treatments where diagnosis = 'T-DP-3')), true); exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: retry with several medicines'; end if;
+end $$;
+reset role;
+select 'assert' as step, 'retry with refreshed data is validated' as what;
+
+-- 18. DelPro catalog sync (0036): Gateway snapshot -> mirror -> reconciliation.
+-- TreatmentDrugUsage 197 and DrugParameters 218 are the real Gateway records;
+-- the rest are test data. Nothing is ever linked by name alone.
+reset role;
+insert into diseases (id, name) values
+  ('36000000-0000-0000-0000-0000000000d1', 'KT Mastitas'),
+  ('36000000-0000-0000-0000-0000000000d2', 'KT Dviguba');
+insert into products (id, name, category, unit, withdrawal_days_milk, withdrawal_days_meat) values
+  ('36000000-0000-0000-0000-0000000000a1', 'KT Penicilinas', 'medicines', 'ml', 4, 10);
+insert into animals (tag_no, animal_no, active) values ('LT0000000KT337', 'KT337', true);
+
+set role service_role;
+select set_config('t.run', delpro_catalog_begin_run('{"worker_id":"test-pc"}')->>'run_id', false);
+select 'cat_upload_params' as step, delpro_catalog_upload(jsonb_build_object('run_id', current_setting('t.run'), 'object_type', 'DrugParameters', 'records', '[
+  {"key":"218","uom":"ml","application_method":null,"dump_milk_days":"0","meat_withhold_days":"4"},
+  {"key":"219","uom":"ml","application_method":"Intramuscular","dump_milk_days":"3","meat_withhold_days":"10"},
+  {"key":"300","uom":"ml","dump_milk_days":"abc"}]'::jsonb)) as r;
+select delpro_catalog_upload(jsonb_build_object('run_id', current_setting('t.run'), 'object_type', 'Drug', 'records', '[
+  {"code":"7","name":"KT  Penicilinas","active":"true","medicine_name":"Penicillin","active_substance":null,"default_parameters":"219"},
+  {"code":"8","name":"KT Naujas DelPro vaistas","active":"true","active_substance":"Oxytetracyclinum","default_parameters":"218"}]'::jsonb));
+select delpro_catalog_upload(jsonb_build_object('run_id', current_setting('t.run'), 'object_type', 'Diagnosis', 'records', '[
+  {"code":"11","name":"KT Mastitas","active":"true","recommended_treatment":"40"},
+  {"code":"12","name":"KT Tik DelPro liga","active":"true"},
+  {"code":"13","name":"KT Dviguba","active":"true"},
+  {"code":"14","name":"kt  dviguba ","active":"false"},
+  {"code":"15","name":"KT Be gydymo","active":"true","recommended_treatment":"999"}]'::jsonb));
+select delpro_catalog_upload(jsonb_build_object('run_id', current_setting('t.run'), 'object_type', 'Treatment', 'records', '[
+  {"code":"40","name":"KT Mastito gydymas","active":"true","treatment_type":"Treatment","drug_usages":"197"}]'::jsonb));
+select delpro_catalog_upload(jsonb_build_object('run_id', current_setting('t.run'), 'object_type', 'TreatmentDrugUsage', 'records', '[
+  {"key":"197","treatment":"40","drug":"7","drug_params":"218","dosage":"20","frequency":"1","treat_cow_days":"1"}]'::jsonb));
+select 'cat_finish' as step, r->'status' as status, r->'reconcile' as reconcile
+from (select delpro_catalog_finish_run(jsonb_build_object('run_id', current_setting('t.run'), 'types', jsonb_build_object(
+  'DrugParameters', '{"complete":true,"returned":3,"limit":5000}'::jsonb, 'Drug', '{"complete":true}'::jsonb,
+  'Diagnosis', '{"complete":true}'::jsonb, 'Treatment', '{"complete":true}'::jsonb, 'TreatmentDrugUsage', '{"complete":true}'::jsonb))) as r) x;
+reset role;
+
+do $$ begin
+  if (select (stats->'DrugParameters'->>'invalid')::int from delpro_catalog_runs where id = current_setting('t.run')::uuid) <> 1 then
+    raise exception 'bad DrugParameters record must be counted as invalid, not abort the batch';
+  end if;
+  if exists (select 1 from delpro_catalog_links) then raise exception 'nothing may be linked automatically'; end if;
+  if (select fields->>'dump_milk_days' from delpro_catalog_items where object_type = 'DrugParameters' and delpro_key = '218') <> '0'
+     or (select fields->'dosage' from delpro_catalog_items where object_type = 'TreatmentDrugUsage' and delpro_key = '197') <> '20'::jsonb then
+    raise exception 'typed normalization failed';
+  end if;
+  if (select fields->>'name' from delpro_catalog_items where object_type = 'Drug' and delpro_key = '7') <> 'KT Penicilinas' then
+    raise exception 'whitespace must be normalized';
+  end if;
+  if not exists (select 1 from delpro_catalog_issues where status = 'open' and issue_type = 'suggested_match' and object_type = 'Diagnosis' and delpro_key = '11' and gvet_id = '36000000-0000-0000-0000-0000000000d1')
+     or not exists (select 1 from delpro_catalog_issues where status = 'open' and issue_type = 'suggested_match' and object_type = 'Drug' and delpro_key = '7' and gvet_id = '36000000-0000-0000-0000-0000000000a1') then
+    raise exception 'exact-name suggestions missing';
+  end if;
+  if (select count(*) from delpro_catalog_issues where status = 'open' and issue_type = 'ambiguous_match' and delpro_key in ('13', '14')) <> 2 then
+    raise exception 'two DelPro records with one name must both be ambiguous';
+  end if;
+  if not exists (select 1 from delpro_catalog_issues where status = 'open' and issue_type = 'broken_reference' and delpro_key = '15') then
+    raise exception 'missing RecommendedTreatment must be flagged';
+  end if;
+  if exists (select 1 from delpro_catalog_issues where delpro_key in ('12', '8')) then raise exception 'no GVET candidate = just unlinked'; end if;
+end $$;
+select 'cat_treatment_template' as step, code, name, drug_usages->0->>'drug_name' as drug, drug_usages->0->'dosage' as dosage,
+       drug_usages->0->'meat_withhold_days' as meat, recommended_for from vw_delpro_catalog_treatments;
+select 'cat_summary' as step, object_type, items, linked, unlinked, complete from vw_delpro_catalog_summary order by object_type;
+
+-- only an admin decides; the API can't write the tables or call worker RPCs
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000b',false);
+do $$ declare blocked boolean := false; begin
+  begin perform delpro_catalog_confirm_suggestions(); exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: vet confirmed catalog links'; end if;
+end $$;
+do $$ declare blocked boolean := false; begin
+  begin insert into delpro_catalog_links (object_type, delpro_key, disease_id, origin) values ('Diagnosis', '12', '36000000-0000-0000-0000-0000000000d1', 'manual');
+  exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: direct link insert'; end if;
+end $$;
+do $$ declare blocked boolean := false; begin
+  begin perform delpro_catalog_upload('{}'::jsonb); exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: worker RPC from the app'; end if;
+end $$;
+select 'assert' as step, 'catalog: vet/app cannot link or upload' as what;
+
+-- admin confirms both suggestions; Drug 7's DefaultParameters (milk 3) differ from GVET (milk 4)
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000a',false);
+select 'cat_confirm' as step, delpro_catalog_confirm_suggestions()->>'linked' as linked;
+select 'cat_initial_diff' as step, issue_type, details->'fields' as fields from delpro_catalog_issues
+ where status = 'open' and link_id is not null order by issue_type;
+
+-- keep GVET's 4 -> becomes an outbound change (writing disabled, so it waits)
+select delpro_catalog_resolve_issue((select id from delpro_catalog_issues where status = 'open' and issue_type = 'field_difference'), 'keep_gvet');
+do $$ begin
+  if not exists (select 1 from delpro_catalog_issues where status = 'open' and issue_type = 'outbound_pending'
+                 and details->'fields'->'milk_days'->>'gvet' = '4' and details->'fields'->'milk_days'->>'delpro' = '3') then
+    raise exception 'keep_gvet must leave an outbound change';
+  end if;
+  if (select setting_value from system_settings where setting_key = 'delpro_catalog_write_enabled') <> 'false' then raise exception 'catalog writing must default to off'; end if;
+end $$;
+select 'assert' as step, 'catalog: keep_gvet queues an outbound change' as what;
+
+-- run 2 (DrugParameters only): DelPro changes meat 10 -> 12. Inbound change; other types untouched.
+reset role;
+set role service_role;
+select set_config('t.run', delpro_catalog_begin_run('{"worker_id":"test-pc"}')->>'run_id', false);
+select delpro_catalog_upload(jsonb_build_object('run_id', current_setting('t.run'), 'object_type', 'DrugParameters', 'records', '[
+  {"key":"218","uom":"ml","dump_milk_days":"0","meat_withhold_days":"4"},
+  {"key":"219","uom":"ml","application_method":"Intramuscular","dump_milk_days":"3","meat_withhold_days":"12"}]'::jsonb));
+select delpro_catalog_finish_run(jsonb_build_object('run_id', current_setting('t.run'), 'types', '{"DrugParameters":{"complete":true}}'::jsonb));
+reset role;
+do $$ begin
+  if not exists (select 1 from delpro_catalog_issues where status = 'open' and issue_type = 'inbound_change' and details->'fields' ? 'meat_days') then
+    raise exception 'DelPro edit must show as inbound change';
+  end if;
+  if (select count(*) from delpro_catalog_items where removed_at is null and object_type = 'Diagnosis') <> 5 then
+    raise exception 'a run without Diagnosis must not remove diagnoses';
+  end if;
+  if (select withdrawal_days_meat from products where id = '36000000-0000-0000-0000-0000000000a1') <> 10 then
+    raise exception 'withdrawal days are never applied without review';
+  end if;
+end $$;
+
+-- take DelPro's 12; the GVET edit this causes is NOT echoed back (no loop)
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000a',false);
+select delpro_catalog_resolve_issue((select id from delpro_catalog_issues where status = 'open' and issue_type = 'inbound_change'), 'take_delpro');
+reset role;
+do $$ begin
+  if (select withdrawal_days_meat from products where id = '36000000-0000-0000-0000-0000000000a1') <> 12 then raise exception 'take_delpro must update GVET'; end if;
+  if exists (select 1 from delpro_catalog_issues where status = 'open' and link_id is not null and (details->'fields') ? 'meat_days') then
+    raise exception 'applied inbound change must not come back as outbound (loop)';
+  end if;
+  if (select count(*) from user_audit_logs where action like 'delpro_catalog_%') < 3 then raise exception 'catalog decisions must be audited'; end if;
+end $$;
+select 'assert' as step, 'catalog: inbound applied once, no sync loop' as what;
+
+-- conflict: GVET milk 4 -> 5 while DelPro milk 3 -> 6
+update products set withdrawal_days_milk = 5 where id = '36000000-0000-0000-0000-0000000000a1';
+set role service_role;
+select set_config('t.run', delpro_catalog_begin_run('{}')->>'run_id', false);
+select delpro_catalog_upload(jsonb_build_object('run_id', current_setting('t.run'), 'object_type', 'DrugParameters', 'records', '[
+  {"key":"218","uom":"ml","dump_milk_days":"0","meat_withhold_days":"4"},
+  {"key":"219","uom":"ml","application_method":"Intramuscular","dump_milk_days":"6","meat_withhold_days":"12"}]'::jsonb));
+select delpro_catalog_finish_run(jsonb_build_object('run_id', current_setting('t.run'), 'types', '{"DrugParameters":{"complete":true}}'::jsonb));
+reset role;
+select 'cat_conflict' as step, issue_type, details->'fields'->'milk_days' as milk from delpro_catalog_issues where status = 'open' and issue_type = 'conflict';
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000a',false);
+select delpro_catalog_resolve_issue((select id from delpro_catalog_issues where status = 'open' and issue_type = 'conflict'), 'take_delpro');
+reset role;
+do $$ begin
+  if (select withdrawal_days_milk from products where id = '36000000-0000-0000-0000-0000000000a1') <> 6 then raise exception 'conflict resolution failed'; end if;
+  if exists (select 1 from delpro_catalog_issues where status = 'open' and gvet_id = '36000000-0000-0000-0000-0000000000a1') then
+    raise exception 'resolved link must be clean: %', (select jsonb_agg(details) from delpro_catalog_issues where status = 'open' and gvet_id = '36000000-0000-0000-0000-0000000000a1');
+  end if;
+end $$;
+select 'assert' as step, 'catalog: conflict detected and reconciled' as what;
+
+-- auto inbound mode applies a DelPro rename (never withdrawal days)
+update system_settings set setting_value = 'auto' where setting_key = 'delpro_catalog_inbound_mode';
+set role service_role;
+select set_config('t.run', delpro_catalog_begin_run('{}')->>'run_id', false);
+select delpro_catalog_upload(jsonb_build_object('run_id', current_setting('t.run'), 'object_type', 'Drug', 'records', '[
+  {"code":"7","name":"KT Penicilinas LA","active":"true","default_parameters":"219"},
+  {"code":"8","name":"KT Naujas DelPro vaistas","active":"true","active_substance":"Oxytetracyclinum","default_parameters":"218"}]'::jsonb));
+select delpro_catalog_finish_run(jsonb_build_object('run_id', current_setting('t.run'), 'types', '{"Drug":{"complete":true}}'::jsonb));
+reset role;
+update system_settings set setting_value = 'review' where setting_key = 'delpro_catalog_inbound_mode';
+do $$ begin
+  if (select name from products where id = '36000000-0000-0000-0000-0000000000a1') <> 'KT Penicilinas LA' then raise exception 'auto mode must apply the rename'; end if;
+  if exists (select 1 from delpro_catalog_issues where status = 'open' and gvet_id = '36000000-0000-0000-0000-0000000000a1') then raise exception 'auto-applied rename left an issue'; end if;
+end $$;
+select 'assert' as step, 'catalog: auto mode applies names only' as what;
+
+-- import unlinked DelPro records into GVET; duplicates refused
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000a',false);
+select 'cat_import_drug' as step, delpro_catalog_import('Drug', array['8', '7'])->'skipped'->0->>'reason' as skipped_reason;
+select 'cat_import_diag' as step, (r->>'created')::int as created from (select delpro_catalog_import('Diagnosis', array['12']) as r) x;
+reset role;
+select 'cat_imported' as step, p.name, p.unit, p.withdrawal_days_milk, p.withdrawal_days_meat, p.active_substance, l.origin
+from products p join delpro_catalog_links l on l.product_id = p.id and l.retired_at is null where p.name = 'KT Naujas DelPro vaistas';
+do $$ begin
+  if not exists (select 1 from delpro_catalog_issues where status = 'open' and issue_type = 'clinical_review' and delpro_key = '8') then
+    raise exception 'imported drug must wait for clinical review';
+  end if;
+  if not exists (select 1 from diseases d join delpro_catalog_links l on l.disease_id = d.id where d.name = 'KT Tik DelPro liga') then
+    raise exception 'diagnosis import failed';
+  end if;
+end $$;
+
+-- removals: only on complete snapshots; linked removal is flagged, never deleted
+set role service_role;
+select set_config('t.run', delpro_catalog_begin_run('{}')->>'run_id', false);
+select delpro_catalog_upload(jsonb_build_object('run_id', current_setting('t.run'), 'object_type', 'Diagnosis', 'records', '[
+  {"code":"12","name":"KT Tik DelPro liga","active":"true"},{"code":"13","name":"KT Dviguba"},{"code":"14","name":"kt dviguba"}]'::jsonb));
+select 'cat_removed' as step, r->'stats'->'Diagnosis'->'removed' as removed
+from (select delpro_catalog_finish_run(jsonb_build_object('run_id', current_setting('t.run'), 'types', '{"Diagnosis":{"complete":true}}'::jsonb)) as r) x;
+-- empty "complete" snapshot removes nothing
+select set_config('t.run', delpro_catalog_begin_run('{}')->>'run_id', false);
+select 'cat_empty' as step, r->'stats'->'Diagnosis' as stats
+from (select delpro_catalog_finish_run(jsonb_build_object('run_id', current_setting('t.run'), 'types', '{"Diagnosis":{"complete":true}}'::jsonb)) as r) x;
+reset role;
+do $$ begin
+  if not exists (select 1 from delpro_catalog_issues where status = 'open' and issue_type = 'removed_in_delpro' and delpro_key = '11') then
+    raise exception 'linked record removed in DelPro must be flagged';
+  end if;
+  if not exists (select 1 from delpro_catalog_links where delpro_key = '11' and retired_at is null) then raise exception 'link must survive removal'; end if;
+  if exists (select 1 from delpro_catalog_issues where status = 'open' and issue_type = 'broken_reference' and delpro_key = '15') then
+    raise exception 'issue of a removed record must close';
+  end if;
+  if (select count(*) from delpro_catalog_items where object_type = 'Diagnosis' and removed_at is null) <> 3 then raise exception 'empty snapshot must not remove'; end if;
+end $$;
+
+-- mass-removal guard: 20 diagnoses, then a "complete" snapshot with 2 of them
+set role service_role;
+select set_config('t.run', delpro_catalog_begin_run('{}')->>'run_id', false);
+select delpro_catalog_upload(jsonb_build_object('run_id', current_setting('t.run'), 'object_type', 'Diagnosis',
+  'records', (select jsonb_agg(jsonb_build_object('code', 'G' || g, 'name', 'KT guard ' || g)) from generate_series(1, 20) g)));
+select delpro_catalog_finish_run(jsonb_build_object('run_id', current_setting('t.run'), 'types', '{"Diagnosis":{"complete":false}}'::jsonb));
+select set_config('t.run', delpro_catalog_begin_run('{}')->>'run_id', false);
+select delpro_catalog_upload(jsonb_build_object('run_id', current_setting('t.run'), 'object_type', 'Diagnosis', 'records', '[{"code":"G1","name":"KT guard 1"},{"code":"G2","name":"KT guard 2"}]'::jsonb));
+select 'cat_guard' as step, r->'stats'->'Diagnosis'->>'note' as note, r->'stats'->'Diagnosis'->'removed' as removed
+from (select delpro_catalog_finish_run(jsonb_build_object('run_id', current_setting('t.run'), 'types', '{"Diagnosis":{"complete":true}}'::jsonb)) as r) x;
+reset role;
+select 'assert' as step, 'catalog: removals only from complete, plausible snapshots' as what;
+
+-- manual sync request, animal GUID mapping (real Gateway pair for animal 337)
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000a',false);
+select delpro_catalog_request_sync();
+reset role;
+set role service_role;
+select 'cat_requested' as step, delpro_catalog_sync_requested('{}') as requested;
+select set_config('t.run', delpro_catalog_begin_run('{}')->>'run_id', false);
+select 'cat_animal_ids' as step, delpro_ingest_animal_ids(jsonb_build_object('run_id', current_setting('t.run'), 'animals', '[
+  {"object_guid":"f3d9f5df-f72f-4659-8d25-66a02cf583eb","number":"KT337"},{"object_guid":"00000000-0000-0000-0000-000000000999","number":"nope"}]'::jsonb)) as r;
+select delpro_catalog_finish_run(jsonb_build_object('run_id', current_setting('t.run'), 'types', '{}'::jsonb));
+select 'cat_requested_after' as step, delpro_catalog_sync_requested('{}') as requested;
+select 'cat_animal_conflict' as step, delpro_ingest_animal_ids('{"animals":[{"object_guid":"11111111-2222-3333-4444-555555555555","number":"KT337"}]}'::jsonb)->'conflicts' as conflicts;
+reset role;
+do $$ begin
+  if (select delpro_object_guid from animals where animal_no = 'KT337') <> 'f3d9f5df-f72f-4659-8d25-66a02cf583eb' then raise exception 'animal GUID mapping failed'; end if;
+end $$;
+select 'assert' as step, 'catalog: sync request + animal ids' as what;
+
+-- deleting a linked GVET disease retires the link (history kept)
+delete from diseases where name = 'KT Tik DelPro liga';
+do $$ begin
+  if not exists (select 1 from delpro_catalog_links where delpro_key = '12' and retired_at is not null and retire_reason = 'GVET įrašas ištrintas') then
+    raise exception 'link must be retired, not lost';
+  end if;
+end $$;
+select 'assert' as step, 'catalog: deleted GVET record retires its link' as what;
+
+-- a herd number reported with two GUIDs is skipped, never guessed
+insert into animals (tag_no, animal_no, active) values ('LT0000000KT338', 'KT338', true);
+set role service_role;
+select 'cat_animal_dup' as step, delpro_ingest_animal_ids('{"animals":[{"object_guid":"21111111-2222-3333-4444-555555555555","number":"KT338"},
+  {"object_guid":"31111111-2222-3333-4444-555555555555","number":"KT338"}]}'::jsonb)->'ambiguous' as ambiguous;
+reset role;
+do $$ begin
+  if (select delpro_object_guid from animals where animal_no = 'KT338') is not null then raise exception 'ambiguous number must not be mapped'; end if;
+end $$;
+select 'assert' as step, 'catalog: reused herd number is not guessed' as what;
+
+-- 19. DelPro catalog phase 2 (0037): templates, write queue + gate, Gateway treatment channel.
+-- 19a. Import DelPro Treatment 40 as a GVET template (its drug 7 is linked to 'KT Penicilinas LA').
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000a',false);
+select 'tpl_import' as step, (r->>'created')::int as created, r->'skipped' as skipped from (select delpro_catalog_import('Treatment', array['40']) as r) x;
+reset role;
+select 'tpl_items' as step, t.name, i.dosage, i.frequency, i.treat_cow_days, i.uom, i.milk_days, i.meat_days, i.delpro_usage_key, i.delpro_params_key
+from treatment_templates t join treatment_template_items i on i.template_id = t.id where t.name = 'KT Mastito gydymas';
+do $$ begin
+  if exists (select 1 from delpro_catalog_issues where status = 'open' and gvet_table = 'treatment_templates' and issue_type <> 'clinical_review') then
+    raise exception 'freshly imported template must agree with DelPro: %', (select jsonb_agg(details) from delpro_catalog_issues where status = 'open' and gvet_table = 'treatment_templates');
+  end if;
+  if not exists (select 1 from delpro_catalog_issues where status = 'open' and issue_type = 'clinical_review' and object_type = 'Treatment') then
+    raise exception 'imported template must wait for clinical review';
+  end if;
+end $$;
+
+-- 19b. the vet changes the dose 20 -> 25 -> outbound change on 'usages'
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000b',false);
+select save_treatment_template((select jsonb_build_object('id', t.id, 'name', t.name, 'active', t.active, 'treatment_type', t.treatment_type,
+  'items', jsonb_agg(jsonb_build_object('id', i.id, 'product_id', i.product_id, 'dosage', 25, 'frequency', i.frequency, 'treat_cow_days', i.treat_cow_days,
+                                        'uom', i.uom, 'milk_days', i.milk_days, 'meat_days', i.meat_days))) from treatment_templates t join treatment_template_items i on i.template_id = t.id
+  where t.name = 'KT Mastito gydymas' group by t.id)) is not null as saved;
+do $$ declare blocked boolean := false; begin
+  begin perform delpro_catalog_set_write_enabled(true); exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: vet enabled DelPro writes'; end if;
+end $$;
+reset role;
+select 'tpl_outbound' as step, issue_type, details->'fields'->'usages'->'gvet'->0->'dosage' as gvet_dose, details->'fields'->'usages'->'delpro'->0->'dosage' as delpro_dose
+from delpro_catalog_issues where status = 'open' and gvet_table = 'treatment_templates' and issue_type = 'outbound_pending';
+
+-- 19c. admin sends it: params 218 are shared (drug 8 default + usage 197) -> a NEW params record, usage re-pointed
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000a',false);
+select delpro_catalog_resolve_issue((select id from delpro_catalog_issues where status = 'open' and gvet_table = 'treatment_templates' and issue_type = 'outbound_pending'), 'send');
+reset role;
+select 'tpl_job_steps' as step, s->>'id' as id, s->>'object' as object, s->>'operation' as op, s->>'key' as key
+from delpro_catalog_jobs j, jsonb_array_elements(j.steps) s where j.object_type = 'Treatment' and j.status = 'queued';
+
+-- 19d. the gate: nothing is handed out while writing is off, nor for an unvalidated operation
+set role service_role;
+select 'gate_off' as step, delpro_catalog_claim_job('{"worker_id":"test-pc"}') is null as nothing;
+reset role;
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000a',false);
+select delpro_catalog_set_write_enabled(true);
+reset role;
+set role service_role;
+select 'gate_unvalidated' as step, delpro_catalog_claim_job('{"worker_id":"test-pc"}') is null as nothing;
+reset role;
+
+-- 19e. a TEST job (inactive "GVET TEST" record) runs, then its operation can be marked validated
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000a',false);
+select delpro_catalog_create_test_job('Diagnosis.create');
+do $$ declare blocked boolean := false; begin
+  begin perform delpro_catalog_create_test_job('Diagnosis.update'); exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: update test before a create test'; end if;
+end $$;
+reset role;
+set role service_role;
+select set_config('t.job', (select delpro_catalog_claim_job('{"worker_id":"test-pc"}')->>'job_id'), false);
+select 'test_job_claimed' as step, is_test, steps->0->'properties' as props from delpro_catalog_jobs where id = current_setting('t.job')::uuid;
+select delpro_catalog_job_step(jsonb_build_object('job_id', current_setting('t.job'), 'step', 'main', 'phase', 'start'));
+select delpro_catalog_job_step(jsonb_build_object('job_id', current_setting('t.job'), 'step', 'main', 'phase', 'done', 'key', 'T1'));
+select 'test_job_done' as step, delpro_catalog_job_result(jsonb_build_object('job_id', current_setting('t.job'), 'success', true,
+  'readback', jsonb_build_array(jsonb_build_object('object_type', 'Diagnosis', 'record', jsonb_build_object('code', 'T1', 'name', 'GVET TEST x', 'active', false)))))->>'status' as status;
+reset role;
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000a',false);
+select delpro_catalog_mark_validated(current_setting('t.job')::uuid);
+reset role;
+do $$ begin
+  if (select setting_value from system_settings where setting_key = 'delpro_catalog_validated_operations') <> 'Diagnosis.create' then raise exception 'validation not recorded'; end if;
+  if not exists (select 1 from delpro_catalog_items where object_type = 'Diagnosis' and delpro_key = 'T1' and active = false) then raise exception 'read-back must land in the mirror'; end if;
+end $$;
+select 'assert' as step, 'catalog write: gate + test job + validation' as what;
+
+-- 19f. Treatment.update validated (same test-job route as above) -> the real template job runs
+update system_settings set setting_value = 'Diagnosis.create,Treatment.update' where setting_key = 'delpro_catalog_validated_operations';
+set role service_role;
+select set_config('t.job', (select delpro_catalog_claim_job('{"worker_id":"test-pc"}')->>'job_id'), false);
+select delpro_catalog_job_step(jsonb_build_object('job_id', current_setting('t.job'), 'step', 'params_1', 'phase', 'start'));
+select delpro_catalog_job_step(jsonb_build_object('job_id', current_setting('t.job'), 'step', 'params_1', 'phase', 'done', 'key', 'P900'));
+select delpro_catalog_job_step(jsonb_build_object('job_id', current_setting('t.job'), 'step', 'usage_1', 'phase', 'start'));
+select delpro_catalog_job_step(jsonb_build_object('job_id', current_setting('t.job'), 'step', 'usage_1', 'phase', 'done', 'key', '197'));
+select 'tpl_job_done' as step, delpro_catalog_job_result(jsonb_build_object('job_id', current_setting('t.job'), 'success', true, 'readback', '[
+  {"object_type":"DrugParameters","record":{"key":"P900","uom":"ml","dump_milk_days":0,"meat_withhold_days":4}},
+  {"object_type":"TreatmentDrugUsage","record":{"key":"197","treatment":"40","drug":"7","drug_params":"P900","dosage":25,"frequency":1,"treat_cow_days":1}}]'::jsonb))->>'status' as status;
+reset role;
+do $$ begin
+  if exists (select 1 from delpro_catalog_issues where status = 'open' and gvet_table = 'treatment_templates' and issue_type <> 'clinical_review') then
+    raise exception 'after the verified write GVET and DelPro must agree: %', (select jsonb_agg(details) from delpro_catalog_issues where status = 'open' and gvet_table = 'treatment_templates');
+  end if;
+  if (select delpro_params_key from treatment_template_items i join treatment_templates t on t.id = i.template_id where t.name = 'KT Mastito gydymas') <> 'P900' then
+    raise exception 'template line must remember its new DelPro parameters';
+  end if;
+  if (select fields->>'dump_milk_days' from delpro_catalog_items where object_type = 'DrugParameters' and delpro_key = '218') <> '0' then
+    raise exception 'shared parameters 218 must be untouched';
+  end if;
+end $$;
+select 'assert' as step, 'catalog write: template update verified, shared params untouched, no echo' as what;
+
+-- 19g. create in DelPro: a step started but never finished survives a lost worker (outcome unknown)
+reset role;
+insert into diseases (id, name) values ('37000000-0000-0000-0000-0000000000d1', 'KT Nauja GVET liga');
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000a',false);
+select delpro_catalog_enqueue_create('Diagnosis', '37000000-0000-0000-0000-0000000000d1');
+reset role;
+set role service_role;
+select set_config('t.job', (select delpro_catalog_claim_job('{"worker_id":"test-pc","lease_seconds":60}')->>'job_id'), false);
+select delpro_catalog_job_step(jsonb_build_object('job_id', current_setting('t.job'), 'step', 'main', 'phase', 'start'));
+reset role;
+update delpro_catalog_jobs set lease_expires_at = now() - interval '1 minute' where id = current_setting('t.job')::uuid;
+set role service_role;
+select 'lease_reclaim' as step, (r->'progress'->'main'->>'started_at') is not null as started_known, r->'steps'->0->>'lookup_name' as lookup
+from (select delpro_catalog_claim_job('{"worker_id":"test-pc"}') as r) x;
+select delpro_catalog_job_step(jsonb_build_object('job_id', current_setting('t.job'), 'step', 'main', 'phase', 'done', 'key', '501'));
+select delpro_catalog_job_result(jsonb_build_object('job_id', current_setting('t.job'), 'success', true,
+  'readback', '[{"object_type":"Diagnosis","record":{"code":"501","name":"KT Nauja GVET liga","active":true}}]'::jsonb));
+reset role;
+do $$ begin
+  if not exists (select 1 from delpro_catalog_links where disease_id = '37000000-0000-0000-0000-0000000000d1' and delpro_key = '501' and origin = 'created' and retired_at is null) then
+    raise exception 'created record must be linked';
+  end if;
+  if exists (select 1 from delpro_catalog_issues where status = 'open' and gvet_id = '37000000-0000-0000-0000-0000000000d1') then raise exception 'new link must agree'; end if;
+end $$;
+
+-- 19g2. unknown outcome is never resolved by name: retry refused, admin adopts a key (checked) or confirms a resend
+reset role;
+insert into diseases (id, name) values ('37000000-0000-0000-0000-0000000000e7', 'KT Neaiški liga');
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000a',false);
+select delpro_catalog_enqueue_create('Diagnosis', '37000000-0000-0000-0000-0000000000e7');
+reset role;
+select set_config('t.job2', (select id::text from delpro_catalog_jobs where disease_id = '37000000-0000-0000-0000-0000000000e7' and status = 'queued'), false);
+update delpro_catalog_jobs set status = 'processing', attempts = 1 where id = current_setting('t.job2')::uuid;
+set role service_role;
+select delpro_catalog_job_step(jsonb_build_object('job_id', current_setting('t.job2'), 'step', 'main', 'phase', 'start'));
+select delpro_catalog_job_result(jsonb_build_object('job_id', current_setting('t.job2'), 'success', false, 'needs_review', true,
+  'error', 'rezultatas nežinomas', 'details', '{"uncertain_step":"main","candidates":[{"key":"601","name":"KT Neaiški liga"}]}'::jsonb));
+reset role;
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000a',false);
+do $$ declare blocked boolean := false; begin
+  begin perform delpro_catalog_job_action(current_setting('t.job2')::uuid, 'retry'); exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: retry with an uncertain step'; end if;
+end $$;
+do $$ declare blocked boolean := false; begin
+  begin perform delpro_catalog_job_action(current_setting('t.job2')::uuid, 'adopt', 'main', '501'); exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: adopting a key linked to another GVET record'; end if;
+end $$;
+do $$ declare blocked boolean := false; begin
+  begin perform delpro_catalog_job_action(current_setting('t.job2')::uuid, 'adopt', 'main', ''); exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: adopt without a key'; end if;
+end $$;
+select delpro_catalog_job_action(current_setting('t.job2')::uuid, 'resend', 'main');
+reset role;
+do $$ begin
+  if (select status from delpro_catalog_jobs where id = current_setting('t.job2')::uuid) <> 'queued'
+     or (select progress->'main' ? 'started_at' from delpro_catalog_jobs where id = current_setting('t.job2')::uuid) then
+    raise exception 'resend must clear the uncertain start and queue the job';
+  end if;
+end $$;
+-- the same again, now adopting a record the admin found in DelPro
+update delpro_catalog_jobs set status = 'needs_review', progress = jsonb_build_object('main', jsonb_build_object('started_at', now()))
+where id = current_setting('t.job2')::uuid;
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000a',false);
+select delpro_catalog_job_action(current_setting('t.job2')::uuid, 'adopt', 'main', '601');
+do $$ declare blocked boolean := false; begin
+  begin perform delpro_catalog_job_action(current_setting('t.job2')::uuid, 'adopt', 'main', '602'); exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: adopting twice'; end if;
+end $$;
+reset role;
+select 'adopted' as step, status, progress->'main'->>'key' as key, (progress->'main'->>'adopted_by') is not null as by_admin,
+  (select count(*) from user_audit_logs where record_id = current_setting('t.job2')::uuid and action = 'delpro_catalog_job_adopt') as audited
+from delpro_catalog_jobs where id = current_setting('t.job2')::uuid;
+update delpro_catalog_jobs set status = 'cancelled' where id = current_setting('t.job2')::uuid;
+
+-- 19h. failures: retryable -> queued with backoff; read-back mismatch -> verification_failed; supersede
+update diseases set name = 'KT Nauja GVET liga 2' where id = '37000000-0000-0000-0000-0000000000d1';
+update system_settings set setting_value = 'Diagnosis.create,Diagnosis.update,Treatment.update' where setting_key = 'delpro_catalog_validated_operations';
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000a',false);
+select delpro_catalog_resolve_issue((select id from delpro_catalog_issues where status = 'open' and gvet_id = '37000000-0000-0000-0000-0000000000d1' and issue_type = 'outbound_pending'), 'send');
+reset role;
+update diseases set name = 'KT Nauja GVET liga 3' where id = '37000000-0000-0000-0000-0000000000d1';
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000a',false);
+select delpro_catalog_resolve_issue((select id from delpro_catalog_issues where status = 'open' and gvet_id = '37000000-0000-0000-0000-0000000000d1' and issue_type = 'outbound_pending'), 'send');
+reset role;
+select 'supersede' as step, status, steps->0->'properties'->0->>'value' as name from delpro_catalog_jobs
+where disease_id = '37000000-0000-0000-0000-0000000000d1' and operation = 'update' order by created_at;
+set role service_role;
+select set_config('t.job', (select delpro_catalog_claim_job('{"worker_id":"test-pc"}')->>'job_id'), false);
+select 'retryable' as step, delpro_catalog_job_result(jsonb_build_object('job_id', current_setting('t.job'), 'success', false, 'retryable', true, 'error', 'Gateway: TIMEOUT'))->>'status' as status;
+reset role;
+update delpro_catalog_jobs set next_attempt_at = now() - interval '1 second' where id = current_setting('t.job')::uuid;
+set role service_role;
+select delpro_catalog_claim_job('{"worker_id":"test-pc"}') is not null as reclaimed;
+select 'mismatch' as step, delpro_catalog_job_result(jsonb_build_object('job_id', current_setting('t.job'), 'success', false, 'verification_failed', true,
+  'error', 'Name: laukta „KT Nauja GVET liga 3“, DelPro „KT Nauja GVET liga“'))->>'status' as status;
+reset role;
+select 'assert' as step, 'catalog write: retry, verification failure, supersede' as what;
+
+-- 19i. auto outbound: a GVET record created after auto mode is switched on is queued for creation
+update system_settings set setting_value = 'auto' where setting_key = 'delpro_catalog_outbound_mode';
+insert into diseases (id, name) values ('37000000-0000-0000-0000-0000000000d2', 'KT Auto liga');
+select fn_delpro_catalog_reconcile()->'queued' as queued;
+do $$ begin
+  if not exists (select 1 from delpro_catalog_jobs where disease_id = '37000000-0000-0000-0000-0000000000d2' and operation = 'create' and status = 'queued') then
+    raise exception 'auto mode must queue new GVET records';
+  end if;
+  if exists (select 1 from delpro_catalog_jobs where disease_id = '36000000-0000-0000-0000-0000000000d2' and operation = 'create') then
+    raise exception 'records older than the switch must not be queued';
+  end if;
+end $$;
+update system_settings set setting_value = 'manual' where setting_key = 'delpro_catalog_outbound_mode';
+update system_settings set setting_value = 'false' where setting_key = 'delpro_catalog_write_enabled';
+select 'assert' as step, 'catalog write: auto outbound queues new records only' as what;
+
+-- 19j. Gateway channel for treatments (off by default): problems, claim, verified report
+update delpro_sync_jobs set status = 'rejected' where status in ('approved', 'pending_approval'); -- isolate this check
+insert into batches (product_id, lot, expiry_date, received_qty) values ('36000000-0000-0000-0000-0000000000a1', 'GW1', '2030-01-01', 100);
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000a',false);
+select delpro_catalog_link('Diagnosis', '13', '36000000-0000-0000-0000-0000000000d2');
+reset role;
+update system_settings set setting_value = 'gateway' where setting_key = 'delpro_write_channel';
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000b',false);
+select set_config('t.treat', create_treatment(jsonb_build_object('animal_id', (select id from animals where animal_no = 'KT338'), 'reg_date', '2026-10-29',
+  'diagnosis', 'Mastitas', 'disease_id', '36000000-0000-0000-0000-0000000000d2', 'vet_name', 'Dr. Test',
+  'medications', jsonb_build_array(jsonb_build_object('product_id', '36000000-0000-0000-0000-0000000000a1', 'qty', 10, 'unit', 'ml'))))::text, false);
+reset role;
+select 'gw_problems' as step, jsonb_agg(p->>'code' order by p->>'code') as codes
+from jsonb_array_elements(fn_delpro_transfer_problems(current_setting('t.treat')::uuid)) p;
+update animals set delpro_object_guid = '41111111-2222-3333-4444-555555555555' where animal_no = 'KT338';
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000a',false);
+select 'gw_approve' as step, delpro_approve_treatment(current_setting('t.treat')::uuid)->>'outcome' as outcome;
+reset role;
+set role service_role;
+select 'gw_wrong_channel' as step, delpro_claim_next_job('ui-pc', 'ui_script') is null as nothing;
+select set_config('t.gw', delpro_claim_next_job('gw-pc', 'gateway')::text, false);
+select 'gw_claim' as step, current_setting('t.gw')::jsonb->>'channel' as channel,
+       current_setting('t.gw')::jsonb->'gateway'->>'diagnosis_code' as diagnosis,
+       left(current_setting('t.gw')::jsonb->'gateway'->>'comment', 5) as marker,
+       current_setting('t.gw')::jsonb->'gateway'->>'event_time' as event_time,
+       current_setting('t.gw')::jsonb->'verify_before_write' as verify;
+select 'gw_report' as step, delpro_report_job_result(jsonb_build_object('sync_id', current_setting('t.gw')::jsonb->>'sync_id', 'success', true,
+  'actual_result', jsonb_build_object('channel', 'gateway', 'object_guid', '489751f2-ffc7-4491-a445-482160d62620',
+    'animal_guid', '41111111-2222-3333-4444-555555555555', 'diagnosis_code', '13',
+    'event_date', current_setting('t.gw')::jsonb->'gateway'->>'event_at',
+    'comment', current_setting('t.gw')::jsonb->'gateway'->>'comment')))->>'status' as status;
+reset role;
+update system_settings set setting_value = 'ui_script' where setting_key = 'delpro_write_channel';
+select 'assert' as step, 'gateway channel: guid + catalog diagnosis required, marker frozen, read-back verified' as what;

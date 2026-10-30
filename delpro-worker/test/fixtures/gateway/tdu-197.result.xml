@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ddmData>
+  <object name="TreatmentDrugUsage">
+    <property name="Key">197</property>
+    <property name="Treatment" objectType="Treatment">40</property>
+    <property name="Drug" objectType="Drug">7</property>
+    <property name="DrugParams" objectType="DrugParameters">218</property>
+    <property name="Dosage">20</property>
+    <property name="Frequency">1</property>
+    <property name="TreatCowDays">1</property>
+  </object>
+</ddmData>

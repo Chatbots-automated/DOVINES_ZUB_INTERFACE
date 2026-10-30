@@ -9,7 +9,8 @@
     "lint": "eslint",
     "test:db": "node supabase/tests/run-scenario.mjs",
     "test:worker": "node --test delpro-worker/test/",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:guards": "node --test supabase/tests/frontend-guards.test.mjs"
   },
   "dependencies": {
     "@radix-ui/react-avatar": "^1.2.6",
@@ -44,6 +45,7 @@
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "16.3.1",
+    "fast-xml-parser": "^5.11.2",
     "tailwindcss": "^4",
     "typescript": "^5"
   }

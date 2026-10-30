@@ -78,7 +78,8 @@ export interface Database {
       };
 
       diseases: {
-        Row: Row<{ id: string; code: string | null; name: string; created_at: string }>;
+        // 0037 recommended_template_id <-> DelPro Diagnosis.RecommendedTreatment
+        Row: Row<{ id: string; code: string | null; name: string; recommended_template_id: string | null; created_at: string }>;
         Insert: Insertable<Database["public"]["Tables"]["diseases"]["Row"], "name">;
         Update: Updatable<Database["public"]["Tables"]["diseases"]["Row"]>;
         Relationships: [];
@@ -123,6 +124,8 @@ export interface Database {
           health_alert: string | null;
           group_since: string | null;
           notes: string | null;
+          // 0036 — DelPro Gateway Animal.ObjectGuid (for the Gateway treatment write)
+          delpro_object_guid: string | null;
           created_at: string;
           updated_at: string;
         }>;
@@ -651,6 +654,51 @@ export interface Database {
         Relationships: [];
       };
 
+      // 0036 — DelPro catalog sync. Read-only for the app (writes go through the delpro_catalog_* RPCs).
+      delpro_catalog_runs: {
+        Row: Row<DelproCatalogRunRow>;
+        Insert: Insertable<DelproCatalogRunRow, never>;
+        Update: Updatable<DelproCatalogRunRow>;
+        Relationships: [];
+      };
+      delpro_catalog_items: {
+        Row: Row<DelproCatalogItemRow>;
+        Insert: Insertable<DelproCatalogItemRow, "object_type" | "delpro_key" | "fields" | "record_hash">;
+        Update: Updatable<DelproCatalogItemRow>;
+        Relationships: [];
+      };
+      delpro_catalog_links: {
+        Row: Row<DelproCatalogLinkRow>;
+        Insert: Insertable<DelproCatalogLinkRow, "object_type" | "delpro_key" | "origin">;
+        Update: Updatable<DelproCatalogLinkRow>;
+        Relationships: [];
+      };
+      // 0037 — GVET -> DelPro catalog write queue + GVET treatment templates
+      delpro_catalog_jobs: {
+        Row: Row<DelproCatalogJobRow>;
+        Insert: Insertable<DelproCatalogJobRow, "object_type" | "operation" | "steps">;
+        Update: Updatable<DelproCatalogJobRow>;
+        Relationships: [];
+      };
+      treatment_templates: {
+        Row: Row<TreatmentTemplateRow>;
+        Insert: Insertable<TreatmentTemplateRow, "name">;
+        Update: Updatable<TreatmentTemplateRow>;
+        Relationships: [];
+      };
+      treatment_template_items: {
+        Row: Row<TreatmentTemplateItemRow>;
+        Insert: Insertable<TreatmentTemplateItemRow, "template_id" | "product_id" | "dosage">;
+        Update: Updatable<TreatmentTemplateItemRow>;
+        Relationships: [];
+      };
+      delpro_catalog_issues: {
+        Row: Row<DelproCatalogIssueRow>;
+        Insert: Insertable<DelproCatalogIssueRow, "issue_type" | "object_type" | "fingerprint">;
+        Update: Updatable<DelproCatalogIssueRow>;
+        Relationships: [];
+      };
+
       vic_sync_runs: {
         Row: Row<{
           id: string;
@@ -999,8 +1047,70 @@ export interface Database {
             animal_no: string | null;
             reg_date: string;
             diagnosis: string | null;
+            // 0033 — appended view columns
+            preview_problems: DelproTransferProblem[] | null;
+            payload_stale: boolean;
+            approved_by_name: string | null;
           }
         >;
+        Relationships: [];
+      };
+      vw_delpro_catalog_items: {
+        Row: Row<
+          DelproCatalogItemRow & {
+            link_id: string | null;
+            link_origin: DelproCatalogLinkRow["origin"] | null;
+            disease_id: string | null;
+            product_id: string | null;
+            gvet_name: string | null;
+            template_id: string | null;
+          }
+        >;
+        Relationships: [];
+      };
+      vw_treatment_templates: {
+        Row: Row<
+          TreatmentTemplateRow & {
+            delpro_key: string | null;
+            items: (Omit<TreatmentTemplateItemRow, "template_id" | "sort_order" | "delpro_params_key" | "created_at"> & {
+              product_name: string;
+              unit: Unit;
+            })[];
+            diseases: { id: string; name: string }[];
+          }
+        >;
+        Relationships: [];
+      };
+      vw_delpro_catalog_summary: {
+        Row: Row<{
+          object_type: DelproCatalogObjectType;
+          items: number;
+          linked: number;
+          unlinked: number;
+          removed: number;
+          last_seen_at: string | null;
+          complete: boolean;
+        }>;
+        Relationships: [];
+      };
+      vw_delpro_catalog_gvet_unlinked: {
+        Row: Row<{ object_type: "Diagnosis" | "Drug" | "Treatment"; gvet_table: "diseases" | "products" | "treatment_templates"; gvet_id: string; name: string }>;
+        Relationships: [];
+      };
+      vw_delpro_catalog_treatments: {
+        Row: Row<{
+          code: string;
+          name: string | null;
+          active: boolean | null;
+          treatment_type: string | null;
+          removed_at: string | null;
+          drug_usages: DelproTemplateDrugUsage[];
+          recommended_for: number;
+        }>;
+        Relationships: [];
+      };
+      vw_delpro_catalog_issues: {
+        Row: Row<DelproCatalogIssueRow & { delpro_name: string | null; gvet_name: string | null }>;
         Relationships: [];
       };
       vw_biocide_receiving_journal: {
@@ -1080,6 +1190,31 @@ export interface Database {
       delpro_approve_jobs: { Args: { p_job_ids: string[] }; Returns: number };
       delpro_reject_job: { Args: { p_job_id: string; p_reason?: string }; Returns: undefined };
       delpro_retry_job: { Args: { p_job_id: string; p_refresh?: boolean }; Returns: undefined };
+      // 0033 — treatment-level confirmation (same approval core as the queue)
+      delpro_approve_treatment: { Args: { p_treatment_id: string; p_reapprove?: boolean }; Returns: DelproApprovalResult };
+      delpro_treatment_transfer_state: { Args: { p_treatment_id: string }; Returns: DelproTransferState };
+      // 0036 — DelPro catalog (admin only; checked in the database)
+      delpro_catalog_request_sync: { Args: Record<string, never>; Returns: undefined };
+      delpro_catalog_link: { Args: { p_object_type: string; p_delpro_key: string; p_gvet_id: string }; Returns: DelproCatalogActionResult };
+      delpro_catalog_unlink: { Args: { p_link_id: string; p_reason?: string }; Returns: DelproCatalogActionResult };
+      delpro_catalog_confirm_suggestions: { Args: Record<string, never>; Returns: DelproCatalogActionResult & { linked: number; skipped: number } };
+      delpro_catalog_resolve_issue: { Args: { p_issue_id: string; p_action: DelproCatalogIssueAction }; Returns: DelproCatalogActionResult };
+      // 0037
+      delpro_catalog_enqueue_create: { Args: { p_object_type: string; p_gvet_id: string }; Returns: DelproCatalogActionResult };
+      delpro_catalog_create_test_job: { Args: { p_operation_key: string }; Returns: DelproCatalogActionResult };
+      delpro_catalog_mark_validated: { Args: { p_job_id: string }; Returns: DelproCatalogActionResult };
+      delpro_catalog_unvalidate: { Args: { p_operation_key: string }; Returns: DelproCatalogActionResult };
+      delpro_catalog_set_write_enabled: { Args: { p_enabled: boolean }; Returns: DelproCatalogActionResult };
+      delpro_catalog_job_action: {
+        Args: { p_job_id: string; p_action: "cancel" | "retry" | "adopt" | "resend"; p_step?: string; p_key?: string };
+        Returns: DelproCatalogActionResult;
+      };
+      save_treatment_template: { Args: { p_data: Record<string, unknown> }; Returns: string };
+      delete_treatment_template: { Args: { p_id: string }; Returns: undefined };
+      delpro_catalog_import: {
+        Args: { p_object_type: "Diagnosis" | "Drug" | "Treatment"; p_delpro_keys: string[] };
+        Returns: DelproCatalogActionResult & { created: number; skipped: { key: string; name: string | null; reason: string }[] };
+      };
       generate_write_off_act: { Args: { p_data: Record<string, unknown> }; Returns: string };
       approve_write_off_act: { Args: { p_act_id: string }; Returns: undefined };
       cancel_write_off_act: { Args: { p_act_id: string }; Returns: undefined };
@@ -1098,8 +1233,88 @@ export interface Database {
   };
 }
 
+/** One reason a treatment cannot be transferred yet (fn_delpro_transfer_problems, 0033). */
+export type DelproTransferProblem = {
+  code: string;
+  message: string;
+  /** The mapping that has to be created, when the problem is a missing/invalid mapping. */
+  fix: { kind: "disease" | "product"; local_id: string; name: string | null } | null;
+};
+
+export type DelproApprovalOutcome =
+  | "approved"
+  | "reapproved"
+  | "already_approved"
+  | "already_processing"
+  | "already_success"
+  | "stale"
+  | "blocked"
+  | "needs_retry"
+  | "rejected";
+
+/** Return value of delpro_approve_treatment (and the core behind delpro_approve_jobs). */
+export type DelproApprovalResult = {
+  ok: boolean;
+  outcome: DelproApprovalOutcome;
+  status: DelproSyncJobStatus | null;
+  job_id: string | null;
+  problems: DelproTransferProblem[];
+  message: string;
+};
+
+/** Read model behind the confirmation dialog (delpro_treatment_transfer_state, 0033). */
+export type DelproTransferState =
+  | { found: false }
+  | {
+      found: true;
+      procedure_type: ProcedureType;
+      mode: DelproOutboundMode;
+      eligible: boolean;
+      can_approve: boolean;
+      is_admin: boolean;
+      job: {
+        id: string;
+        status: DelproSyncJobStatus;
+        approved_at: string | null;
+        approved_by_name: string | null;
+        auto_approved: boolean;
+        started_at: string | null;
+        completed_at: string | null;
+        attempts: number;
+        verified: boolean;
+        error: string | null;
+        rejection_reason: string | null;
+      } | null;
+      /** What was frozen at approval, or the live preview while nothing is frozen. */
+      payload: DelproPayload;
+      frozen: boolean;
+      /** The live data as it would be frozen right now. */
+      preview: DelproPayload;
+      /** True when a frozen payload no longer matches the treatment / mappings. */
+      stale: boolean;
+      problems: DelproTransferProblem[];
+      worker: { last_seen_at: string | null; online: boolean };
+    };
+
+/**
+ * The parameter set the farm-PC UI automation (delpro.ps1) understands — built
+ * by the database (fn_build_delpro_payload, payload v2). The worker validates
+ * these and passes them as an argument ARRAY; they are never shell text.
+ */
+export type DelproUiEntry = {
+  treatment_id: string; // -> TreatmentId
+  animal_number: string | null; // -> AnimalNumber
+  diagnosis_name: string | null; // -> DiagnosisName
+  diagnosis_code: string | null; // -> DiagnosisCode
+  medicine_name: string | null; // -> MedicineName (null unless exactly one medicine)
+  dose: number | null; // -> Dose
+  dose_unit: Unit | null; // informational
+  course_days: number; // -> CourseDays (1 = no course)
+};
+
 export type DelproPayload = {
   sync_id?: string;
+  payload_version?: number;
   treatment_id: string;
   animal: { animal_id: string; delpro_animal_id: string | null; animal_no: string | null; tag_no: string };
   delpro: {
@@ -1115,6 +1330,7 @@ export type DelproPayload = {
       unit: Unit | null;
       administration_route: AdministrationRoute | null;
       delpro_code: string | null;
+      delpro_name?: string | null;
     }>;
     course_days: number | null;
     withdrawal_until_milk: string | null;
@@ -1122,6 +1338,7 @@ export type DelproPayload = {
     milk_withdrawal_days: number;
     meat_withdrawal_days: number;
     vet_name: string | null;
+    ui_entry?: DelproUiEntry;
   };
 };
 
@@ -1147,4 +1364,232 @@ type DelproSyncJobRow = {
   error_details: Record<string, unknown> | null;
   created_at: string;
   updated_at: string;
+  // 0037 — Gateway channel
+  gateway_entry: Record<string, unknown> | null;
+  requires_verification: boolean;
+};
+
+// ---------------------------------------------------------------------------
+// DelPro catalog sync (0036_delpro_catalog_sync.sql)
+// ---------------------------------------------------------------------------
+
+export type DelproCatalogObjectType = "Drug" | "DrugParameters" | "Diagnosis" | "Treatment" | "TreatmentDrugUsage";
+
+export type DelproCatalogIssueType =
+  | "suggested_match"
+  | "ambiguous_match"
+  | "field_difference"
+  | "inbound_change"
+  | "outbound_pending"
+  | "conflict"
+  | "removed_in_delpro"
+  | "broken_reference"
+  | "clinical_review";
+
+export type DelproCatalogIssueAction = "confirm" | "take_delpro" | "keep_gvet" | "send" | "unlink" | "reviewed" | "dismiss";
+
+export type DelproCatalogActionResult = { ok: boolean; message: string };
+
+/** Per object type in delpro_catalog_runs.stats (plus "Animal" for the ObjectGuid import). */
+export type DelproCatalogRunTypeStats = {
+  received?: number;
+  inserted?: number;
+  changed?: number;
+  unchanged?: number;
+  invalid?: number;
+  errors?: { key: string | null; error: string }[];
+  returned?: number | null;
+  limit?: number | null;
+  seen?: number;
+  complete?: boolean;
+  removed?: number;
+  note?: string | null;
+  // Animal
+  matched?: number;
+  unmatched?: number;
+  ambiguous?: number;
+  conflicts?: number;
+};
+
+type DelproCatalogRunRow = {
+  id: string;
+  worker_id: string | null;
+  status: "running" | "completed" | "failed";
+  stats: Record<string, DelproCatalogRunTypeStats>;
+  reconcile: { opened: number; closed: number; auto_applied: number; open: number } | null;
+  error: string | null;
+  started_at: string;
+  finished_at: string | null;
+};
+
+type DelproCatalogItemRow = {
+  id: string;
+  object_type: DelproCatalogObjectType;
+  delpro_key: string;
+  name: string | null;
+  active: boolean | null;
+  fields: Record<string, unknown>;
+  record_hash: string;
+  raw: Record<string, unknown> | null;
+  last_run_id: string | null;
+  first_seen_at: string;
+  last_seen_at: string;
+  changed_at: string;
+  removed_at: string | null;
+};
+
+type DelproCatalogLinkRow = {
+  id: string;
+  object_type: "Diagnosis" | "Drug" | "Treatment";
+  delpro_key: string;
+  disease_id: string | null;
+  product_id: string | null;
+  template_id: string | null;
+  origin: "matched" | "manual" | "imported" | "created";
+  synced_fields: Record<string, unknown> | null;
+  synced_hash: string | null;
+  synced_at: string | null;
+  linked_by: string | null;
+  linked_at: string;
+  retired_at: string | null;
+  retired_by: string | null;
+  retire_reason: string | null;
+};
+
+/** A field compared on a link: DelPro value, GVET value, last agreed value (null = never agreed). */
+export type DelproCatalogFieldDiff = { delpro: unknown; gvet: unknown; synced: unknown | null };
+
+export type DelproCatalogIssueDetails = {
+  delpro_name?: string | null;
+  gvet_name?: string | null;
+  candidate?: { gvet_table: string; gvet_id: string; name: string; linked: boolean };
+  candidates?: { gvet_table: string; gvet_id: string; name: string; linked: boolean }[];
+  same_name_in_delpro?: number;
+  fields?: Record<string, DelproCatalogFieldDiff>;
+  missing?: { field: string; object_type: DelproCatalogObjectType; key: string }[];
+  uom?: string | null;
+  milk_days?: number | null;
+  meat_days?: number | null;
+  application_method?: string | null;
+  usages?: DelproTemplateUsageValue[];
+};
+
+/** One drug line of a template as compared between GVET and DelPro (0037 fn_delpro_*_usages). */
+export type DelproTemplateUsageValue = {
+  drug: string;
+  dosage: number | null;
+  frequency: number | null;
+  treat_cow_days: number | null;
+  uom: string | null;
+  application_method: string | null;
+  milk_days: number | null;
+  meat_days: number | null;
+};
+
+export type DelproCatalogJobStatus = "queued" | "processing" | "success" | "failed" | "verification_failed" | "needs_review" | "cancelled";
+
+export type DelproCatalogJobStep = {
+  id: string;
+  object: string;
+  operation: "create" | "update" | "verify_refs";
+  key_property: string;
+  key?: string;
+  lookup_name?: string;
+  item_id?: string;
+  properties?: { name: string; value?: unknown; object_type?: string; ref_step?: string }[];
+};
+
+type DelproCatalogJobRow = {
+  id: string;
+  object_type: "Diagnosis" | "Drug" | "Treatment";
+  operation: "create" | "update";
+  is_test: boolean;
+  link_id: string | null;
+  disease_id: string | null;
+  product_id: string | null;
+  template_id: string | null;
+  delpro_key: string | null;
+  label: string | null;
+  steps: DelproCatalogJobStep[];
+  gvet_values: Record<string, unknown> | null;
+  /** adopted_* / resend_confirmed_*: an admin's decision on a step whose earlier write had an unknown outcome. */
+  progress: Record<
+    string,
+    { started_at?: string; done_at?: string; key?: string | null; adopted_by?: string; adopted_at?: string; resend_confirmed_by?: string; resend_confirmed_at?: string }
+  >;
+  status: DelproCatalogJobStatus;
+  attempts: number;
+  max_attempts: number;
+  next_attempt_at: string | null;
+  worker_id: string | null;
+  lease_expires_at: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  readback: unknown;
+  error: string | null;
+  error_details: Record<string, unknown> | null;
+  validated_at: string | null;
+  validated_by: string | null;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+type TreatmentTemplateRow = {
+  id: string;
+  name: string;
+  active: boolean;
+  treatment_type: string | null;
+  notes: string | null;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+type TreatmentTemplateItemRow = {
+  id: string;
+  template_id: string;
+  sort_order: number;
+  product_id: string;
+  dosage: number;
+  frequency: number;
+  treat_cow_days: number;
+  uom: string | null;
+  application_method: string | null;
+  milk_days: number;
+  meat_days: number;
+  delpro_usage_key: string | null;
+  delpro_params_key: string | null;
+  created_at: string;
+};
+
+type DelproCatalogIssueRow = {
+  id: string;
+  issue_type: DelproCatalogIssueType;
+  object_type: string;
+  delpro_key: string | null;
+  link_id: string | null;
+  gvet_table: "diseases" | "products" | "treatment_templates" | null;
+  gvet_id: string | null;
+  fingerprint: string;
+  details: DelproCatalogIssueDetails;
+  status: "open" | "resolved" | "dismissed";
+  resolution: string | null;
+  resolved_by: string | null;
+  resolved_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type DelproTemplateDrugUsage = {
+  key: string;
+  drug_code: string | null;
+  drug_name: string | null;
+  dosage: number | null;
+  frequency: number | null;
+  treat_cow_days: number | null;
+  uom: string | null;
+  application_method: string | null;
+  dump_milk_days: number | null;
+  meat_withhold_days: number | null;
 };

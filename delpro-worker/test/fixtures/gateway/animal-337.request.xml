@@ -1,0 +1,9 @@
+<requestData>
+  <object name="Animal" top="1">
+    <property name="ObjectGuid"/>
+    <property name="Number"/>
+    <where>
+      <equal name="Number">337</equal>
+    </where>
+  </object>
+</requestData>

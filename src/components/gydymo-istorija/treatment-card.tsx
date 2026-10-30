@@ -1,11 +1,17 @@
 import Link from "next/link";
 import { Pill } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
+import { DelproTransferDialog } from "@/components/delpro/transfer-dialog";
+import { delproStatusLabel, delproStatusTone } from "@/lib/delpro-status";
 import { ADMINISTRATION_ROUTES } from "@/lib/administration-routes";
 import { daysBetween } from "@/lib/treatments/planner";
 import { TREATMENT_TYPE_LABELS } from "@/lib/visits";
 import { formatDate, formatQty } from "@/lib/utils";
 import type { TreatmentHistoryCard } from "@/lib/treatment-history";
+import type { DelproSyncJobStatus } from "@/lib/supabase/types";
+
+/** DelPro transfer context for a gydymas card; omitted when the integration is off. */
+export type CardDelpro = { status: DelproSyncJobStatus | null; canApprove: boolean };
 
 const TYPE_TONE = { gydymas: "danger", profilaktika: "success", apziura: "info", sinchronizacija: "accent" } as const;
 
@@ -28,7 +34,7 @@ function Karencija({ kind, until, today }: { kind: "milk" | "meat"; until: strin
 
 // One treatment as a card: who, what was diagnosed, which medicines (and how
 // much), karencija, outcome — everything the old journal table spread over 12 columns.
-export function TreatmentCard({ card, today }: { card: TreatmentHistoryCard; today: string }) {
+export function TreatmentCard({ card, today, delpro }: { card: TreatmentHistoryCard; today: string; delpro?: CardDelpro }) {
   const title = card.animalNo ? `Nr. ${card.animalNo} · ${card.tagNo}` : card.tagNo;
   const diagnosis = [card.disease, card.diagnosis && card.diagnosis !== card.disease ? card.diagnosis : null].filter(Boolean).join(" — ");
   const hasKarencija = !!card.milkUntil || !!card.meatUntil;
@@ -70,6 +76,15 @@ export function TreatmentCard({ card, today }: { card: TreatmentHistoryCard; tod
         <div className="flex flex-wrap gap-1.5">
           <Karencija kind="milk" until={card.milkUntil} today={today} />
           <Karencija kind="meat" until={card.meatUntil} today={today} />
+        </div>
+      )}
+
+      {delpro && card.procedureType === "gydymas" && (
+        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border pt-2.5">
+          <span className="flex items-center gap-1.5 text-[12px] text-text-muted">
+            DelPro: <Badge tone={delproStatusTone(delpro.status)}>{delproStatusLabel(delpro.status)}</Badge>
+          </span>
+          <DelproTransferDialog treatmentId={card.id} status={delpro.status} canApprove={delpro.canApprove} />
         </div>
       )}
 

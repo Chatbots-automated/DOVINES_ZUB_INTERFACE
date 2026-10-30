@@ -20,7 +20,8 @@
   Žibartoniai's workflow, same payload). VIC only *enriches* existing tags (fills nulls; never DelPro values, group or
   active) and inserts unknown tags as `source='vic'`; DelPro's tag fallback later adopts them. Full snapshots deactivate
   only `source='vic'` animals; empty snapshots are refused.
-- Single-farm, single-tenant: no `farm_id` anywhere.
+- Single-farm, single-tenant: no `farm_id` anywhere. A second farm = its own Supabase project + its own worker; never point two
+  farms' workers at one project (herd snapshots deactivate each other's animals, DelPro catalog keys collide).
 
 ## Lineage
 
@@ -107,7 +108,7 @@ not look for Žibartoniai's 0013–0021 VIC/UNIFORM history here.
   Cancelling an approved act releases its rows. Approval requires every item's allocations to sum to its quantity.
 - Tests (no Docker/Supabase needed — PGlite runs real Postgres in WASM):
   - `npm run test:db` — every migration + `supabase/tests/scenario.sql` (DelPro sync, FEFO, courses, karencija,
-    DelPro queue, vaccinations, biocides, general usage, write-off templates/groups/lifecycle, VIC credentials, RLS). Negative checks must use the
+    DelPro queue, vaccinations, biocides, general usage, write-off templates/groups/lifecycle, VIC credentials, DelPro catalog sync, RLS). Negative checks must use the
     `blocked boolean` pattern already in that file — a bare `exception when others` also swallows your own
     `raise exception`, so the check can never fail.
   - `npm run test:worker` — the DelPro worker against a PostgREST-shaped HTTP shim over the same database.
@@ -117,7 +118,7 @@ not look for Žibartoniai's 0013–0021 VIC/UNIFORM history here.
 - DelPro has no API. `delpro-worker/` runs on the farm PC, talks to DelPro's local SQL Server and makes **outbound-only**
   HTTPS calls to service-role RPCs. The database never does network I/O; the Next.js app never talks to DelPro.
 - Worker-facing RPCs that take a request body use a single **unnamed** `jsonb` parameter (`upsert_animals_from_delpro`,
-  `delpro_report_job_result`, `delpro_worker_heartbeat`) — PostgREST only passes the raw body through to an unnamed
+  `delpro_report_job_result`, `delpro_worker_heartbeat`, the `delpro_catalog_*` worker RPCs, `delpro_ingest_animal_ids`) — PostgREST only passes the raw body through to an unnamed
   param; a named one 404s (PGRST202). Proven the hard way in Žibartoniai (its AGENTS.md has the trace).
   `delpro_claim_next_job(p_worker_id)` is named on purpose (body `{"p_worker_id": …}`).
 - Worker RPCs are revoked from `authenticated` and granted to `service_role` only.
@@ -130,6 +131,59 @@ not look for Žibartoniai's 0013–0021 VIC/UNIFORM history here.
 - `upsert_animals_from_delpro` treats each call as a full herd snapshot and deactivates `source='delpro'` animals that are
   absent. The worker refuses to send an empty snapshot. A tag held by a *different* DelPro animal is skipped (counted
   in `skipped`), never merged.
+- **Treatment-level confirmation** (0033, farm's request): "Patvirtinti perdavimą į DelPro" on gydymas cards in Gydymų istorija
+  (`DelproTransferDialog`). It reuses `delpro_sync_jobs` — the dialog and the queue's bulk approve both end in
+  `fn_delpro_approve_job()` (row-locked, idempotent, validates, freezes `approved_payload`, audits to `user_audit_logs`). The client
+  sends only a treatment id; the database builds the payload. **Approved = released to the worker, never "done in DelPro"**: only
+  `delpro_report_job_result` (service_role) sets `success`. admin + vet may approve (`fn_can_approve_delpro()`); reject/retry stay
+  admin. `delpro_sync_jobs` is no longer client-writable (policy dropped, reject/retry are definer RPCs).
+  Nothing is guessed: `fn_delpro_transfer_problems()` blocks on no disease on the treatment, several medicine lines, course days whose
+  medicine/dose differ from day 1 (the UI script enters ONE dose), no `animal_no`, integration off, non-`gydymas`. **0034 (farm's
+  decision): DelPro names equal GVET names**, so `ui_entry.diagnosis_name` = `diseases.name` and `medicine_name` = `products.name`;
+  `diagnosis_code` is null; a `delpro_mappings` row is only an optional override (non-empty name/code wins). No course =
+  `course_days` 1 (derived). Payload v2 adds `delpro.ui_entry` = exactly the `delpro.ps1` parameters (see `delpro-worker/README.md`). A frozen payload that no longer matches the
+  live treatment/mappings is `payload_stale`: the dialog/queue flag it, re-approval is explicit (`p_reapprove`), and
+  `delpro_claim_next_job` never hands it out (job returns to `pending_approval`). Auto mode also validates before claiming.
+  Status labels live in `src/lib/delpro-status.ts`. Tests: `npm run test:db` (scenario §5 + the 0033 block), `npm run test:worker`,
+  `npm run test:guards` (labels, no service-role in client code).
+- **Catalog sync** (0036, Priedas §4 — recorded as in scope, not billed separately). The worker reads DelPro's catalog through the
+  local **Gateway SOAP service** (`delpro-worker/src/gateway.js`; verified envelope/SOAPAction/`ddmData` samples are in
+  `delpro-worker/test/fixtures/gateway/`) — `GetData` only. Mirror: `delpro_catalog_items` (Drug, DrugParameters, Diagnosis, Treatment,
+  TreatmentDrugUsage — the last two are DelPro **templates**, never treatment events), normalized `fields` + `record_hash`. Upload is
+  `begin_run` → `upload` (batches, one type) → `finish_run`; a type is marked **complete** only when the read showed no sign of
+  truncation (fewer rows than `top`, and the per-value partition re-read agrees — the Gateway may cap below `top`). Only complete
+  types get removals (`removed_at`, never deletes), never from an empty snapshot, never more than half the type.
+  Links (`delpro_catalog_links`, Diagnosis↔diseases, Drug↔products, 1:1, retired not deleted) are **never made by name alone**:
+  an exact normalized-name match is a `suggested_match` issue an admin confirms. `fn_delpro_catalog_reconcile()` recomputes
+  `delpro_catalog_issues` (full, cheap) after every run and admin decision; per link it is a 3-way field compare against
+  `synced_fields` (the last agreed values) → `field_difference` / `inbound_change` / `outbound_pending` / `conflict`. Applying a side
+  updates the base, so nothing echoes back. Withdrawal days + UOM + template lines are clinical: never applied automatically
+  (`delpro_catalog_inbound_mode` `auto` only covers name / active substance / active / treatment type). Statement triggers on
+  diseases / products / templates re-run the reconcile when a shared field changes (guarded by `delpro.reconciling`, never blocking the save).
+- **GVET treatment templates** (0037, `treatment_templates` + `_items`, edited in the DelPro screen) are the GVET side of DelPro
+  `Treatment` + `TreatmentDrugUsage`; `diseases.recommended_template_id` ↔ `Diagnosis.RecommendedTreatment` (adopted from DelPro when GVET
+  has none). Template lines are compared as an order-independent set keyed by the drug's DelPro code (`fn_delpro_*_usages`).
+- **GVET → DelPro catalog writes** (0037, `delpro_catalog_jobs`): the database builds a frozen step plan (`fn_delpro_catalog_plan_create/
+  _update`), the worker (`catalog-writer.js`) executes it: report `start` → CreateData/UpdateData → read back by key → compare every
+  written property → report `done` + key. Gates, all required: `delpro_catalog_write_enabled`, worker `CATALOG_WRITE_ENABLED=true`,
+  and the operation listed in `delpro_catalog_validated_operations`, which an admin can only add after a **test job** (inactive
+  `GVET TEST …` record) succeeded. A create step started but not done = unknown outcome: **never re-sent and never adopted by name**
+  (`needs_review`, same-name DelPro records listed as candidates only) until an admin runs `delpro_catalog_job_action` `adopt` (key →
+  read back + compared like a write) or `resend` (checked absent in DelPro); `retry` is refused meanwhile. A DrugParameters record referenced by anything else is never updated in place (new one + re-point). Template usages DelPro has
+  but GVET doesn't block the update (no deletes, ever). `Treatment.DrugUsages` is read-only in the Gateway: usages are written as
+  `TreatmentDrugUsage` records and a `verify_refs` step checks DelPro listed them. UpdateData identifying the record by its key property,
+  and the `true`/`false` boolean format, are exactly what the test jobs exist to confirm. `delpro_catalog_outbound_mode` `auto`
+  queues edits of linked records and records created after the switch; `manual` = "Siųsti į DelPro" / "Sukurti DelPro".
+- **Gateway channel for treatments** (0037, built, **off**): `delpro_write_channel` `ui_script` (default) | `gateway`. Gateway =
+  one `DiagnosesAndTreatmentEvent` in the verified shape (Animal ObjectGuid, Diagnosis code from the catalog link, EventDate UTC,
+  EventTime local, Comment starting `GVET:<sync_id>`), frozen in `delpro_sync_jobs.gateway_entry` at first claim. **Diagnosis event
+  only — not medicine sync**: medicines travel as text in the Comment; `HealthEventDrugUsage` is not written (unvalidated). The marker
+  lookup adopts an event only if it is the single one with the marker and its animal + diagnosis match. `requires_verification` (released stale job / `outcome_unknown`) makes the
+  worker look the marker up before writing. `delpro_claim_next_job(p_worker_id, p_channel)` returns nothing to a worker of the other
+  channel. Problems are channel-aware (`fn_delpro_transfer_problems` wraps the renamed 0034 `fn_delpro_transfer_problems_ui`).
+  Switching the channel is a farm decision — no UI toggle on purpose. `animals.delpro_object_guid` (Gateway
+  `Animal.ObjectGuid`, matched on the active herd number; ambiguous numbers skipped) is groundwork for the Gateway treatment write.
+  `delpro_mappings` (0034 name overrides for the UI script) is separate and unchanged.
 - **DelPro write path** — preferred order: DelPro's own import function → UI automation → direct SQL insert into DelPro's
   database. Direct SQL bypasses DelPro's own logic and may affect DeLaval support: only with the farm's written OK.
   All DelPro-specific SQL lives in `delpro-worker/queries/*.sql`; files marked `TODO(discovery)` are placeholders and

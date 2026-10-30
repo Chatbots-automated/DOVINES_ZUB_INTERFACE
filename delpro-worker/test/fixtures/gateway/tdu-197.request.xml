@@ -1,0 +1,14 @@
+<requestData>
+  <object name="TreatmentDrugUsage" top="1">
+    <property name="Key"/>
+    <property name="Treatment"/>
+    <property name="Drug"/>
+    <property name="DrugParams"/>
+    <property name="Dosage"/>
+    <property name="Frequency"/>
+    <property name="TreatCowDays"/>
+    <where>
+      <equal name="Key">197</equal>
+    </where>
+  </object>
+</requestData>

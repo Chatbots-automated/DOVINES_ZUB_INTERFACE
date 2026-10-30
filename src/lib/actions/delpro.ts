@@ -2,6 +2,7 @@
 
 import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
+import { revalidateUsageViews } from "@/lib/revalidate";
 import type { DelproOutboundMode } from "@/lib/supabase/types";
 
 // DelPro integration admin actions (Priedas §3-§4). All are form-bound
@@ -29,7 +30,33 @@ export async function approveDelproJobs(_prev: DelproActionResult | null, formDa
   const supabase = await createClient();
   const { data, error } = await supabase.rpc("delpro_approve_jobs", { p_job_ids: ids });
   if (error) return { ok: false, error: error.message };
-  return done(`Patvirtinta: ${data ?? 0}`);
+  const approved = data ?? 0;
+  const skipped = ids.length - approved;
+  // Skipped = blocked (missing mapping, several medicines...) or already approved; the queue shows the reason per row.
+  revalidateUsageViews();
+  return done(skipped > 0 ? `Patvirtinta: ${approved}. Praleista: ${skipped} (žr. priežastis prie įrašų).` : `Patvirtinta: ${approved}`);
+}
+
+// "Patvirtinti perdavimą į DelPro" from the treatment screen. Same approval core
+// as the queue (fn_delpro_approve_job): the client sends ONLY the treatment id —
+// the payload is built and frozen by the database, so it can't be tampered with.
+// Success here means "released to the farm-PC worker", never "written to DelPro".
+export async function confirmDelproTransfer(_prev: DelproActionResult | null, formData: FormData): Promise<DelproActionResult> {
+  const treatmentId = String(formData.get("treatment_id") ?? "");
+  const reapprove = formData.get("reapprove") === "1";
+  if (!treatmentId) return { ok: false, error: "Nenurodytas gydymas." };
+
+  const supabase = await createClient();
+  const { data, error } = await supabase.rpc("delpro_approve_treatment", { p_treatment_id: treatmentId, p_reapprove: reapprove });
+  if (error) return { ok: false, error: error.message };
+  if (!data) return { ok: false, error: "Nepavyko patvirtinti perdavimo." };
+
+  if (!data.ok) {
+    const detail = data.problems?.length ? data.problems.map((p) => p.message).join(" ") : data.message;
+    return { ok: false, error: detail || "Nepavyko patvirtinti perdavimo." };
+  }
+  revalidateUsageViews();
+  return done(data.message);
 }
 
 export async function rejectDelproJob(_prev: DelproActionResult | null, formData: FormData): Promise<DelproActionResult> {
@@ -56,13 +83,11 @@ export async function updateDelproSettings(_prev: DelproActionResult | null, for
   const mode = String(formData.get("delpro_outbound_mode") ?? "") as DelproOutboundMode;
   if (!MODES.includes(mode)) return { ok: false, error: "Neteisingas režimas." };
   const delay = Math.max(0, Math.round(Number(formData.get("delpro_auto_delay_minutes") ?? 10) || 0));
-  const defaultCode = String(formData.get("delpro_default_treatment_code") ?? "").trim() || null;
 
   const supabase = await createClient();
   const updates: Array<[string, string | null]> = [
     ["delpro_outbound_mode", mode],
     ["delpro_auto_delay_minutes", String(delay)],
-    ["delpro_default_treatment_code", defaultCode],
   ];
   for (const [key, value] of updates) {
     const { error } = await supabase.from("system_settings").update({ setting_value: value }).eq("setting_key", key);

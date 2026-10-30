@@ -10,7 +10,7 @@ import { downloadCsv } from "@/lib/export";
 import { TREATMENT_TYPE_LABELS } from "@/lib/visits";
 import { formatDate, formatQty } from "@/lib/utils";
 import type { TreatmentHistoryCard } from "@/lib/treatment-history";
-import type { ProcedureType } from "@/lib/supabase/types";
+import type { DelproSyncJobStatus, ProcedureType } from "@/lib/supabase/types";
 
 const PAGE = 30;
 const MONTH = new Intl.DateTimeFormat("lt-LT", { year: "numeric", month: "long" });
@@ -21,7 +21,16 @@ const monthKey = (d: string) => d.slice(0, 7);
 // Gydymų istorija (Priedas §2.10 "paieška, filtrai ir istorija"): one card per
 // treatment, filtered in the browser over the fetched window, month by month,
 // "Rodyti daugiau" instead of rendering thousands of cards at once.
-export function TreatmentHistory({ cards, today }: { cards: TreatmentHistoryCard[]; today: string }) {
+export function TreatmentHistory({
+  cards,
+  today,
+  delpro,
+}: {
+  cards: TreatmentHistoryCard[];
+  today: string;
+  /** DelPro transfer state per treatment id; undefined = integration off (no DelPro UI on the cards). */
+  delpro?: { statuses: Record<string, DelproSyncJobStatus>; canApprove: boolean };
+}) {
   const [search, setSearch] = React.useState("");
   const [type, setType] = React.useState<ProcedureType | "all">("all");
   const [product, setProduct] = React.useState("all");
@@ -161,7 +170,12 @@ export function TreatmentHistory({ cards, today }: { cards: TreatmentHistoryCard
               </h2>
               <div className="grid gap-3 xl:grid-cols-2">
                 {m.cards.map((c) => (
-                  <TreatmentCard key={c.id} card={c} today={today} />
+                  <TreatmentCard
+                    key={c.id}
+                    card={c}
+                    today={today}
+                    delpro={delpro ? { status: delpro.statuses[c.id] ?? null, canApprove: delpro.canApprove } : undefined}
+                  />
                 ))}
               </div>
             </section>

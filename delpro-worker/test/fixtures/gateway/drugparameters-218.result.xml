@@ -1,0 +1,9 @@
+<ddmData>
+  <object name="DrugParameters">
+    <property name="Key">218</property>
+    <property name="UOM">ml</property>
+    <property name="ApplicationMethod" />
+    <property name="DumpMilkDays">0</property>
+    <property name="MeatWithholdDays">4</property>
+  </object>
+</ddmData>

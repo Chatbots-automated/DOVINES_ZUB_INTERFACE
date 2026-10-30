@@ -20,8 +20,20 @@ export async function rpc(fn, body) {
 export const gvet = {
   heartbeat: (info) => rpc("delpro_worker_heartbeat", info),
   upsertAnimals: (payload) => rpc("upsert_animals_from_delpro", payload),
-  // Named param: PostgREST maps {"p_worker_id": ...} to the argument.
-  claimNextJob: () => rpc("delpro_claim_next_job", { p_worker_id: config.workerId }),
+  // Named params: PostgREST maps {"p_worker_id": ..., "p_channel": ...} to the arguments.
+  // p_channel makes GVET hand out nothing when the farm is set to the other write channel.
+  claimNextJob: (channel) =>
+    rpc("delpro_claim_next_job", channel ? { p_worker_id: config.workerId, p_channel: channel } : { p_worker_id: config.workerId }),
   reportJobResult: (result) => rpc("delpro_report_job_result", result),
   releaseStaleJobs: () => rpc("delpro_release_stale_jobs", {}),
+  // DelPro catalog (0036) — all unnamed jsonb bodies.
+  catalogBeginRun: (body) => rpc("delpro_catalog_begin_run", body),
+  catalogUpload: (body) => rpc("delpro_catalog_upload", body),
+  catalogFinishRun: (body) => rpc("delpro_catalog_finish_run", body),
+  catalogSyncRequested: () => rpc("delpro_catalog_sync_requested", {}),
+  ingestAnimalIds: (body) => rpc("delpro_ingest_animal_ids", body),
+  // GVET -> DelPro catalog jobs (0037)
+  catalogClaimJob: (body) => rpc("delpro_catalog_claim_job", body),
+  catalogJobStep: (body) => rpc("delpro_catalog_job_step", body),
+  catalogJobResult: (body) => rpc("delpro_catalog_job_result", body),
 };
