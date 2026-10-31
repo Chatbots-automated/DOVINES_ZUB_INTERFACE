@@ -35,7 +35,8 @@ export const config = {
     password: env("DELPRO_SQL_PASSWORD"),
   },
   inboundIntervalMin: Number(env("INBOUND_INTERVAL_MIN", "30")),
-  outboundIntervalSec: Number(env("OUTBOUND_INTERVAL_SEC", "60")),
+  // GVET queues a treatment the moment it is saved (0044); the worker picks it up on this poll.
+  outboundIntervalSec: Number(env("OUTBOUND_INTERVAL_SEC", "5")),
   outboundMode: env("OUTBOUND_MODE", "dry-run"),
 
   // DelPro Gateway SOAP service (local to the farm PC). Credentials stay in .env;
@@ -52,7 +53,8 @@ export const config = {
   // off | gateway — DelPro catalog (Drug, DrugParameters, Diagnosis, Treatment,
   // TreatmentDrugUsage) + Animal ObjectGuid -> GVET. Read-only towards DelPro.
   catalogSource: env("CATALOG_SOURCE", "off"),
-  catalogIntervalMin: Number(env("CATALOG_INTERVAL_MIN", "360")),
+  // daily DelPro -> GVET catalog sync (plus "Sinchronizuoti dabar" in GVET)
+  catalogIntervalMin: Number(env("CATALOG_INTERVAL_MIN", "1440")),
   // `top` per GetData; a read returning this many rows is treated as truncated.
   catalogMaxRows: Number(env("CATALOG_MAX_ROWS", "5000")),
   // Rows a single GetData is assumed to be able to return at most (the farm's Gateway

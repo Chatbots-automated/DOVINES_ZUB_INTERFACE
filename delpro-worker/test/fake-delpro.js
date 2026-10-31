@@ -32,7 +32,7 @@ export function fakeDelpro({ onCreate, timeoutAfterCreate = 0 } = {}) {
     async createData(xml) {
       calls.push(["CreateData", xml]);
       const [o] = parseDdmData(xml);
-      const kp = KEY[o.objectName];
+      const kp = KEY[o.objectName] ?? "ObjectGuid";
       const key = kp === "ObjectGuid" ? randomUUID() : String(seq++);
       const row = { [kp]: key };
       for (const [n, p] of Object.entries(o.properties)) row[n] = p.value;

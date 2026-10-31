@@ -9,7 +9,8 @@ import { createGatewayClient } from "./gateway.js";
 import { previewCatalogSync, runCatalogSync } from "./catalog.js";
 import { runCatalogWrites } from "./catalog-writer.js";
 import { checkCatalogJob } from "./catalog-write-check.js";
-import { writeTreatmentEvent } from "./treatment-gateway.js";
+import { TreatmentWriteError, liveChecks, treatmentProblems, writeTreatment as writeGatewayTreatment } from "./treatment-gateway.js";
+import { loadTreatmentModel, validateModel } from "./treatment-model.js";
 import { GatewayError } from "./gateway.js";
 import { log } from "./log.js";
 
@@ -170,28 +171,54 @@ export async function runCatalogOutbound() {
   return runCatalogWrites(createGatewayClient({ allowWrites: true }));
 }
 
-// OUTBOUND_MODE=gateway: treatments as DelPro DiagnosesAndTreatmentEvent records (0037).
+// OUTBOUND_MODE=gateway: each treatment GVET queues (saving it is the trigger, 0044) becomes a
+// DiagnosesAndTreatmentEvent + its medicine records, read back and verified (treatment-gateway.js).
+// Without a farm-verified treatment-model.json nothing is claimed: the jobs wait in GVET, none is lost,
+// and nothing is written that would only look like a treatment.
+let modelWarnedAt = 0;
 async function runOutboundGateway() {
+  const model = loadTreatmentModel();
+  const modelErrors = validateModel(model);
+  if (modelErrors.length) {
+    if (Date.now() - modelWarnedAt > 3600_000) {
+      modelWarnedAt = Date.now();
+      log.warn(`OUTBOUND_MODE=gateway, bet gydymai nesiunčiami: ${modelErrors.join(" ")} (npm run treatment-probe)`);
+    }
+    return 0;
+  }
   const client = createGatewayClient({ allowWrites: true });
   let processed = 0;
   while (processed < MAX_JOBS_PER_TICK) {
     const job = await gvet.claimNextJob("gateway");
     if (!job) break;
     processed += 1;
+    const plan = job.treatment_plan;
     try {
-      const actual = await writeTreatmentEvent(client, job);
-      const res = await gvet.reportJobResult({ sync_id: job.sync_id, worker_id: config.workerId, success: true, actual_result: actual });
-      log.info(`GVET → DelPro (Gateway): gyvulys ${job.gateway.animal_no ?? job.animal.tag_no}, ${job.gateway.event_date_local} → ${res?.status}`);
+      const problems = [...treatmentProblems(plan, model), ...(await liveChecks(client, plan))];
+      if (problems.length) {
+        await gvet.reportJobResult({ sync_id: job.sync_id, worker_id: config.workerId, success: false,
+          error_message: problems.map((p) => p.message).join("; "), error_details: { problems } });
+        log.warn(`GVET → DelPro: ${plan.animal.orn} — nesiunčiama: ${problems.map((p) => p.message).join("; ")}`);
+        continue;
+      }
+      const actual = await writeGatewayTreatment(client, plan, model);
+      const res = await gvet.reportJobResult({ sync_id: job.sync_id, worker_id: config.workerId, success: true, actual_result: actual,
+        error_message: actual.medication.verified ? null : "Vaistų įrašai DelPro nepatvirtinti nuskaitymu — patikrinkite ranka." });
+      log.info(`GVET → DelPro: ${plan.animal.orn} ${plan.treatment.reg_date} → ${res?.status} (įvykis ${actual.object_guid}, vaistai ` +
+        `${actual.medication.usages.map((u) => `${u.drug_code}${u.verified ? "✓" : "✗"}`).join(", ")})`);
     } catch (err) {
-      log.error(`GVET → DelPro (Gateway) nepavyko (${job.sync_id}):`, err.message);
+      const e = err instanceof TreatmentWriteError ? err : null;
+      const gw = err instanceof GatewayError ? err : null;
+      log.error(`GVET → DelPro nepavyko (${job.sync_id}):`, err.message);
       await gvet.reportJobResult({
         sync_id: job.sync_id,
         worker_id: config.workerId,
         success: false,
         error_message: err.message,
-        // the next attempt must look for the marker before writing again
-        outcome_unknown: err instanceof GatewayError ? err.outcomeUnknown : false,
-        error_details: { code: err.code ?? null },
+        // the next attempt looks the GVET:<id> marker up before writing anything
+        outcome_unknown: e ? e.outcomeUnknown : gw ? gw.outcomeUnknown : false,
+        retryable: gw ? gw.retryable : e ? e.outcomeUnknown : false,
+        error_details: e?.details ?? { code: err.code ?? null },
       });
     }
   }

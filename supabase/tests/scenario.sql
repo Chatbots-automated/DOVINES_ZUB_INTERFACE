@@ -1,4 +1,9 @@
 -- users
+-- This scenario covers the approval + UI-script behaviour (0033/0034). 0044 switches the farm to
+-- auto + gateway; that path is tested in delpro-worker/test/treatment-gateway.test.js.
+update system_settings set setting_value = 'approval' where setting_key = 'delpro_outbound_mode';
+update system_settings set setting_value = '10' where setting_key = 'delpro_auto_delay_minutes';
+update system_settings set setting_value = 'ui_script' where setting_key = 'delpro_write_channel';
 insert into auth.users values ('00000000-0000-0000-0000-00000000000a','admin@x'),('00000000-0000-0000-0000-00000000000b','vet@x'),('00000000-0000-0000-0000-00000000000c','viewer@x');
 insert into users (id,email,role) values ('00000000-0000-0000-0000-00000000000a','admin@x','admin'),('00000000-0000-0000-0000-00000000000b','vet@x','vet'),('00000000-0000-0000-0000-00000000000c','viewer@x','viewer');
 

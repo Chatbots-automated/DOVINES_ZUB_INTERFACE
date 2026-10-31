@@ -270,7 +270,7 @@ test("catalog read: a key lookup the Gateway does not filter stops further looku
 
 // --- write paths (pure) ------------------------------------------------------
 import { buildWriteXml, compareStep } from "../src/catalog-writer.js";
-import { buildEventXml, writeTreatmentEvent } from "../src/treatment-gateway.js";
+import { buildEventXml, writeTreatment } from "../src/treatment-gateway.js";
 import { fakeDelpro } from "./fake-delpro.js";
 
 test("treatment event XML is exactly the verified CreateData shape", () => {
@@ -312,21 +312,12 @@ test("catalog write XML: refs resolved from earlier steps, key property first on
   assert.equal(compareStep(create, readBack, { params: "219" })[0].property, "DefaultParameters");
 });
 
-test("Gateway treatment: verify_before_write adopts the earlier event instead of writing twice", async () => {
+test("Gateway treatment: an event carrying this job's marker on another animal is never adopted, nothing written", async () => {
   const delpro = fakeDelpro();
   const gateway = { animal_guid: "f3d9f5df-f72f-4659-8d25-66a02cf583eb", diagnosis_code: "11", event_at: "2026-10-29T10:32:00Z", event_time: "12:32:00", comment: "GVET:abc Mastitas" };
-  const first = await writeTreatmentEvent(delpro, { gateway, verify_before_write: false });
-  assert.equal(first.comment, "GVET:abc Mastitas");
-  assert.equal(first.diagnosis_code, "11");
-  const again = await writeTreatmentEvent(delpro, { gateway, verify_before_write: true });
-  assert.equal(again.found_existing, true);
-  assert.equal(again.object_guid, first.object_guid);
-  assert.equal(delpro.calls.filter(([op]) => op === "CreateData").length, 1);
-  await assert.rejects(writeTreatmentEvent(delpro, { gateway: { ...gateway, comment: "no marker" } }), /neišsamūs/);
-  // the marker on another animal's event is never adopted
-  await assert.rejects(
-    writeTreatmentEvent(delpro, { gateway: { ...gateway, animal_guid: "00000000-0000-0000-0000-000000000001" }, verify_before_write: true }),
-    /kitam gyvuliui ar diagnozei/,
-  );
-  assert.equal(delpro.calls.filter(([op]) => op === "CreateData").length, 1);
+  delpro.db.DiagnosesAndTreatmentEvent = { x: { ObjectGuid: "x", Animal: "00000000-0000-0000-0000-000000000001", Diagnosis: "11", Comment: "GVET:abc Mastitas" } };
+  const model = { verified: true, usage_object: "TestDrugUsage", key_property: "ObjectGuid", properties: { event: "HealthEvent", drug: "Drug", dosage: "Dosage" } };
+  const plan = { gateway_event: gateway, treatment: { course_days: null }, diagnosis: {}, medicines: [{ product_name: "A", drug_code: "7", qty: 10 }] };
+  await assert.rejects(writeTreatment(delpro, plan, model), /kitam gyvuliui ar diagnozei/);
+  assert.equal(delpro.calls.filter(([op]) => op === "CreateData").length, 0);
 });

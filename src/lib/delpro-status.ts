@@ -3,12 +3,12 @@ import type { DelproSyncJobStatus, DelproTransferProblem } from "@/lib/supabase/
 // One vocabulary for a treatment's DelPro transfer, used by the treatment card,
 // the confirmation dialog and the /veterinarija/delpro queue. "Approved" is
 // NOT "done": only the farm-PC worker's verified read-back sets `success`.
-// A treatment with no job yet (or a pending one) is simply awaiting approval.
+// A treatment with no job yet (or a pending one) is waiting to be sent (0044: auto mode — saving queues it).
 
 export type DelproStatusTone = "neutral" | "info" | "success" | "danger" | "warning";
 
 export const DELPRO_STATUS_LABEL: Record<DelproSyncJobStatus, string> = {
-  pending_approval: "Laukia patvirtinimo",
+  pending_approval: "Laukia siuntimo",
   approved: "Laukia perdavimo",
   processing: "Perduodama į DelPro",
   success: "Perduota į DelPro",

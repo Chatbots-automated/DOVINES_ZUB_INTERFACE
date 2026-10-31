@@ -30,8 +30,8 @@ async function loadStatusModule() {
 
 test("status labels: queued is never shown as transferred", async () => {
   const m = await loadStatusModule();
-  assert.equal(m.delproStatusLabel(null), "Laukia patvirtinimo");
-  assert.equal(m.delproStatusLabel("pending_approval"), "Laukia patvirtinimo");
+  assert.equal(m.delproStatusLabel(null), "Laukia siuntimo");
+  assert.equal(m.delproStatusLabel("pending_approval"), "Laukia siuntimo");
   assert.equal(m.delproStatusLabel("approved"), "Laukia perdavimo");
   assert.equal(m.delproStatusLabel("processing"), "Perduodama į DelPro");
   assert.equal(m.delproStatusLabel("success"), "Perduota į DelPro");

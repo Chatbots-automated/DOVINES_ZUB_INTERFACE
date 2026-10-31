@@ -335,6 +335,22 @@ Writes exactly one inactive medicine `GVET TEST vaistas …` (a DrugParameters r
 If the write's outcome is unknown (timeout after sending), the job goes to *Reikia patikrinti ranka*; it is never re-sent and never
 adopted by name (assign the DelPro record or confirm it is absent, as for any catalog job).
 
+## 10. Treatments GVET → DelPro (0044)
+
+Saving a gydymas treatment in GVET queues it (auto mode, no delay). The service polls every `OUTBOUND_INTERVAL_SEC` (5 s) and
+writes the event + its medicine records, reads them back, and GVET shows **Perduota į DelPro** only when both are verified.
+Transient failures are retried with backoff; every attempt looks for the event's `GVET:<job>` marker first (no duplicates).
+
+It writes only when BOTH hold:
+1. `OUTBOUND_MODE=gateway` in `.env` (keep `off` until step 2 is done), and
+2. a farm-verified `treatment-model.json` — the per-animal medicine object of this DelPro, found with the read-only probe:
+   ```powershell
+   Set-Location C:\gvet\delpro-worker
+   npm.cmd run treatment-probe -- <ObjectGuid of an event entered by hand in DelPro WITH a medicine>
+   ```
+   Send `discovery\treatment-probe.json`; the model is written from it (format in `src/treatment-model.js`).
+Without the model the worker claims nothing: treatments wait in GVET as *Laukia siuntimo*, none is lost.
+
 ## Not enabled by this guide
 
 - **Catalog writes** need the farm's agreement, then `CATALOG_WRITE_ENABLED=true`, the GVET switch, and a validated test record

@@ -224,6 +224,13 @@ not look for Žibartoniai's 0013–0021 VIC/UNIFORM history here.
   `source='delpro_report'`; several matches / birth-date conflict / repeated differing ORN rows → `delpro_report_reviews`.
   Observational only: never creates treatments, karencija or DelPro jobs; absent animals are never deactivated.
   Tests: `npm run test:reports` (parser + the function end to end on PGlite).
+- **Treatments → DelPro** (0044; 0043's pilot gate removed): saving a gydymas treatment queues it (`delpro_outbound_mode='auto'`,
+  delay 0, `delpro_write_channel='gateway'`). `delpro_claim_next_job` (gateway) hands out `treatment_plan` =
+  `fn_delpro_treatment_plan(job)` (animal ObjectGuid, DelPro diagnosis / drug / parameters codes, dose, course, withdrawal GVET vs DelPro;
+  data problems fail that job only). Worker `runOutboundGateway` → `treatment-gateway.js writeTreatment`: event by `GVET:<id>` marker
+  first, medicine records through the farm-verified `treatment-model.json` (no model = nothing claimed), every property read back.
+  Report v4: `success` only with `actual_result.medication.verified`; retryable / unknown-outcome failures go back to `approved` with
+  `next_attempt_at` backoff (max 8 attempts). Poll 5 s (`OUTBOUND_INTERVAL_SEC`), catalog daily (`CATALOG_INTERVAL_MIN=1440`).
 - **DelPro write path** — preferred order: DelPro's own import function → UI automation → direct SQL insert into DelPro's
   database. Direct SQL bypasses DelPro's own logic and may affect DeLaval support: only with the farm's written OK.
   All DelPro-specific SQL lives in `delpro-worker/queries/*.sql`; files marked `TODO(discovery)` are placeholders and

@@ -98,18 +98,14 @@ same-name DelPro records are listed only as candidates. An admin checks DelPro a
 it does not exist (*Įrašo nėra — siųsti iš naujo*). *Kartoti* is refused while such a step is undecided. A read-back that differs
 from what was sent is *DelPro įrašas nesutampa* — never "success".
 
-## Treatments through the Gateway (built, not enabled — diagnosis event only)
+## Treatments through the Gateway (0044)
 
-`OUTBOUND_MODE=gateway` writes an approved treatment as **one `DiagnosesAndTreatmentEvent`** (`src/treatment-gateway.js`) in
-the shape verified on the farm (Animal ObjectGuid, Diagnosis code, EventDate UTC, EventTime local, Comment). **This is not
-medicine treatment synchronization**: the medicines, doses and course length travel only as text in the Comment. DelPro's own
-drug-usage records on the event (`HealthEventDrugUsage`) are **not written** — that object has not been validated on the
-Gateway, so DelPro's withdrawal handling does not see GVET medicines through this channel. The Comment starts with
-`GVET:<job id>`; when GVET flags a job for verification (stale release / unknown outcome) the worker looks that marker up
-first and reports the existing event only when it is the single event with the marker and its animal and diagnosis match —
-otherwise the job errors for a person to check. It needs GVET's `delpro_write_channel` set
-to `gateway` too — the claim returns nothing to a worker of the other channel. Keep `OUTBOUND_MODE=dry-run` until the farm
-agrees to switch.
+Saving a treatment in GVET queues it; with `OUTBOUND_MODE=gateway` the worker polls every `OUTBOUND_INTERVAL_SEC` (5 s) and
+`src/treatment-gateway.js` writes one `DiagnosesAndTreatmentEvent` (looked up by its `GVET:<job>` marker first, so retries never
+duplicate) plus one medicine record per GVET medicine line, then reads everything back. The medicine object and its property names
+come ONLY from a farm-verified `treatment-model.json` (`npm run treatment-probe`, `src/treatment-model.js`); without it nothing is
+claimed — a diagnosis event with medicine names in its Comment is not a treatment, and GVET reports a job as sent only when the
+medicine records are verified.
 
 ## Treatment write-back
 

@@ -94,8 +94,10 @@ test("heartbeat + claim/report round trip through the HTTP contract", async () =
   const { rows: hb } = await db.query("select setting_value from system_settings where setting_key = 'delpro_worker_info'");
   assert.equal(JSON.parse(hb[0].setting_value).worker_id, "test-pc");
 
-  // A vet-created, admin-approved treatment.
+  // A vet-created, admin-approved treatment — the UI-script channel with approval (0044 defaults are auto + gateway).
   await db.exec(`
+    update system_settings set setting_value = 'ui_script' where setting_key = 'delpro_write_channel';
+    update system_settings set setting_value = 'approval' where setting_key = 'delpro_outbound_mode';
     insert into auth.users values ('00000000-0000-0000-0000-0000000000aa', 'admin@x');
     insert into users (id, email, role) values ('00000000-0000-0000-0000-0000000000aa', 'admin@x', 'admin');
     insert into products (id, name, unit, withdrawal_days_milk, withdrawal_days_meat)
@@ -150,6 +152,8 @@ test("heartbeat + claim/report round trip through the HTTP contract", async () =
   });
   assert.equal(report.status, "success");
   assert.equal(await gvet.claimNextJob(), null);
+  await db.exec(`update system_settings set setting_value = 'gateway' where setting_key = 'delpro_write_channel';
+                 update system_settings set setting_value = 'auto' where setting_key = 'delpro_outbound_mode';`);
 });
 
 test("empty DelPro snapshot is never sent (would deactivate the herd)", async () => {

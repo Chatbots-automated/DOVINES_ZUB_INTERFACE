@@ -2,7 +2,7 @@
   "name": "dovines-delpro-worker",
   "version": "0.1.0",
   "private": true,
-  "description": "Runs on the Dovinės ŽŪB farm PC: DelPro -> GVET PRO herd + catalog sync and GVET PRO -> DelPro treatment write-back.",
+  "description": "Runs on the Dovin\u0117s \u017d\u016aB farm PC: DelPro -> GVET PRO herd + catalog sync and GVET PRO -> DelPro treatment write-back.",
   "type": "module",
   "engines": {
     "node": ">=22"
@@ -16,7 +16,8 @@
     "catalog:dry-run": "node src/index.js --catalog --dry-run",
     "catalog:write-check": "node src/index.js --write-check",
     "catalog:write-one": "node src/index.js --write-one",
-    "gateway-discover": "node src/discover-gateway.js"
+    "gateway-discover": "node src/discover-gateway.js",
+    "treatment-probe": "node src/treatment-probe.mjs"
   },
   "dependencies": {
     "mssql": "^11.0.1",
