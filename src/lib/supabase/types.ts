@@ -694,6 +694,13 @@ export interface Database {
         Update: Updatable<TreatmentTemplateItemRow>;
         Relationships: [];
       };
+      // 0046 — per-medicine frequency + duration of a treatment (written by create_treatment_with_visits)
+      treatment_medicine_schedules: {
+        Row: Row<TreatmentMedicineScheduleRow>;
+        Insert: Insertable<TreatmentMedicineScheduleRow, "treatment_id" | "product_id" | "frequency_per_day" | "course_days">;
+        Update: Updatable<TreatmentMedicineScheduleRow>;
+        Relationships: [];
+      };
       // 0042 — DelPro daily Excel reports (read-only for the app; written by delpro_report_ingest)
       delpro_report_upload_tokens: {
         Row: Row<DelproReportTokenRow>;
@@ -1421,6 +1428,14 @@ export type DelproPayload = {
     vet_name: string | null;
     ui_entry?: DelproUiEntry;
   };
+};
+
+type TreatmentMedicineScheduleRow = {
+  treatment_id: string;
+  product_id: string;
+  frequency_per_day: number;
+  course_days: number;
+  created_at: string;
 };
 
 type DelproSyncJobRow = {

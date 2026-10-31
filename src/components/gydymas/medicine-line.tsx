@@ -66,6 +66,7 @@ export function MedicineLine({
   regDate,
   nowByProduct,
   courseDoses,
+  showSchedule = false,
   onChange,
   onRemove,
 }: {
@@ -78,6 +79,8 @@ export function MedicineLine({
   nowByProduct: Map<string, number>;
   /** Doses in the planned course incl. today (1 = no course). */
   courseDoses: number;
+  /** Frequency per day + duration in days (gydymas). */
+  showSchedule?: boolean;
   onChange: (patch: Partial<MedLine>) => void;
   onRemove: () => void;
 }) {
@@ -106,6 +109,19 @@ export function MedicineLine({
           <Trash2 className="size-4" />
         </Button>
       </div>
+
+      {showSchedule && (
+        <div className="mt-2 grid grid-cols-2 gap-2 sm:max-w-[320px]">
+          <div>
+            <Label className="mb-1">Kartai per dieną</Label>
+            <Input type="number" step="1" min="1" inputMode="numeric" value={line.frequency ?? ""} onChange={(e) => onChange({ frequency: e.target.value })} />
+          </div>
+          <div>
+            <Label className="mb-1">Trukmė (d.)</Label>
+            <Input type="number" step="1" min="1" inputMode="numeric" value={line.days ?? ""} onChange={(e) => onChange({ days: e.target.value })} />
+          </div>
+        </div>
+      )}
 
       {product && (
         <div className="mt-2.5 space-y-1.5">

@@ -68,7 +68,8 @@ export function previewFefo(product: CatalogProduct, qty: number): { lot: Catalo
 // Course schedule
 // ---------------------------------------------------------------------------
 
-export type MedLine = { key: string; product_id: string; qty: string; route: string };
+/** frequency / days: the vet's times per day and duration in days (gydymas, 0046) — sent to DelPro, never defaulted. */
+export type MedLine = { key: string; product_id: string; qty: string; route: string; frequency?: string; days?: string };
 export type CourseRow = { key: string; date: string; product_id: string; qty: string; route: string };
 export type ScheduleMode = "daily" | "every2" | "interval";
 

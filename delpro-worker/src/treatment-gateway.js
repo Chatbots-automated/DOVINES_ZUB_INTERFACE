@@ -29,26 +29,29 @@ export function buildEventXml(g) {
 const fmt = (v) => (v === null || v === undefined ? "" : String(v));
 const sameNum = (a, b) => a !== null && b !== null && Number(String(a).replace(",", ".")) === Number(String(b).replace(",", "."));
 
-/** The values each usage record would get — from GVET data only; a mapped property without a value is a problem, never a guess. */
+// Usage property names (DelPro TreatmentDrugUsage vocabulary: Dosage, DrugParams, Frequency, TreatCowDays).
+export const USAGE_PROPS = { dosage: "Dosage", drug_params: "DrugParams", frequency: "Frequency", treat_days: "TreatCowDays" };
+
+const positiveInt = (v) => v !== null && v !== undefined && Number.isInteger(Number(v)) && Number(v) > 0;
+
+/** The values each usage record would get — from GVET data only; a missing value is a problem, never a guess. */
 export function plannedUsages(plan, model) {
   const problems = [];
   const usages = [];
   const p = model.properties;
   for (const m of plan.medicines) {
-    const values = { [p.drug]: { value: m.drug_code, objectType: "Drug" }, [p.dosage]: { value: m.qty } };
-    if (p.drug_params) {
-      if (!m.drug_params_key) problems.push({ code: "medicine_params_missing", message: `${m.product_name}: nėra DelPro parametrų rakto.` });
-      values[p.drug_params] = { value: m.drug_params_key, objectType: "DrugParameters" };
-    }
-    if (p.treat_days) {
-      if (!plan.treatment.course_days && plan.treatment.course_days !== 0) {
-        // a single-day treatment has no course: 1 day is what was recorded, not a guess
-        values[p.treat_days] = { value: 1 };
-      } else values[p.treat_days] = { value: plan.treatment.course_days };
-    }
-    if (p.frequency) problems.push({ code: "frequency_unknown", message: `${m.product_name}: GVET neturi dažnumo (kartai per dieną) — DelPro savybė ${p.frequency} neužpildoma spėjant.` });
-    if (p.date) values[p.date] = { value: plan.gateway_event.event_at };
+    const values = {
+      [p.drug]: { value: m.drug_code, objectType: "Drug" },
+      [USAGE_PROPS.dosage]: { value: m.qty },
+      [USAGE_PROPS.drug_params]: { value: m.drug_params_key, objectType: "DrugParameters" },
+      [USAGE_PROPS.frequency]: { value: m.frequency_per_day },
+      [USAGE_PROPS.treat_days]: { value: m.course_days },
+    };
     if (m.qty === null || m.qty === undefined || Number(m.qty) <= 0) problems.push({ code: "missing_dose", message: `${m.product_name}: nėra dozės.` });
+    if (!m.drug_params_key) problems.push({ code: "medicine_params_missing", message: `${m.product_name}: nėra DelPro parametrų rakto.` });
+    if (!positiveInt(m.frequency_per_day)) problems.push({ code: "frequency_missing", message: `${m.product_name}: nenurodytas dažnumas (kartai per dieną).` });
+    if (!positiveInt(m.course_days)) problems.push({ code: "course_days_missing", message: `${m.product_name}: nenurodyta gydymo trukmė (dienos).` });
+    if (p.date) values[p.date] = { value: plan.gateway_event.event_at };
     usages.push({ product: m.product_name, drug_code: m.drug_code, values });
   }
   return { usages, problems };
@@ -160,7 +163,7 @@ export async function writeTreatment(client, plan, model) {
     const results = [];
     const used = new Set();
     for (const u of usages) {
-      const match = onEvent.find((o) => !used.has(o) && o.properties[p.drug]?.value === u.drug_code && sameNum(o.properties[p.dosage]?.value ?? null, u.values[p.dosage].value));
+      const match = onEvent.find((o) => !used.has(o) && o.properties[p.drug]?.value === u.drug_code && sameNum(o.properties[USAGE_PROPS.dosage]?.value ?? null, u.values[USAGE_PROPS.dosage].value));
       let record = match ?? null;
       if (record) used.add(record);
       else {

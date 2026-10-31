@@ -348,7 +348,8 @@ It writes only when BOTH hold:
    Set-Location C:\gvet\delpro-worker
    npm.cmd run treatment-probe -- <ObjectGuid of an event entered by hand in DelPro WITH a medicine>
    ```
-   Send `discovery\treatment-probe.json`; the model is written from it (format in `src/treatment-model.js`).
+   Send `discovery\treatment-probe.json`; the model is written from it (format in `src/treatment-model.js`). Each medicine record gets
+   `Dosage`, `DrugParams`, `Frequency` and `TreatCowDays` from the vet's entry in GVET.
 Without the model the worker claims nothing: treatments wait in GVET as *Laukia siuntimo*, none is lost.
 
 ## Not enabled by this guide

@@ -103,8 +103,9 @@ from what was sent is *DelPro įrašas nesutampa* — never "success".
 Saving a treatment in GVET queues it; with `OUTBOUND_MODE=gateway` the worker polls every `OUTBOUND_INTERVAL_SEC` (5 s) and
 `src/treatment-gateway.js` writes one `DiagnosesAndTreatmentEvent` (looked up by its `GVET:<job>` marker first, so retries never
 duplicate) plus one medicine record per GVET medicine line, then reads everything back. The medicine object and its property names
-come ONLY from a farm-verified `treatment-model.json` (`npm run treatment-probe`, `src/treatment-model.js`); without it nothing is
-claimed — a diagnosis event with medicine names in its Comment is not a treatment, and GVET reports a job as sent only when the
+come from a farm-verified `treatment-model.json` (`npm run treatment-probe`, `src/treatment-model.js`); the dose fields are fixed:
+`Dosage` (dose), `DrugParams`, `Frequency` (GVET `frequency_per_day`) and `TreatCowDays` (GVET `course_days`) — both entered by the vet,
+a missing one is a validation error, never 1. Without the model nothing is claimed — a diagnosis event with medicine names in its Comment is not a treatment, and GVET reports a job as sent only when the
 medicine records are verified.
 
 ## Treatment write-back

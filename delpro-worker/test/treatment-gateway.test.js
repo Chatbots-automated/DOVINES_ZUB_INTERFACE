@@ -18,7 +18,7 @@ import { fakeDelpro } from "./fake-delpro.js";
 const MODEL = {
   verified: true, verified_by: "test", verified_at: "2026-10-31", evidence: "test double",
   usage_object: "TestDrugUsage", key_property: "ObjectGuid",
-  properties: { event: "HealthEvent", drug: "Drug", drug_params: "DrugParams", dosage: "Dosage", treat_days: "TreatDays" },
+  properties: { event: "HealthEvent", drug: "Drug" },
   event_treatment_property: null,
 };
 const GUID = "aaaaaaaa-0000-4000-8000-000000000512";
@@ -45,11 +45,12 @@ function seedDelpro() {
   delpro.db.DrugParameters = { 67211: { Key: "67211", UOM: "ml", DumpMilkDays: "4", MeatWithholdDays: "15" } };
 }
 
-/** A vet saves a gydymas treatment: GVET queues it by itself (auto mode, 0044). Returns its job id. */
+/** A vet saves a gydymas treatment from the dialog (2× a day, 3 days): GVET queues it by itself (auto mode, 0044). Returns its job id. */
 async function savedTreatment(qty = 20) {
-  const id = (await asUser(VET, `select create_treatment(jsonb_build_object('animal_id', (select id from animals where tag_no = 'LT000044547452'),
+  const id = (await asUser(VET, `select create_treatment_with_visits(jsonb_build_object('animal_id', (select id from animals where tag_no = 'LT000044547452'),
     'reg_date', '2026-10-30', 'diagnosis', 'Akių ligos', 'disease_id', '43000000-0000-0000-0000-0000000000d1', 'vet_name', 'Dr. Test',
-    'medications', jsonb_build_array(jsonb_build_object('product_id', '43000000-0000-0000-0000-0000000000a1', 'qty', ${qty}, 'unit', 'ml')))) as id`)).id;
+    'medications', jsonb_build_array(jsonb_build_object('product_id', '43000000-0000-0000-0000-0000000000a1', 'qty', ${qty}, 'unit', 'ml',
+      'frequency_per_day', 2, 'course_days', 3)))) as id`)).id;
   return (await q(`select id from delpro_sync_jobs where treatment_id = $1`, [id]))[0].id;
 }
 
@@ -163,9 +164,10 @@ test("saving a treatment queues it at once; settings: auto, no delay, gateway ch
 });
 
 test("plan problems: no verified animal GUID, unlinked medicine, GVET vs DelPro withdrawal", async () => {
-  const t = (await asUser(VET, `select create_treatment(jsonb_build_object('animal_id', (select id from animals where tag_no = 'LT000044547479'),
+  const t = (await asUser(VET, `select create_treatment_with_visits(jsonb_build_object('animal_id', (select id from animals where tag_no = 'LT000044547479'),
     'reg_date', '2026-10-30', 'diagnosis', 'Akių ligos', 'disease_id', '43000000-0000-0000-0000-0000000000d1',
-    'medications', jsonb_build_array(jsonb_build_object('product_id', '43000000-0000-0000-0000-0000000000a2', 'qty', 5, 'unit', 'ml')))) as id`)).id;
+    'medications', jsonb_build_array(jsonb_build_object('product_id', '43000000-0000-0000-0000-0000000000a2', 'qty', 5, 'unit', 'ml',
+      'frequency_per_day', 1, 'course_days', 1)))) as id`)).id;
   const id = (await q(`select id from delpro_sync_jobs where treatment_id = $1`, [t]))[0].id;
   assert.deepEqual(codes((await plan(id)).problems), ["medicine_not_linked", "no_animal_guid"]);
   await db.exec(`update products set withdrawal_days_milk = 3 where id = '43000000-0000-0000-0000-0000000000a1'`);
@@ -183,7 +185,9 @@ test("worker checks: no verified model, missing dose, missing protocol, frequenc
   assert.deepEqual(codes(tg.treatmentProblems(p, { ...MODEL, verified: false })), ["medication_model"]);
   assert.deepEqual(codes(tg.treatmentProblems({ ...p, medicines: [{ ...p.medicines[0], qty: null }] }, MODEL)), ["missing_dose"]);
   assert.deepEqual(codes(tg.treatmentProblems(p, { ...MODEL, event_treatment_property: "Treatment" })), ["no_treatment_protocol"]);
-  assert.deepEqual(codes(tg.treatmentProblems(p, { ...MODEL, properties: { ...MODEL.properties, frequency: "Frequency" } })), ["frequency_unknown"]);
+  const unset = { ...p.medicines[0], frequency_per_day: null, course_days: null };
+  assert.deepEqual(codes(tg.treatmentProblems({ ...p, medicines: [unset] }, MODEL)), ["course_days_missing", "frequency_missing"], "never assumed 1");
+  assert.deepEqual(codes(tg.treatmentProblems({ ...p, medicines: [{ ...p.medicines[0], frequency_per_day: 1.5 }] }, MODEL)), ["frequency_missing"]);
   assert.deepEqual(await tg.liveChecks(delpro, p), []);
   delpro.db.Animal[GUID].Number = "999";
   delpro.db.DrugParameters[67211].DumpMilkDays = "5";
@@ -209,7 +213,7 @@ test("worker loop: event + medicine written within one poll, read back, Sent; a 
   const j = await job(id);
   assert.deepEqual([j.status, j.verified, j.actual_result.medication.verified], ["success", true, true]);
   const usage = Object.values(delpro.db.TestDrugUsage)[0];
-  assert.deepEqual([usage.HealthEvent, usage.Drug, usage.DrugParams, usage.Dosage, usage.TreatDays], [j.actual_result.object_guid, "119", "67211", "20", "1"]);
+  assert.deepEqual([usage.HealthEvent, usage.Drug, usage.DrugParams, usage.Dosage, usage.Frequency, usage.TreatCowDays], [j.actual_result.object_guid, "119", "67211", "20", "2", "3"]);
   assert.equal(writes(), 2);
   assert.equal(await idx.runOutbound(), 0, "a sent treatment is never claimed again");
   // the write itself is idempotent too (marker + usage lookup)

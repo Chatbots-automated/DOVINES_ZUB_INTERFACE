@@ -88,7 +88,8 @@ function StepHeader({ n, icon: Icon, title, hint }: { n: number; icon: React.Com
 }
 
 const NO_ROWS: CourseRow[] = [];
-const newLine = (): MedLine => ({ key: crypto.randomUUID(), product_id: "", qty: "", route: "" });
+const newLine = (): MedLine => ({ key: crypto.randomUUID(), product_id: "", qty: "", route: "", frequency: "", days: "" });
+const isPositiveInt = (v: string | undefined) => /^[1-9]\d*$/.test((v ?? "").trim());
 
 // "Naujas gydymo įrašas" (Priedas §2.3/§2.4) — anchors directly on
 // `treatments` (no separate visits table). Saved atomically by
@@ -266,6 +267,9 @@ export function NewTreatmentDialog({
   }
   if (medLines.some((l) => l.product_id && !(Number(l.qty) > 0))) problems.push("Nurodykite vaisto dozę (didesnę už 0).");
   if (medLines.some((l) => !l.product_id && Number(l.qty) > 0)) problems.push("Pasirinkite produktą eilutei su doze.");
+  if (procedureType === "gydymas" && medLines.some((l) => l.product_id && !(isPositiveInt(l.frequency) && isPositiveInt(l.days)))) {
+    problems.push("Kiekvienam vaistui nurodykite, kiek kartų per dieną ir kiek dienų.");
+  }
   if (summary.totals.some((t) => t.nowShort)) problems.push("Šiandienos dozės viršija atsargas.");
   if (plan.enabled) {
     if (plan.rows.length === 0) problems.push("Kursas neturi papildomų dozių — pridėkite dozę arba išjunkite kursą.");
@@ -281,6 +285,7 @@ export function NewTreatmentDialog({
         qty: Number(l.qty),
         unit: productById.get(l.product_id)?.unit ?? "vnt",
         administration_route: l.route || null,
+        ...(procedureType === "gydymas" ? { frequency_per_day: Number(l.frequency), course_days: Number(l.days) } : {}),
       })),
   );
 
@@ -403,6 +408,7 @@ export function NewTreatmentDialog({
                         regDate={startDate}
                         nowByProduct={nowByProduct}
                         courseDoses={courseDoses}
+                        showSchedule={procedureType === "gydymas"}
                         onChange={(patch) => updateLine(line.key, patch)}
                         onRemove={() => setMedLines((prev) => prev.filter((l) => l.key !== line.key))}
                       />

@@ -15,13 +15,13 @@ import { ROOT } from "./config.js";
 //   "usage_object": "<object name>",            // the per-animal drug usage object
 //   "key_property": "ObjectGuid",
 //   "properties": {                             // GVET meaning -> Gateway property name
-//     "event": "...",        "drug": "...",     "dosage": "...",          // required
-//     "drug_params": "...",  "treat_days": "...", "frequency": "...", "date": "..."   // optional
-//   },
+//     "event": "...",  "drug": "...",                                   // required
+//     "date": "..."                                                     // optional
+//   },                       // Dosage / DrugParams / Frequency / TreatCowDays are fixed (treatment-gateway.js USAGE_PROPS)
 //   "event_treatment_property": null            // set only if the event itself carries a Treatment protocol reference
 // }
 export const MODEL_FILE = process.env.TREATMENT_MODEL_FILE || path.join(ROOT, "treatment-model.json");
-const REQUIRED = ["event", "drug", "dosage"];
+const REQUIRED = ["event", "drug"];
 
 export function validateModel(model) {
   const errors = [];

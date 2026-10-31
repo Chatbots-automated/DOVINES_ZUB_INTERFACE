@@ -236,6 +236,11 @@ not look for Žibartoniai's 0013–0021 VIC/UNIFORM history here.
   only an admin release it ("Siųsti į DelPro" on the Gydymų istorija card). Setting it to `'false'` lets NEW jobs go automatically;
   stamped ones keep waiting for an admin (never released silently). The worker heartbeat's `treatment_model_ready` (+ `outbound_mode`)
   is returned by `delpro_treatment_transfer_state` so an approved treatment the PC can't write shows as blocked.
+- **Frequency + duration per medicine** (0046): the treatment dialog asks each gydymas medicine for `frequency_per_day` and
+  `course_days` (positive integers, required — `fn_check_medicine_schedule` in `create_treatment_with_visits`; never defaulted to 1).
+  Stored in `treatment_medicine_schedules` (treatment + product), carried per medicine by `fn_delpro_treatment_plan`, written by the
+  worker as `Frequency` / `TreatCowDays` next to `Dosage` / `DrugParams` (`USAGE_PROPS`). A treatment without them: plan problems
+  `frequency_missing` / `course_days_missing`, the job fails visibly.
 - **DelPro write path** — preferred order: DelPro's own import function → UI automation → direct SQL insert into DelPro's
   database. Direct SQL bypasses DelPro's own logic and may affect DeLaval support: only with the farm's written OK.
   All DelPro-specific SQL lives in `delpro-worker/queries/*.sql`; files marked `TODO(discovery)` are placeholders and

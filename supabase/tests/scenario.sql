@@ -1456,7 +1456,7 @@ select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000b'
 -- standalone treatment, 4-day course (days 2,3,4; day 3 has two medicines) -> finished day-1 visit + 3 planned visits
 select create_treatment_with_visits(jsonb_build_object('animal_id',(select id from animals where animal_no='9002'),'reg_date',(now() at time zone 'Europe/Vilnius')::date::text,'diagnosis','T-V-1',
   'disease_id',(select id from diseases where name='DP Viduriavimas'),
-  'medications', jsonb_build_array(jsonb_build_object('product_id','99999999-0000-0000-0000-0000000000e1','qty',2,'unit','ml')),
+  'medications', jsonb_build_array(jsonb_build_object('product_id','99999999-0000-0000-0000-0000000000e1','qty',2,'unit','ml','frequency_per_day',2,'course_days',3)),
   'course_days', jsonb_build_array(
     jsonb_build_object('day_number',2,'scheduled_date','2030-03-02','product_id','99999999-0000-0000-0000-0000000000e1','qty',2,'unit','ml'),
     jsonb_build_object('day_number',3,'scheduled_date','2030-03-03','product_id','99999999-0000-0000-0000-0000000000e1','qty',2,'unit','ml'),
@@ -1518,7 +1518,7 @@ insert into animal_visits (id, animal_id, visit_datetime, procedures, status)
 set role authenticated;
 select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000b',false);
 select create_treatment_with_visits(jsonb_build_object('diagnosis','T-V-2','disease_id',(select id from diseases where name='DP Viduriavimas'),
-  'medications', jsonb_build_array(jsonb_build_object('product_id','99999999-0000-0000-0000-0000000000e1','qty',1,'unit','ml')),
+  'medications', jsonb_build_array(jsonb_build_object('product_id','99999999-0000-0000-0000-0000000000e1','qty',1,'unit','ml','frequency_per_day',2,'course_days',3)),
   'course_days', jsonb_build_array(jsonb_build_object('day_number',2,'scheduled_date','2030-04-02','product_id','99999999-0000-0000-0000-0000000000e1','qty',1,'unit','ml'))),
   '99999999-0000-0000-0000-0000000000f1') as treatment;
 do $$ begin
@@ -2037,9 +2037,10 @@ reset role;
 update system_settings set setting_value = 'gateway' where setting_key = 'delpro_write_channel';
 set role authenticated;
 select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000b',false);
-select set_config('t.treat', create_treatment(jsonb_build_object('animal_id', (select id from animals where animal_no = 'KT338'), 'reg_date', '2026-10-29',
+select set_config('t.treat', create_treatment_with_visits(jsonb_build_object('animal_id', (select id from animals where animal_no = 'KT338'), 'reg_date', '2026-10-29',
   'diagnosis', 'Mastitas', 'disease_id', '36000000-0000-0000-0000-0000000000d2', 'vet_name', 'Dr. Test',
-  'medications', jsonb_build_array(jsonb_build_object('product_id', '36000000-0000-0000-0000-0000000000a1', 'qty', 10, 'unit', 'ml'))))::text, false);
+  'medications', jsonb_build_array(jsonb_build_object('product_id', '36000000-0000-0000-0000-0000000000a1', 'qty', 10, 'unit', 'ml',
+    'frequency_per_day', 2, 'course_days', 3))))::text, false);
 reset role;
 select 'gw_problems' as step, jsonb_agg(p->>'code' order by p->>'code') as codes
 from jsonb_array_elements(fn_delpro_transfer_problems(current_setting('t.treat')::uuid)) p;
@@ -2349,3 +2350,37 @@ do $$ begin
   end if;
 end $$;
 select 'assert' as step, '0045 admin gate: admin-only send, idempotent, claim guard, gate off releases only new jobs' as what;
+
+-- 0046. Frequency + duration per medicine: required for gydymas, never defaulted, carried in the DelPro plan
+do $$ declare m jsonb; begin
+  select x into m from jsonb_array_elements(fn_delpro_treatment_plan((select id from delpro_sync_jobs where treatment_id = current_setting('t.treat')::uuid))->'medicines') x;
+  if (m->>'frequency_per_day')::int <> 2 or (m->>'course_days')::int <> 3 then raise exception 'plan must carry frequency + duration: %', m; end if;
+end $$;
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000b',false);
+do $$ declare blocked boolean := false; begin
+  begin perform create_treatment_with_visits(jsonb_build_object('animal_id', (select id from animals where animal_no = 'KT338'), 'reg_date', '2026-10-30',
+    'diagnosis', 'Mastitas', 'disease_id', '36000000-0000-0000-0000-0000000000d2',
+    'medications', jsonb_build_array(jsonb_build_object('product_id', '36000000-0000-0000-0000-0000000000a1', 'qty', 1, 'unit', 'ml', 'course_days', 3))));
+  exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: gydymas without frequency'; end if;
+end $$;
+do $$ declare blocked boolean := false; begin
+  begin perform create_treatment_with_visits(jsonb_build_object('animal_id', (select id from animals where animal_no = 'KT338'), 'reg_date', '2026-10-30',
+    'diagnosis', 'Mastitas', 'disease_id', '36000000-0000-0000-0000-0000000000d2',
+    'medications', jsonb_build_array(jsonb_build_object('product_id', '36000000-0000-0000-0000-0000000000a1', 'qty', 1, 'unit', 'ml', 'frequency_per_day', 1, 'course_days', 0))));
+  exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: gydymas with 0 days'; end if;
+end $$;
+reset role;
+-- a treatment saved without them (older one / other entry point): the DelPro plan lists the problem, nothing is assumed
+select set_config('t.nosched', create_treatment(jsonb_build_object('animal_id', (select id from animals where animal_no = 'KT338'), 'reg_date', '2026-10-30',
+  'diagnosis', 'Mastitas', 'disease_id', '36000000-0000-0000-0000-0000000000d2',
+  'medications', jsonb_build_array(jsonb_build_object('product_id', '36000000-0000-0000-0000-0000000000a1', 'qty', 1, 'unit', 'ml'))))::text, false);
+do $$ declare c text[]; begin
+  select array_agg(p->>'code' order by p->>'code') into c
+  from jsonb_array_elements(fn_delpro_treatment_plan((select id from delpro_sync_jobs where treatment_id = current_setting('t.nosched')::uuid))->'problems') p
+  where p->>'code' in ('frequency_missing', 'course_days_missing');
+  if c is distinct from array['course_days_missing', 'frequency_missing'] then raise exception 'missing schedule must be a plan problem: %', c; end if;
+end $$;
+select 'assert' as step, '0046 frequency + duration: required, stored, in the plan, never defaulted' as what;
