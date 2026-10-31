@@ -49,6 +49,9 @@ export const config = {
     clientId: env("DELPRO_GATEWAY_CLIENT_ID"),
     timeoutMs: Number(env("DELPRO_GATEWAY_TIMEOUT_MS", "30000")),
     readRetries: Number(env("DELPRO_GATEWAY_READ_RETRIES", "2")),
+    // Animal property holding the official registration number (ORN, e.g. LT000007300337).
+    // Used to link GVET animals without a short DelPro Number. Empty = match by Number only.
+    animalOrnProperty: env("DELPRO_GATEWAY_ANIMAL_ORN_PROPERTY", "OfficialRegNo"),
   },
   // off | gateway — DelPro catalog (Drug, DrugParameters, Diagnosis, Treatment,
   // TreatmentDrugUsage) + Animal ObjectGuid -> GVET. Read-only towards DelPro.

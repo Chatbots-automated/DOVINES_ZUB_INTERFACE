@@ -38,20 +38,24 @@ async function main() {
   const targets = [
     ...CATALOG_TYPES.map((t) => ({ objectName: t.objectName, properties: Object.values(t.fields).map(([p]) => p) })),
     { objectName: "Animal", properties: ["ObjectGuid", "Number"] },
+    ...(config.gateway.animalOrnProperty
+      ? [{ objectName: "Animal", file: "Animal-orn", properties: ["ObjectGuid", "Number", config.gateway.animalOrnProperty] }]
+      : []),
   ].filter((t) => wanted.length === 0 || wanted.includes(t.objectName));
 
   for (const t of targets) {
-    const request = buildRequestData({ ...t, top });
-    fs.writeFileSync(path.join(OUT, `${t.objectName}.request.xml`), request);
+    const file = t.file ?? t.objectName;
+    const request = buildRequestData({ objectName: t.objectName, properties: t.properties, top });
+    fs.writeFileSync(path.join(OUT, `${file}.request.xml`), request);
     try {
       const result = await client.getDataXml(request);
-      fs.writeFileSync(path.join(OUT, `${t.objectName}.soap-response.xml`), raw ?? "");
-      fs.writeFileSync(path.join(OUT, `${t.objectName}.result.xml`), result);
+      fs.writeFileSync(path.join(OUT, `${file}.soap-response.xml`), raw ?? "");
+      fs.writeFileSync(path.join(OUT, `${file}.result.xml`), result);
       const rows = (result.match(/<object\b/g) || []).length;
-      console.log(`${t.objectName}: ${rows} eil. (top=${top})`);
+      console.log(`${file}: ${rows} eil. (top=${top})`);
     } catch (err) {
-      if (raw) fs.writeFileSync(path.join(OUT, `${t.objectName}.soap-response.xml`), raw);
-      console.log(`${t.objectName}: KLAIDA ${err.code ?? ""} ${err.message}`);
+      if (raw) fs.writeFileSync(path.join(OUT, `${file}.soap-response.xml`), raw);
+      console.log(`${file}: KLAIDA ${err.code ?? ""} ${err.message}`);
     }
     raw = null;
   }

@@ -209,7 +209,8 @@ not look for Žibartoniai's 0013–0021 VIC/UNIFORM history here.
   worker look the marker up before writing. `delpro_claim_next_job(p_worker_id, p_channel)` returns nothing to a worker of the other
   channel. Problems are channel-aware (`fn_delpro_transfer_problems` wraps the renamed 0034 `fn_delpro_transfer_problems_ui`).
   Switching the channel is a farm decision — no UI toggle on purpose. `animals.delpro_object_guid` (Gateway
-  `Animal.ObjectGuid`, matched on the active herd number; ambiguous numbers skipped) is groundwork for the Gateway treatment write.
+  `Animal.ObjectGuid`, matched on the active herd number, or since 0047 on the ORN — `DELPRO_GATEWAY_ANIMAL_ORN_PROPERTY`, default `OfficialRegNo`,
+  exact `fn_orn_normalize` — so VIC/Excel animals without a short Number get one too; ambiguous or ORN≠Number cases skipped) is groundwork for the Gateway treatment write.
   `delpro_mappings` (0034 name overrides for the UI script) is separate and unchanged.
 - **DelPro daily Excel reports** (0042, farm's request): the farm PC's own uploader posts each XLSX from
   `C:\GVET\Ataskaitos\Dienine` to the Netlify function `netlify/functions/delpro-report-upload.mjs` (Bearer = per-farm upload

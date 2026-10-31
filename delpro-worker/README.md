@@ -10,7 +10,9 @@ Small Node.js process that runs on the farm PC next to DelPro (Priedas Nr. 1 §3
 - **DelPro catalog → GVET PRO** (`CATALOG_SOURCE=gateway`): every `CATALOG_INTERVAL_MIN`, or within a minute of an admin
   pressing *Sinchronizuoti dabar*, reads Drug, DrugParameters, Diagnosis, Treatment, TreatmentDrugUsage and Animal ObjectGuids
   through the local **Gateway SOAP service** (`GetData` only) and uploads them in batches (`delpro_catalog_*`). Nothing is
-  written to DelPro.
+  written to DelPro. Animals are linked to their DelPro ObjectGuid by ORN (`DELPRO_GATEWAY_ANIMAL_ORN_PROPERTY`,
+  default `OfficialRegNo`) or by short Number, so animals without a Number are linked too. If the Gateway rejects the ORN
+  property, the worker logs it and links by Number only.
 - Heartbeat on every tick → the admin screen shows "Veikia / Neatsako".
 
 Only outbound HTTPS to Supabase — no ports opened on the farm PC.

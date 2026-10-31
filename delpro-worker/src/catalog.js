@@ -249,14 +249,33 @@ export async function fetchMissingRefs(client, results) {
   }
 }
 
-/** Gateway Animal ObjectGuid + Number (for the later treatment write). Matching only — a capped read never removes anything. */
-export async function readAnimalIds(client, { maxRows = config.catalogMaxRows, rowCap = config.catalogGatewayRowCap } = {}) {
-  const xml = await client.getDataXml(buildRequestData({ objectName: "Animal", properties: ["ObjectGuid", "Number"], top: maxRows }));
-  const objects = parseDdmData(xml).filter((o) => o.objectName === "Animal");
+/**
+ * Gateway Animal ObjectGuid + Number + ORN (for the treatment write). Matching only — a capped read never removes anything.
+ * The ORN property name is not verified on every DelPro: if the Gateway rejects it, the read is repeated with Number only.
+ */
+export async function readAnimalIds(client, { maxRows = config.catalogMaxRows, rowCap = config.catalogGatewayRowCap, ornProperty = config.gateway.animalOrnProperty } = {}) {
+  const read = async (props) => parseDdmData(await client.getDataXml(buildRequestData({ objectName: "Animal", properties: props, top: maxRows }))).filter((o) => o.objectName === "Animal");
+  let objects;
+  let ornError = null;
+  if (ornProperty) {
+    try {
+      objects = await read(["ObjectGuid", "Number", ornProperty]);
+    } catch (err) {
+      ornError = err.message;
+      log.warn(`Animal: DelPro nepriėmė savybės ${ornProperty} (${err.message}) — susiejama tik pagal Number.`);
+    }
+  }
+  if (!objects) objects = await read(["ObjectGuid", "Number"]);
   const animals = objects
-    .map((o) => ({ object_guid: o.properties.ObjectGuid?.value ?? null, number: o.properties.Number?.value ?? null }))
-    .filter((a) => a.object_guid && a.number);
-  return { animals, returned: objects.length, complete: objects.length < Math.min(maxRows, rowCap || maxRows) };
+    .map((o) => ({
+      object_guid: o.properties.ObjectGuid?.value ?? null,
+      number: o.properties.Number?.value ?? null,
+      orn: ornProperty && !ornError ? (o.properties[ornProperty]?.value ?? null) : null,
+    }))
+    .filter((a) => a.object_guid && (a.number || a.orn));
+  const withOrn = animals.filter((a) => a.orn).length;
+  if (ornProperty && !ornError && objects.length > 0 && withOrn === 0) log.warn(`Animal: DelPro negrąžino ${ornProperty} reikšmių — susiejama tik pagal Number.`);
+  return { animals, returned: objects.length, withOrn, ornError, complete: objects.length < Math.min(maxRows, rowCap || maxRows) };
 }
 
 /** Everything one catalog synchronization reads from DelPro (GetData only). Nothing is sent to GVET here. */

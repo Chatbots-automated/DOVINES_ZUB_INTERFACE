@@ -19,7 +19,7 @@ import {
   parseWriteResponse,
   soapEnvelope,
 } from "../src/gateway.js";
-import { CATALOG_TYPES, fetchMissingRefs, normalizeRecord, readCatalogType } from "../src/catalog.js";
+import { CATALOG_TYPES, fetchMissingRefs, normalizeRecord, readAnimalIds, readCatalogType } from "../src/catalog.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const fixture = (name) => fs.readFileSync(path.join(here, "fixtures/gateway", name), "utf8");
@@ -320,4 +320,34 @@ test("Gateway treatment: an event carrying this job's marker on another animal i
   const plan = { gateway_event: gateway, treatment: { course_days: null }, diagnosis: {}, medicines: [{ product_name: "A", drug_code: "7", qty: 10 }] };
   await assert.rejects(writeTreatment(delpro, plan, model), /kitam gyvuliui ar diagnozei/);
   assert.equal(delpro.calls.filter(([op]) => op === "CreateData").length, 0);
+});
+
+test("Animal ids carry the ORN; a rejected ORN property falls back to Number only", async () => {
+  const requests = [];
+  const withOrn = {
+    getDataXml: async (xml) => {
+      requests.push(xml);
+      return `<ddmData><object name="Animal"><property name="ObjectGuid">f3d9f5df-f72f-4659-8d25-66a02cf583eb</property><property name="Number">337</property><property name="OfficialRegNo">LT000007300337</property></object>
+        <object name="Animal"><property name="ObjectGuid">a3d9f5df-f72f-4659-8d25-66a02cf583eb</property><property name="Number" /><property name="OfficialRegNo">LT000007300338</property></object></ddmData>`;
+    },
+  };
+  const r = await readAnimalIds(withOrn, { maxRows: 5000, rowCap: 1000, ornProperty: "OfficialRegNo" });
+  assert.match(requests[0], /OfficialRegNo/);
+  assert.deepEqual(r.animals, [
+    { object_guid: "f3d9f5df-f72f-4659-8d25-66a02cf583eb", number: "337", orn: "LT000007300337" },
+    { object_guid: "a3d9f5df-f72f-4659-8d25-66a02cf583eb", number: null, orn: "LT000007300338" },
+  ]);
+
+  const seen = [];
+  const rejecting = {
+    getDataXml: async (xml) => {
+      seen.push(xml);
+      if (xml.includes("OfficialRegNo")) throw new Error("Unknown property OfficialRegNo");
+      return fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures/gateway/animal-337.result.xml"), "utf8");
+    },
+  };
+  const f = await readAnimalIds(rejecting, { maxRows: 5000, rowCap: 1000, ornProperty: "OfficialRegNo" });
+  assert.equal(seen.length, 2);
+  assert.equal(f.ornError, "Unknown property OfficialRegNo");
+  assert.deepEqual(f.animals, [{ object_guid: "f3d9f5df-f72f-4659-8d25-66a02cf583eb", number: "337", orn: null }]);
 });

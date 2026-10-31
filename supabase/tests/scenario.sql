@@ -1803,6 +1803,28 @@ do $$ begin
 end $$;
 select 'assert' as step, 'catalog: reused herd number is not guessed' as what;
 
+-- 0047: an animal without a short DelPro Number gets its GUID by ORN
+insert into animals (tag_no, animal_no, active, source) values ('LT000007300901', null, true, 'vic'), ('LT000007300902', 'KT902', true, 'delpro'),
+  ('LT000007300903', 'KT903', true, 'delpro'), ('LT000007300904', null, true, 'vic');
+set role service_role;
+select 'cat_animal_orn' as step, delpro_ingest_animal_ids('{"animals":[
+  {"object_guid":"51111111-2222-3333-4444-555555555555","number":"901","orn":"lt 0000 0730 0901"},
+  {"object_guid":"61111111-2222-3333-4444-555555555555","number":"KT903","orn":"LT000007300902"},
+  {"object_guid":"71111111-2222-3333-4444-555555555555","orn":"LT000007300904"},
+  {"object_guid":"81111111-2222-3333-4444-555555555555","orn":"LT000007300904"}]}'::jsonb) as r;
+reset role;
+do $$ begin
+  if (select delpro_object_guid from animals where tag_no = 'LT000007300901') is distinct from '51111111-2222-3333-4444-555555555555' then
+    raise exception 'ORN match must set the GUID';
+  end if;
+  if (select animal_no from animals where tag_no = 'LT000007300901') is not null then raise exception 'ORN match must not invent a Number'; end if;
+  if exists (select 1 from animals where tag_no in ('LT000007300902', 'LT000007300903') and delpro_object_guid is not null) then
+    raise exception 'ORN and Number on different animals must not be mapped';
+  end if;
+  if (select delpro_object_guid from animals where tag_no = 'LT000007300904') is not null then raise exception 'ORN with two GUIDs must not be mapped'; end if;
+end $$;
+select 'assert' as step, 'catalog: animal GUID by ORN, conflicts skipped' as what;
+
 -- 19. DelPro catalog phase 2 (0037): templates, write queue + gate, Gateway treatment channel.
 -- 19a. Import DelPro Treatment 40 as a GVET template (its drug 7 is linked to 'KT Penicilinas LA').
 set role authenticated;
