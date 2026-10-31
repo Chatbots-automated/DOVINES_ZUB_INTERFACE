@@ -29,6 +29,14 @@ import { log } from "./log.js";
 const MAX_JOBS_PER_TICK = 20;
 const state = { lastInboundOk: null, lastCatalogOk: null, lastError: null };
 
+function treatmentModelReady() {
+  try {
+    return validateModel(loadTreatmentModel()).length === 0;
+  } catch {
+    return false;
+  }
+}
+
 async function heartbeat() {
   await gvet.heartbeat({
     worker_id: config.workerId,
@@ -37,6 +45,8 @@ async function heartbeat() {
     source: config.source,
     outbound_mode: config.outboundMode,
     outbound_ready: config.outboundMode === "sql" ? outboundReady() : null,
+    // 0045: GVET shows an approved treatment as blocked (not "waiting") while this is false
+    treatment_model_ready: treatmentModelReady(),
     last_inbound_ok: state.lastInboundOk,
     catalog_source: config.catalogSource,
     catalog_write_enabled: config.catalogWriteEnabled,

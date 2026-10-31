@@ -231,6 +231,11 @@ not look for Žibartoniai's 0013–0021 VIC/UNIFORM history here.
   first, medicine records through the farm-verified `treatment-model.json` (no model = nothing claimed), every property read back.
   Report v4: `success` only with `actual_result.medication.verified`; retryable / unknown-outcome failures go back to `approved` with
   `next_attempt_at` backoff (max 8 attempts). Poll 5 s (`OUTBOUND_INTERVAL_SEC`), catalog daily (`CATALOG_INTERVAL_MIN=1440`).
+- **Temporary admin gate** (0045, farm's decision 2026-10): `system_settings.delpro_admin_approval_required='true'` stamps every new job
+  `delpro_sync_jobs.admin_approval_required`; `delpro_claim_next_job` never auto-claims a stamped job and `fn_delpro_approve_job` lets
+  only an admin release it ("Siųsti į DelPro" on the Gydymų istorija card). Setting it to `'false'` lets NEW jobs go automatically;
+  stamped ones keep waiting for an admin (never released silently). The worker heartbeat's `treatment_model_ready` (+ `outbound_mode`)
+  is returned by `delpro_treatment_transfer_state` so an approved treatment the PC can't write shows as blocked.
 - **DelPro write path** — preferred order: DelPro's own import function → UI automation → direct SQL insert into DelPro's
   database. Direct SQL bypasses DelPro's own logic and may affect DeLaval support: only with the farm's written OK.
   All DelPro-specific SQL lives in `delpro-worker/queries/*.sql`; files marked `TODO(discovery)` are placeholders and

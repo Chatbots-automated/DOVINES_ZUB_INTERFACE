@@ -4,6 +4,8 @@
 update system_settings set setting_value = 'approval' where setting_key = 'delpro_outbound_mode';
 update system_settings set setting_value = '10' where setting_key = 'delpro_auto_delay_minutes';
 update system_settings set setting_value = 'ui_script' where setting_key = 'delpro_write_channel';
+-- 0045's temporary admin gate is tested in its own block at the end.
+update system_settings set setting_value = 'false' where setting_key = 'delpro_admin_approval_required';
 insert into auth.users values ('00000000-0000-0000-0000-00000000000a','admin@x'),('00000000-0000-0000-0000-00000000000b','vet@x'),('00000000-0000-0000-0000-00000000000c','viewer@x');
 insert into users (id,email,role) values ('00000000-0000-0000-0000-00000000000a','admin@x','admin'),('00000000-0000-0000-0000-00000000000b','vet@x','vet'),('00000000-0000-0000-0000-00000000000c','viewer@x','viewer');
 
@@ -2257,3 +2259,93 @@ end $$;
 reset role;
 update delpro_catalog_jobs set status = 'cancelled' where is_test and status = 'queued';
 select 'assert' as step, 'pilot: one job released, gate closes itself, mapping saved, no duplicate' as what;
+
+-- 0045. Temporary administrator approval: a stamped job is never claimed before an admin sends it
+reset role;
+update system_settings set setting_value = 'true' where setting_key = 'delpro_admin_approval_required';
+update system_settings set setting_value = 'auto' where setting_key = 'delpro_outbound_mode';
+update system_settings set setting_value = '0' where setting_key = 'delpro_auto_delay_minutes';
+update system_settings set setting_value = 'ui_script' where setting_key = 'delpro_write_channel';
+update delpro_sync_jobs set status = 'rejected' where status in ('pending_approval', 'approved');  -- earlier blocks' leftovers
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000b',false);
+select set_config('t.gate1', create_treatment(jsonb_build_object('animal_id',(select id from animals where animal_no='514'),'reg_date','2026-10-30',
+  'diagnosis','Endometritas','disease_id',(select id from diseases where name='Endometritas'),
+  'medications', jsonb_build_array(jsonb_build_object('product_id','11111111-0000-0000-0000-000000000001','qty',2,'unit','ml'))))::text, false);
+select set_config('t.gate2', create_treatment(jsonb_build_object('animal_id',(select id from animals where animal_no='513'),'reg_date','2026-10-30',
+  'diagnosis','Endometritas','disease_id',(select id from diseases where name='Endometritas'),
+  'medications', jsonb_build_array(jsonb_build_object('product_id','11111111-0000-0000-0000-000000000001','qty',2,'unit','ml'))))::text, false);
+do $$ begin
+  if (select count(*) from delpro_sync_jobs where treatment_id in (current_setting('t.gate1')::uuid, current_setting('t.gate2')::uuid)
+        and status = 'pending_approval' and admin_approval_required) <> 2 then
+    raise exception 'saving a gydymas must queue a job that needs an administrator';
+  end if;
+  if (delpro_treatment_transfer_state(current_setting('t.gate1')::uuid)->>'can_approve')::boolean then
+    raise exception 'a vet must not see the send button while the gate is on';
+  end if;
+end $$;
+do $$ declare blocked boolean := false; begin
+  begin perform delpro_approve_treatment(current_setting('t.gate1')::uuid); exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: vet sends a gated treatment'; end if;
+end $$;
+do $$ declare blocked boolean := false; begin
+  begin perform delpro_approve_jobs(array(select id from delpro_sync_jobs where treatment_id = current_setting('t.gate1')::uuid));
+  exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: vet bulk-sends a gated treatment'; end if;
+end $$;
+reset role;
+set role service_role;
+do $$ begin
+  if delpro_claim_next_job('farm-pc') is not null then raise exception 'the worker claimed an unapproved job'; end if;
+end $$;
+reset role;
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000a',false);
+do $$ declare r jsonb; j delpro_sync_jobs%rowtype; before jsonb; begin
+  if not (delpro_treatment_transfer_state(current_setting('t.gate1')::uuid)->>'can_approve')::boolean then
+    raise exception 'an admin must see the send button';
+  end if;
+  r := delpro_approve_treatment(current_setting('t.gate1')::uuid);
+  if r->>'outcome' <> 'approved' then raise exception 'admin send: %', r; end if;
+  select * into j from delpro_sync_jobs where treatment_id = current_setting('t.gate1')::uuid;
+  if j.status <> 'approved' or j.approved_by <> '00000000-0000-0000-0000-00000000000a' or j.approved_at is null or j.auto_approved then
+    raise exception 'admin approval not recorded: %', to_jsonb(j);
+  end if;
+  before := to_jsonb(j);
+  r := delpro_approve_treatment(current_setting('t.gate1')::uuid);
+  if r->>'outcome' <> 'already_approved' or (select to_jsonb(x) from delpro_sync_jobs x where id = j.id) is distinct from before then
+    raise exception 'second send must change nothing: %', r;
+  end if;
+  if (select status from delpro_sync_jobs where treatment_id = current_setting('t.gate2')::uuid) <> 'pending_approval' then
+    raise exception 'sending one treatment must not release another';
+  end if;
+end $$;
+reset role;
+set role service_role;
+do $$ declare c jsonb; begin
+  c := delpro_claim_next_job('farm-pc');
+  if c->>'treatment_id' <> current_setting('t.gate1') then raise exception 'the approved job must be claimed: %', c; end if;
+  if delpro_claim_next_job('farm-pc') is not null then raise exception 'the other gated job must stay unclaimed'; end if;
+end $$;
+reset role;
+-- gate off: NEW treatments go automatically, the one queued under the gate still waits
+update system_settings set setting_value = 'false' where setting_key = 'delpro_admin_approval_required';
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000b',false);
+select set_config('t.gate3', create_treatment(jsonb_build_object('animal_id',(select id from animals where animal_no='512'),'reg_date','2026-10-30',
+  'diagnosis','Endometritas','disease_id',(select id from diseases where name='Endometritas'),
+  'medications', jsonb_build_array(jsonb_build_object('product_id','11111111-0000-0000-0000-000000000001','qty',2,'unit','ml'))))::text, false);
+reset role;
+set role service_role;
+do $$ declare c jsonb; begin
+  c := delpro_claim_next_job('farm-pc');
+  if c->>'treatment_id' <> current_setting('t.gate3') then raise exception 'a new treatment must send automatically once the gate is off: %', c; end if;
+  if delpro_claim_next_job('farm-pc') is not null then raise exception 'a job queued under the gate was released silently'; end if;
+end $$;
+reset role;
+do $$ begin
+  if (select status from delpro_sync_jobs where treatment_id = current_setting('t.gate2')::uuid) <> 'pending_approval' then
+    raise exception 'gated job must still wait for an administrator';
+  end if;
+end $$;
+select 'assert' as step, '0045 admin gate: admin-only send, idempotent, claim guard, gate off releases only new jobs' as what;

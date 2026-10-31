@@ -43,12 +43,15 @@ function changedFields(frozen: DelproUiEntry | undefined, live: DelproUiEntry | 
   return UI_FIELDS.filter((f) => String(frozen[f.key] ?? "") !== String(live[f.key] ?? "")).map((f) => f.label);
 }
 
+/** The farm PC said it cannot write medicine records (no verified treatment-model.json / OUTBOUND_MODE not gateway). */
+function writerBlocked(s: LoadedState): boolean {
+  return (s.worker.outbound_mode != null && s.worker.outbound_mode !== "gateway") || s.worker.treatment_model_ready === false;
+}
+
 function TransferBody({ s }: { s: LoadedState }) {
   const shown = s.payload;
   const d = shown.delpro;
   const ui = d.ui_entry;
-  const product = d.products[0];
-  const multi = d.products.length > 1;
   const status = s.job?.status ?? null;
   const diff = s.stale ? changedFields(s.payload.delpro.ui_entry, s.preview.delpro.ui_entry) : [];
   const pendingWork = status === "approved" || status === "processing";
@@ -85,8 +88,25 @@ function TransferBody({ s }: { s: LoadedState }) {
         </div>
       )}
 
-      {s.job?.error && (status === "error" || status === "verification_failed" || status === "pending_approval") && (
-        <p className="rounded-control border border-danger/30 bg-danger-soft p-3 text-[13px] text-danger">{s.job.error}</p>
+      {pendingWork && writerBlocked(s) && (
+        <div className="flex gap-2 rounded-control border border-danger/30 bg-danger-soft p-3 text-[13px] text-text-primary">
+          <AlertTriangle className="mt-0.5 size-4 shrink-0 text-danger" />
+          <div>
+            <p className="font-medium text-danger">Perdavimas sustabdytas — vaistų įrašymas į DelPro dar nepatvirtintas</p>
+            <p className="text-text-secondary">
+              Ūkio kompiuteryje dar nėra patikrinto DelPro vaistų įrašo modelio
+              {s.worker.outbound_mode && s.worker.outbound_mode !== "gateway" ? ` (OUTBOUND_MODE=${s.worker.outbound_mode})` : ""}. Gydymas lieka eilėje ir
+              nebus pažymėtas kaip perduotas, kol DelPro neįrašyti ir nepatikrinti jo vaistai.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {s.job?.error && (status === "error" || status === "verification_failed" || status === "pending_approval" || status === "approved") && (
+        <p className="rounded-control border border-danger/30 bg-danger-soft p-3 text-[13px] text-danger">
+          {s.job.error}
+          {status === "approved" && s.job.next_attempt_at && <span className="block text-[12px]">Kitas bandymas {formatDateTime(s.job.next_attempt_at)}.</span>}
+        </p>
       )}
 
       {!s.eligible && (
@@ -113,7 +133,9 @@ function TransferBody({ s }: { s: LoadedState }) {
           <Send className="size-3.5" /> {s.frozen ? "Patvirtinta perduoti" : "Bus perduota į DelPro"}
         </h3>
         <dl className="divide-y divide-border rounded-control border border-border px-3">
-          <Row label="Gyvulys">{ui?.animal_number ? `Nr. ${ui.animal_number}` : <span className="text-danger">trūksta</span>}</Row>
+          <Row label="Gyvulys" hint={shown.animal.tag_no ? `ORN ${shown.animal.tag_no}` : undefined}>
+            {ui?.animal_number ? `DelPro Nr. ${ui.animal_number}` : <span className="text-danger">trūksta DelPro Nr.</span>}
+          </Row>
           <Row label="Diagnozė" hint={d.diagnosis_text && d.diagnosis_text !== ui?.diagnosis_name ? `GVET: ${d.diagnosis_text}` : undefined}>
             {ui?.diagnosis_name ? (
               <>
@@ -124,17 +146,18 @@ function TransferBody({ s }: { s: LoadedState }) {
               <span className="text-danger">nepasirinkta</span>
             )}
           </Row>
-          <Row label="Vaistas" hint={product && product.name !== ui?.medicine_name ? `GVET: ${product.name}` : undefined}>
-            {multi ? (
-              <span className="text-danger">keli vaistai ({d.products.length}) — nepalaikoma</span>
-            ) : ui?.medicine_name ? (
-              ui.medicine_name
+          <Row label="Gydymo data">{formatDate(d.event_date)}</Row>
+          <Row label="Vaistai ir dozės">
+            {d.products.length === 0 ? (
+              <span className="text-danger">nenurodyta</span>
             ) : (
-              <span className="text-danger">nenurodytas</span>
+              d.products.map((p) => (
+                <div key={p.product_id}>
+                  {p.name} · <span className="tabular-nums">{formatQty(p.qty, p.unit)}</span>
+                  {p.administration_route && <span className="text-text-muted"> · {routeLabel(p.administration_route)}</span>}
+                </div>
+              ))
             )}
-          </Row>
-          <Row label="Dozė">
-            {ui?.dose != null ? formatQty(ui.dose, ui.dose_unit) : <span className="text-danger">nenurodyta</span>}
           </Row>
           <Row label="Gydymo kursas" hint={ui?.course_days === 1 ? "be kurso" : undefined}>
             {ui ? `${ui.course_days} d.` : "—"}
@@ -145,8 +168,6 @@ function TransferBody({ s }: { s: LoadedState }) {
       <section>
         <h3 className="mb-1 text-[12px] font-semibold uppercase tracking-wide text-text-muted">Tik informacija (neperduodama)</h3>
         <dl className="divide-y divide-border rounded-control border border-border bg-surface-secondary/50 px-3">
-          <Row label="Gydymo data (GVET)">{formatDate(d.event_date)}</Row>
-          {d.products[0]?.administration_route && <Row label="Vartojimo būdas">{routeLabel(d.products[0].administration_route)}</Row>}
           <Row label="Pieno karencija">
             {d.withdrawal_until_milk ? `iki ${formatDate(d.withdrawal_until_milk)} (${d.milk_withdrawal_days} d.)` : "nėra"}
           </Row>
@@ -178,7 +199,8 @@ function TransferBody({ s }: { s: LoadedState }) {
   );
 }
 
-// "Patvirtinti perdavimą į DelPro" — one dialog for the treatment card. It only
+// "Siųsti į DelPro" — one dialog for the treatment card (0045: administrators only while the
+// temporary gate is on). It only
 // ever *releases* the treatment to the farm-PC worker through the same database
 // approval the /veterinarija/delpro queue uses; the real DelPro write (and its
 // verification) happens later on the farm PC.
@@ -239,7 +261,7 @@ export function DelproTransferDialog({
         <Button type="button" size="sm" variant={primary ? "primary" : "ghost"}>
           {primary ? (
             <>
-              <Send className="size-3.5" /> Patvirtinti perdavimą į DelPro
+              <Send className="size-3.5" /> Siųsti į DelPro
             </>
           ) : (
             "DelPro būsena"
@@ -248,7 +270,7 @@ export function DelproTransferDialog({
       </DialogTrigger>
       <DialogContent size="wide">
         <DialogHeader>
-          <DialogTitle>{showConfirm || confirmable ? "Patvirtinti gydymo perdavimą į DelPro" : "Gydymo perdavimas į DelPro"}</DialogTitle>
+          <DialogTitle>{showConfirm ? "Siųsti gydymą į DelPro" : "Gydymo perdavimas į DelPro"}</DialogTitle>
           <DialogDescription>
             Įrašas bus perduotas į DelPro, kai ūkio kompiuteris jį paims.
           </DialogDescription>
@@ -274,7 +296,7 @@ export function DelproTransferDialog({
               <input type="hidden" name="treatment_id" value={treatmentId} />
               {canReapprove && <input type="hidden" name="reapprove" value="1" />}
               <Button type="submit" disabled={pending}>
-                {pending ? "Tvirtinama..." : canReapprove ? "Patvirtinti atnaujintus duomenis" : "Patvirtinti perdavimą"}
+                {pending ? "Siunčiama..." : canReapprove ? "Siųsti atnaujintus duomenis" : "Siųsti į DelPro"}
               </Button>
             </form>
           )}

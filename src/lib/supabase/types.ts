@@ -1362,6 +1362,8 @@ export type DelproTransferState =
         verified: boolean;
         error: string | null;
         rejection_reason: string | null;
+        admin_approval_required: boolean;
+        next_attempt_at: string | null;
       } | null;
       /** What was frozen at approval, or the live preview while nothing is frozen. */
       payload: DelproPayload;
@@ -1371,7 +1373,8 @@ export type DelproTransferState =
       /** True when a frozen payload no longer matches the treatment / mappings. */
       stale: boolean;
       problems: DelproTransferProblem[];
-      worker: { last_seen_at: string | null; online: boolean };
+      /** outbound_mode / treatment_model_ready: the farm PC's last heartbeat (null = not reported). */
+      worker: { last_seen_at: string | null; online: boolean; outbound_mode: string | null; treatment_model_ready: boolean | null };
     };
 
 /**
@@ -1445,6 +1448,8 @@ type DelproSyncJobRow = {
   // 0037 — Gateway channel
   gateway_entry: Record<string, unknown> | null;
   requires_verification: boolean;
+  // 0045 — queued while the temporary admin gate was on: only an administrator releases it
+  admin_approval_required: boolean;
 };
 
 // ---------------------------------------------------------------------------

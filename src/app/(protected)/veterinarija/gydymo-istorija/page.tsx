@@ -34,7 +34,7 @@ export default async function GydymoIstorijaPage() {
   }
 
   // DelPro transfer state per gydymas (Priedas §4). Shown only while the
-  // integration is switched on; approving is limited to admin + vet (re-checked
+  // integration is switched on; "Siųsti į DelPro" is for administrators (0045 gate, re-checked
   // in the database by delpro_approve_treatment, this just hides the button).
   const [{ data: modeRow }, session] = await Promise.all([
     supabase.from("system_settings").select("setting_value").eq("setting_key", "delpro_outbound_mode").maybeSingle(),
@@ -49,7 +49,7 @@ export default async function GydymoIstorijaPage() {
       if ((data?.length ?? 0) < CHUNK) break;
     }
     const role = session?.profile.role;
-    delpro = { statuses, canApprove: role === "admin" || role === "vet" };
+    delpro = { statuses, canApprove: role === "admin" };
   }
 
   return (

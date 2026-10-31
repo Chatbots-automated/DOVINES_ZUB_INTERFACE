@@ -55,6 +55,8 @@ async function savedTreatment(qty = 20) {
 
 before(async () => {
   db = await createTestDb();
+  // 0045's temporary admin gate has its own test below; the rest covers the automatic path
+  await db.exec(`update system_settings set setting_value = 'false' where setting_key = 'delpro_admin_approval_required'`);
   server = http.createServer(async (req, res) => {
     let body = "";
     for await (const c of req) body += c;
@@ -213,6 +215,28 @@ test("worker loop: event + medicine written within one poll, read back, Sent; a 
   // the write itself is idempotent too (marker + usage lookup)
   const again = await tg.writeTreatment(delpro, { ...(await plan(id)), gateway_event: (await q(`select gateway_entry g from delpro_sync_jobs where id = $1`, [id]))[0].g }, MODEL);
   assert.deepEqual([again.found_existing_event, again.medication.usages[0].adopted, writes()], [true, true, 2]);
+});
+
+test("admin gate (0045): an unapproved job is never claimed; only an admin's Siųsti į DelPro releases it, then one poll sends it", async () => {
+  seedDelpro();
+  fs.writeFileSync(modelFile, JSON.stringify(MODEL));
+  await db.exec(`update system_settings set setting_value = 'true' where setting_key = 'delpro_admin_approval_required'`);
+  try {
+    const id = await savedTreatment(18);
+    const t = (await q(`select treatment_id from delpro_sync_jobs where id = $1`, [id]))[0].treatment_id;
+    assert.equal(await idx.runOutbound(), 0, "auto mode, delay 0 — still not claimed");
+    assert.deepEqual([(await job(id)).status, writes()], ["pending_approval", 0]);
+    await assert.rejects(asUser(VET, `select delpro_approve_treatment('${t}')`), /administratorius/);
+    assert.equal((await asUser(ADMIN, `select delpro_approve_treatment('${t}') r`)).r.outcome, "approved");
+    assert.equal((await asUser(ADMIN, `select delpro_approve_treatment('${t}') r`)).r.outcome, "already_approved");
+    const [a] = await q(`select status, approved_by, approved_at from delpro_sync_jobs where id = $1`, [id]);
+    assert.deepEqual([a.status, a.approved_by, !!a.approved_at], ["approved", ADMIN, true]);
+    assert.equal(await idx.runOutbound(), 1);
+    const j = await job(id);
+    assert.deepEqual([j.status, j.actual_result.medication.verified], ["success", true]);
+  } finally {
+    await db.exec(`update system_settings set setting_value = 'false' where setting_key = 'delpro_admin_approval_required'`);
+  }
 });
 
 test("a treatment that can't be sent yet waits with its problems listed; the next one still goes out", async () => {
