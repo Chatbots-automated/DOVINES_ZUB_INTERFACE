@@ -4,7 +4,7 @@ import * as React from "react";
 import { AlertTriangle, CheckCircle2, Send, WifiOff } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
+import { Dialog, DialogBody, DialogContent, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { createClient } from "@/lib/supabase/client";
 import { ADMINISTRATION_ROUTES } from "@/lib/administration-routes";
 import { DELPRO_CONFIRMABLE, delproStatusLabel, delproStatusTone, problemLabel } from "@/lib/delpro-status";
@@ -74,9 +74,6 @@ function TransferBody({ s }: { s: LoadedState }) {
           <AlertTriangle className="mt-0.5 size-4 shrink-0 text-warning" />
           <div>
             <p className="font-medium">Duomenys pasikeitė po patvirtinimo{diff.length > 0 ? `: ${diff.join(", ").toLowerCase()}` : ""}.</p>
-            <p className="text-text-secondary">
-              {status === "approved" ? "Siunčiami patvirtinti duomenys, kol nepatvirtinsite iš naujo." : "Pakeitimai į DelPro nesiunčiami."}
-            </p>
           </div>
         </div>
       )}
@@ -84,21 +81,14 @@ function TransferBody({ s }: { s: LoadedState }) {
       {pendingWork && !s.worker.online && (
         <div className="flex gap-2 rounded-control border border-border bg-surface-secondary p-3 text-[13px] text-text-secondary">
           <WifiOff className="mt-0.5 size-4 shrink-0" />
-          <p>Ūkio kompiuteris neatsako{s.worker.last_seen_at ? ` (nuo ${formatDateTime(s.worker.last_seen_at)})` : ""}. Įrašas lauks eilėje.</p>
+          <p>Ūkio kompiuteris neatsako{s.worker.last_seen_at ? ` nuo ${formatDateTime(s.worker.last_seen_at)}` : ""}.</p>
         </div>
       )}
 
       {pendingWork && writerBlocked(s) && (
         <div className="flex gap-2 rounded-control border border-danger/30 bg-danger-soft p-3 text-[13px] text-text-primary">
           <AlertTriangle className="mt-0.5 size-4 shrink-0 text-danger" />
-          <div>
-            <p className="font-medium text-danger">Perdavimas sustabdytas — vaistų įrašymas į DelPro dar nepatvirtintas</p>
-            <p className="text-text-secondary">
-              Ūkio kompiuteryje dar nėra patikrinto DelPro vaistų įrašo modelio
-              {s.worker.outbound_mode && s.worker.outbound_mode !== "gateway" ? ` (OUTBOUND_MODE=${s.worker.outbound_mode})` : ""}. Gydymas lieka eilėje ir
-              nebus pažymėtas kaip perduotas, kol DelPro neįrašyti ir nepatikrinti jo vaistai.
-            </p>
-          </div>
+          <p className="font-medium text-danger">Sustabdyta: vaistų įrašymas į DelPro dar neįjungtas.</p>
         </div>
       )}
 
@@ -130,7 +120,7 @@ function TransferBody({ s }: { s: LoadedState }) {
 
       <section>
         <h3 className="mb-1 flex items-center gap-1.5 text-[12px] font-semibold uppercase tracking-wide text-text-muted">
-          <Send className="size-3.5" /> {s.frozen ? "Patvirtinta perduoti" : "Bus perduota į DelPro"}
+          <Send className="size-3.5" /> Gydymas
         </h3>
         <dl className="divide-y divide-border rounded-control border border-border px-3">
           <Row label="Gyvulys" hint={shown.animal.tag_no ? `ORN ${shown.animal.tag_no}` : undefined}>
@@ -166,7 +156,7 @@ function TransferBody({ s }: { s: LoadedState }) {
       </section>
 
       <section>
-        <h3 className="mb-1 text-[12px] font-semibold uppercase tracking-wide text-text-muted">Tik informacija (neperduodama)</h3>
+        <h3 className="mb-1 text-[12px] font-semibold uppercase tracking-wide text-text-muted">Kita</h3>
         <dl className="divide-y divide-border rounded-control border border-border bg-surface-secondary/50 px-3">
           <Row label="Pieno karencija">
             {d.withdrawal_until_milk ? `iki ${formatDate(d.withdrawal_until_milk)} (${d.milk_withdrawal_days} d.)` : "nėra"}
@@ -271,9 +261,6 @@ export function DelproTransferDialog({
       <DialogContent size="wide">
         <DialogHeader>
           <DialogTitle>{showConfirm ? "Siųsti gydymą į DelPro" : "Gydymo perdavimas į DelPro"}</DialogTitle>
-          <DialogDescription>
-            Įrašas bus perduotas į DelPro, kai ūkio kompiuteris jį paims.
-          </DialogDescription>
         </DialogHeader>
         <DialogBody>
           {loading && <p className="py-6 text-center text-[13px] text-text-muted">Kraunama...</p>}

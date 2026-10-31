@@ -58,10 +58,6 @@ function PilotDrug({ job, singleJob, validated }: { job: CatalogJob | null; sing
   return (
     <div className="rounded-md border border-border p-3">
       <p className="mb-1 text-[13px] font-medium">Pirmas tikras vaistas GVET → DelPro (bandymas)</p>
-      <p className="mb-2 text-[12px] text-text-muted">
-        Sukuriamas vienas neaktyvus GVET vaistas „GVET TEST vaistas …“ (ml, karencija 0 d.) ir jo DelPro sukūrimo užduotis. Ji nevykdoma, kol neleisite
-        rašyti <strong>tik jai</strong>; po jos rašymas išsijungia pats. Kitos katalogo ir gydymų rašymo užduotys lieka išjungtos.
-      </p>
       {!job ? (
         <ActionButton action="createPilotDrug" fields={{}} label="Sukurti bandomąjį vaistą" confirm="Sukurti neaktyvų GVET vaistą „GVET TEST vaistas …“ ir jo DelPro užduotį?" />
       ) : (
@@ -88,18 +84,13 @@ function PilotDrug({ job, singleJob, validated }: { job: CatalogJob | null; sing
           )}
           {job.status === "queued" && (
             <div>
-              <p className="text-text-secondary">
-                Ūkio kompiuteryje (PowerShell): pirmiausia patikra (tik skaito), tada vienas įrašymas.{" "}
-                {!released && "Įrašymas veiks tik paspaudus „Leisti įrašyti tik šią užduotį“."}
-              </p>
+              <p className="text-text-secondary">Ūkio kompiuteryje (PowerShell):</p>
               <pre className="mt-1 overflow-x-auto rounded bg-surface-secondary p-2 text-[11px]">{pilotCommands(job.id)}</pre>
             </div>
           )}
           {job.status === "success" && (
             <div className="space-y-1">
-              <p className="text-success">
-                Įrašyta į DelPro ir nuskaityta atgal be neatitikimų; GVET ↔ DelPro susiejimas išsaugotas. Pakartotinis paleidimas nieko nesiunčia.
-              </p>
+              <p className="text-success">Įrašyta ir patikrinta DelPro.</p>
               {(job.readback as { object_type: string; record: Record<string, unknown> }[] | null)?.map((r, n) => (
                 <div key={n} className="text-text-muted">
                   {r.object_type}: {Object.entries(r.record).map(([k, v]) => `${k}=${v === null ? "—" : String(v)}`).join(", ")}
@@ -176,10 +167,6 @@ export function CatalogWritePanel({
 
       <div>
         <p className="mb-1 text-[13px] font-medium">Operacijų patikrinimas bandomaisiais įrašais</p>
-        <p className="mb-2 text-[12px] text-text-muted">
-          Kiekviena operacija pirmiausia atliekama su neaktyviu „GVET TEST …“ įrašu. Tik kai jis įrašytas ir nuskaitytas atgal be neatitikimų, operaciją galima
-          pažymėti patikrinta — tada vykdomos ir tikros užduotys. Bandomuosius įrašus DelPro galima palikti neaktyvius.
-        </p>
         <table className="w-full text-[12px]">
           <thead className="border-b border-border text-left text-text-muted">
             <tr>
@@ -298,10 +285,7 @@ export function CatalogWritePanel({
       </div>
 
       <p className="text-[12px] text-text-muted">
-        Gydymų rašymo kanalas: <strong>{writeChannel === "gateway" ? "DelPro Gateway" : "UI scenarijus (delpro.ps1)"}</strong>.{" "}
-        {writeChannel !== "gateway" && "Gateway kanalas (DiagnosesAndTreatmentEvent) paruoštas, bet neįjungtas — įjungiamas tik suderinus su ūkiu."}{" "}
-        Gateway kanalas įrašo tik diagnozės įvykį: vaistai perduodami tik kaip tekstas komentare, DelPro vaistų naudojimo įrašai (HealthEventDrugUsage)
-        dar nesinchronizuojami.
+        Gydymų rašymo kanalas: <strong>{writeChannel === "gateway" ? "DelPro Gateway" : "UI scenarijus (delpro.ps1)"}</strong>
       </p>
     </div>
   );

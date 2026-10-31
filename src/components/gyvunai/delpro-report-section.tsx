@@ -277,7 +277,6 @@ export function DelproReportTab({ data, loading }: { data: DelproReportData; loa
 
       {historical.length > 0 && (
         <SectionCard title="Nebėra naujausioje ataskaitoje" icon={History} tone="neutral">
-          <p className="mb-2 text-[12px] text-text-muted">Šių stulpelių naujausia ataskaita nebeturi — rodoma paskutinė žinoma reikšmė ir jos ataskaitos laikas.</p>
           <dl className="grid gap-x-6 sm:grid-cols-2">
             {historical.map((k) => (
               <InfoRow key={k} label={registry.get(k)?.label ?? s.fields[k]?.header ?? k}>

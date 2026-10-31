@@ -198,7 +198,6 @@ function TemplateEditor({
         <Button type="button" size="sm" variant="ghost" onClick={onDone}>
           Atšaukti
         </Button>
-        <span className="text-[11px] text-text-muted">Karencija ir dozės — klinikiniai duomenys: tikrinkite prieš išsaugodami.</span>
         {state && !state.ok && <span className="text-[12px] text-danger">{state.error}</span>}
       </div>
     </form>

@@ -95,7 +95,6 @@ export function CatalogOutboundModeForm({ mode }: { mode: CatalogOutboundMode })
           <option value="manual">Siunčiami ranka („Siųsti į DelPro“, „Sukurti DelPro“)</option>
           <option value="auto">Nauji ir pakeisti GVET įrašai — į eilę automatiškai</option>
         </Select>
-        <p className="mt-1 text-[11px] text-text-muted">Eilė vykdoma tik kai rašymas įjungtas ir operacija patikrinta bandomuoju įrašu.</p>
       </div>
       <Button type="submit" size="sm" disabled={pending}>
         {pending ? "Saugoma..." : "Išsaugoti"}

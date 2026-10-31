@@ -107,11 +107,6 @@ function IssueRow({ issue, names }: { issue: CatalogIssue; names: CatalogNames }
           ) : null}
         </p>
         {d.fields && <FieldTable fields={d.fields} names={names} />}
-        {issue.issue_type === "outbound_pending" && (
-          <p className="mt-1 text-[11.5px] text-text-muted">
-            „Siųsti į DelPro“ įtraukia pakeitimą į eilę; vykdoma, kai rašymas įjungtas ir operacija patikrinta.
-          </p>
-        )}
         {d.missing && (
           <p className="mt-1 text-[11.5px] text-text-secondary">
             Nerasta DelPro: {d.missing.map((m) => `${m.field} → ${objectLabel(m.object_type)} ${m.key}`).join(", ")}
@@ -149,9 +144,8 @@ function IssueRow({ issue, names }: { issue: CatalogIssue; names: CatalogNames }
         )}
         {issue.issue_type === "clinical_review" && !d.usages && (
           <p className="mt-1 text-[11.5px] text-text-secondary">
-            Importuota iš DelPro: {catalogValue(d.uom)}, karencija pienui {catalogValue(d.milk_days)} d., mėsai {catalogValue(d.meat_days)} d.
-            {d.application_method ? ` (${d.application_method})` : ""}. Palyginkite su vaisto aprašu ir, jei reikia, papildykite karenciją pagal
-            skyrimo būdą produkto kortelėje.
+            DelPro: {catalogValue(d.uom)}, karencija pienui {catalogValue(d.milk_days)} d., mėsai {catalogValue(d.meat_days)} d.
+            {d.application_method ? ` (${d.application_method})` : ""}
           </p>
         )}
       </div>
@@ -312,21 +306,18 @@ export function CatalogSyncSection({
         </div>
 
         {workerCatalogSource === "off" && (
-          <p className="text-[12px] text-warning">Ūkio kompiuteryje katalogo skaitymas išjungtas (CATALOG_SOURCE=off) — sinchronizacija nevyks.</p>
+          <p className="text-[12px] text-warning">Katalogo skaitymas išjungtas (CATALOG_SOURCE=off).</p>
         )}
         {incomplete.length > 0 && (
           <p className="text-[12px] text-warning">
-            DelPro grąžino galimai ne visus įrašus: {incomplete.map((s) => objectLabel(s.object_type)).join(", ")}. Įrašai iš GVET nešalinami, kol
-            gaunamas pilnas sąrašas.
+            Gauta ne visa: {incomplete.map((s) => objectLabel(s.object_type)).join(", ")}.
           </p>
         )}
         {lastRun?.error && <p className="text-[12px] text-danger">Klaida: {lastRun.error}</p>}
         {(lastCompleted?.stats.Animal?.received ?? 0) > 0 && (lastCompleted?.stats.Animal?.matched ?? 0) + (lastCompleted?.stats.Animal?.unchanged ?? 0) === 0 && (
           <p className="text-[12px] text-warning">
-            DelPro grąžino {lastCompleted?.stats.Animal?.received} gyvulių ID, bet nė vienas nesusietas: GVET turi tik {animalStats.active} aktyvių gyvulių, iš jų{" "}
-            {animalStats.withNumber} su bandos numeriu. Gyvuliai susiejami tik pagal DelPro numerį su aktyviu GVET gyvuliu — pirmiausia reikia bandos
-            sinchronizacijos (DELPRO_SOURCE) arba VIC importo. Dviprasmiški numeriai ({lastCompleted?.stats.Animal?.ambiguous ?? 0}) niekada nesusiejami
-            automatiškai.
+            Gauta {lastCompleted?.stats.Animal?.received} DelPro gyvulių, susieta 0. GVET aktyvių gyvulių: {animalStats.active}, su bandos numeriu:{" "}
+            {animalStats.withNumber}. Dviprasmiškų numerių: {lastCompleted?.stats.Animal?.ambiguous ?? 0}.
           </p>
         )}
         {lastErrors.map(([t, s]) => (
@@ -401,10 +392,6 @@ export function CatalogSyncSection({
         </CollapsibleSection>
 
         <CollapsibleSection defaultOpen={false} title={`GVET be DelPro atitikmens (${gvetUnlinked.length})`}>
-          <p className="mb-2 text-[12px] text-text-muted">
-            Šių ligų, vaistų ir šablonų DelPro neturi arba jie nesusieti. „Sukurti DelPro“ įtraukia į eilę; vykdoma tik kai rašymas įjungtas ir operacija
-            patikrinta. Jei DelPro įrašas jau yra — susiekite, o ne kurkite.
-          </p>
           <div className="-mx-4 divide-y divide-border border-t border-border">
             {gvetUnlinked.map((g) => {
               const job = queuedCreate(g);
@@ -445,7 +432,6 @@ export function CatalogSyncSection({
         </CollapsibleSection>
 
         <CollapsibleSection defaultOpen={false} title={`DelPro gydymo šablonai (${templates.length})`}>
-          <p className="mb-2 text-[12px] text-text-muted">Tik peržiūra: DelPro šablonai (Treatment / TreatmentDrugUsage), ne gyvulių gydymo įrašai.</p>
           <table className="w-full text-[12px]">
             <thead className="border-b border-border text-left text-text-muted">
               <tr>

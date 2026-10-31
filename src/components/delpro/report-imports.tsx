@@ -80,10 +80,6 @@ export function ReportImportsSection({
           <Stat label="nauji stulpeliai" value={newFields.length} />
           {activeTokens.length === 0 && <Badge tone="warning">Nėra įkėlimo rakto</Badge>}
         </div>
-        <p className="text-[12px] text-text-muted">
-          Ataskaitos tik stebimos: iš jų nekuriami gydymai, karencija ar DelPro užduotys. Gyvūnas randamas pagal ORN (ausies įsagą); nežinomas ORN sukuria
-          laikiną gyvūną („DelPro ataskaita“). Gyvūnai, kurių nėra ataskaitoje, nekeičiami.
-        </p>
 
         <CollapsibleSection defaultOpen={imports.length === 0 || activeTokens.length === 0} title={`Įkėlimas ir raktai (${activeTokens.length})`}>
           <div className="space-y-3 text-[12px]">
@@ -96,10 +92,7 @@ export function ReportImportsSection({
               Tas pats priėmimas ir per <code className="rounded bg-surface-secondary px-1.5 py-0.5 font-mono">POST {endpointAltUrl}</code>.
             </p>
             {endpointIsLocal && (
-              <p className="text-warning">
-                Puslapis atidarytas lokaliai: ūkio kompiuteriui naudokite Netlify svetainės https adresą. Lokaliai veikia tik /api/delpro/report-upload
-                (/.netlify/functions/… veikia tik Netlify).
-              </p>
+              <p className="text-warning">Lokalus adresas — ūkio kompiuteriui naudokite Netlify https adresą.</p>
             )}
             <ReportTokenForm />
             {tokens.length > 0 && (
@@ -240,10 +233,6 @@ export function ReportImportsSection({
         )}
 
         <CollapsibleSection defaultOpen={false} title={`Ataskaitos laukai (${fields.length})`}>
-          <p className="mb-2 text-[12px] text-text-muted">
-            Nauji Excel stulpeliai užregistruojami automatiškai ir rodomi gyvūno kortelėje. Čia galima paslėpti lauką; žinomi laukai atpažįstami ir pagal kitus
-            pavadinimus (sinonimus).
-          </p>
           <div className="overflow-x-auto">
             <table className="w-full text-[12px]">
               <thead className="border-b border-border text-left text-text-muted">

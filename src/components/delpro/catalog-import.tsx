@@ -122,8 +122,7 @@ export function CatalogImportPanel({ rows, drugParametersComplete }: { rows: Del
 
       {type === "Drug" && !drugParametersComplete && (
         <p className="text-[12px] text-warning">
-          DelPro parametrų (DrugParameters) sąrašas gautas nepilnas. Vaistai, kurių parametrai negauti, neimportuojami — vienetas ir karencija nespėjami. Po
-          sinchronizacijos su atnaujinta ūkio programa jie bus nuskaityti pagal raktą.
+          Vaistų parametrai (DrugParameters) gauti ne visi — vaistai be parametrų neimportuojami.
         </p>
       )}
 
@@ -170,7 +169,6 @@ export function CatalogImportPanel({ rows, drugParametersComplete }: { rows: Del
         <Button type="submit" size="sm" variant="primary" disabled={pending || items.length === 0}>
           {pending ? "Importuojama…" : `Importuoti pažymėtus (${items.length})`}
         </Button>
-        <span className="text-[12px] text-text-muted">Kartoti saugu: jau susieti įrašai praleidžiami, dublikatai nekuriami.</span>
         {state && <span className={`text-[12px] ${state.ok ? "text-success" : "text-danger"}`}>{state.ok ? state.message : state.error}</span>}
       </div>
     </form>
