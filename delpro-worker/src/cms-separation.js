@@ -227,29 +227,59 @@ export async function runCmsOutbound(client, { max = 20, jobId = null } = {}) {
 }
 
 /**
- * DelPro's own SortCow settings + sort areas (read-only). ActionType is filtered in the Gateway (<equal>); rows of
- * another type are dropped here too. A read reaching the row cap is incomplete — GVET then removes nothing.
+ * DelPro's own SortCow settings + sort areas (read-only).
+ *
+ * Farm facts (2026-11, DelPro 10.9): GetData AnimalActionSetting <equal ActionType=SortCow> returned 3466 rows in ONE call —
+ * more than the 1000 rows the Gateway returned for DrugParameters, so that cap is not universal. There is no verified Gateway
+ * paging. So each object is read in ONE call with a large `top` (CMS_LIVE_MAX_ROWS) and a read is complete only when it returned
+ * fewer rows than asked for and not exactly the known cap. All AnimalMilkSetting records (Key, Animal) are read the same way and
+ * joined here (the earlier per-key lookups stopped at 500 and left 2966 SortCow rows without an animal). A milk-setting key the
+ * bulk read did not return is fetched by Key: found -> the bulk read was truncated (incomplete); confirmed absent -> reported.
  */
-export async function readLiveState(client, { maxRows = config.catalogMaxRows, rowCap = config.catalogGatewayRowCap, maxLookups = 500 } = {}) {
+export async function readLiveState(client, { maxRows = config.cmsLiveMaxRows, rowCap = config.catalogGatewayRowCap, maxRefLookups = 300 } = {}) {
   const errors = [];
+  const capped = (n) => n >= maxRows || (rowCap > 0 && n === rowCap);
+
   const raw = await get(client, ACTION_OBJECT, ACTION_READ_PROPS, [{ name: "ActionType", value: "SortCow" }], maxRows);
   const actions = raw.map(actionSummary).filter((a) => a.key && a.action_type === "SortCow");
-  let complete = raw.length < Math.min(maxRows, rowCap || maxRows);
-  const keys = [...new Set(actions.map((a) => a.milk_setting_key).filter(Boolean))];
-  if (keys.length > maxLookups) {
-    errors.push(`Per daug melžimo nustatymų (${keys.length}) — nuskaityta ${maxLookups}.`);
+  const otherTypes = raw.length - actions.length;
+  let complete = !capped(raw.length);
+  if (!complete) errors.push(`AnimalActionSetting: grąžinta ${raw.length} (top ${maxRows}) — gali būti ne visi.`);
+
+  const milkRaw = await get(client, "AnimalMilkSetting", ["Key", "Animal"], [], maxRows);
+  if (capped(milkRaw.length)) {
     complete = false;
+    errors.push(`AnimalMilkSetting: grąžinta ${milkRaw.length} (top ${maxRows}) — gali būti ne visi.`);
   }
-  const guidByKey = new Map();
-  for (const key of keys.slice(0, maxLookups)) {
-    try {
-      const [ms] = (await get(client, "AnimalMilkSetting", ["Key", "Animal"], [{ name: "Key", value: key }], 2)).filter((o) => String(val(o, "Key")) === key);
-      guidByKey.set(key, ms ? val(ms, "Animal") : null);
-    } catch (err) {
-      errors.push(`AnimalMilkSetting ${key}: ${err.message}`);
+  const guidByKey = new Map(milkRaw.map((o) => [String(val(o, "Key")), val(o, "Animal") || null]).filter(([k]) => k));
+  const perAnimal = new Map();
+  for (const g of guidByKey.values()) if (g) perAnimal.set(g.toLowerCase(), (perAnimal.get(g.toLowerCase()) ?? 0) + 1);
+
+  const missing = [...new Set(actions.map((a) => a.milk_setting_key).filter((k) => k && !guidByKey.has(String(k))))];
+  let refsFound = 0;
+  const refsAbsent = [];
+  if (missing.length > maxRefLookups) {
+    complete = false;
+    errors.push(`${missing.length} SortCow įrašų nurodo melžimo nustatymus, kurių nėra bendrame sąraše — per daug patikrinti po vieną.`);
+  } else {
+    for (const key of missing) {
+      try {
+        const [ms] = (await get(client, "AnimalMilkSetting", ["Key", "Animal"], [{ name: "Key", value: key }], 2)).filter((o) => String(val(o, "Key")) === String(key));
+        if (ms) {
+          refsFound += 1;
+          guidByKey.set(String(key), val(ms, "Animal") || null);
+        } else refsAbsent.push(key);
+      } catch (err) {
+        complete = false;
+        errors.push(`AnimalMilkSetting ${key}: ${err.message}`);
+      }
+    }
+    if (refsFound > 0) {
       complete = false;
+      errors.push(`Bendras AnimalMilkSetting sąrašas buvo nepilnas (${refsFound} rasta tik pagal raktą).`);
     }
   }
+
   let sortAreas = [];
   try {
     sortAreas = (await get(client, "SortArea", ["Key", "SortAreaNumber", "SortAreaName"], [], 200))
@@ -257,10 +287,20 @@ export async function readLiveState(client, { maxRows = config.catalogMaxRows, r
   } catch (err) {
     errors.push(`SortArea: ${err.message}`);
   }
+
   return {
     complete,
     errors,
-    actions: actions.map((a) => ({ ...a, animal_guid: guidByKey.get(a.milk_setting_key) ?? null })),
+    stats: {
+      sortcow_returned: raw.length,
+      other_action_types_dropped: otherTypes,
+      milk_settings_returned: milkRaw.length,
+      milk_settings_found_by_key: refsFound,
+      milk_settings_absent: refsAbsent.length,
+      animals_with_several_milk_settings: [...perAnimal.values()].filter((n) => n > 1).length,
+      top: maxRows,
+    },
+    actions: actions.map((a) => ({ ...a, animal_guid: guidByKey.get(String(a.milk_setting_key)) ?? null })),
     sort_areas: sortAreas,
   };
 }
@@ -270,4 +310,10 @@ export async function runCmsLive(client) {
   const res = await gvet.cmsLiveUpload({ worker_id: config.workerId, ...state });
   log.info(`DelPro CMS būsena → GVET: ${JSON.stringify(res)}`);
   return res;
+}
+
+/** Cheap read-only Gateway check for the activation panel (one SortArea row). */
+export async function pingGateway(client) {
+  await get(client, "SortArea", ["Key"], [], 1);
+  return true;
 }

@@ -9,7 +9,7 @@ import { Card } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
 import { cmsPost } from "@/lib/cms/client";
 import { formatVilnius } from "@/lib/cms/separation";
-import type { CmsSortAreaRow } from "@/lib/supabase/types";
+import type { CmsLiveRefreshInfo, CmsSortAreaRow } from "@/lib/supabase/types";
 
 export type CmsActiveRow = {
   action_key: string;
@@ -26,13 +26,7 @@ export type CmsActiveRow = {
   gvet_job_id: string | null;
 };
 
-export type CmsLiveRefresh = {
-  finished_at?: string;
-  received?: number;
-  complete?: boolean;
-  unmatched_animals?: number;
-  errors?: string[];
-} | null;
+export type CmsLiveRefresh = CmsLiveRefreshInfo | null;
 
 /** DelPro's own SortCow settings as last read by the farm PC (Animal → AnimalMilkSetting → AnimalActionSetting). */
 export function CmsActiveSeparations({
@@ -52,7 +46,11 @@ export function CmsActiveSeparations({
   const [busy, setBusy] = React.useState(false);
   const [message, setMessage] = React.useState<{ ok: boolean; text: string } | null>(null);
   const pending = !!requestedAt && (!refresh?.finished_at || requestedAt > refresh.finished_at);
-  const now = new Date().toISOString();
+  const [now] = React.useState(() => new Date().toISOString());
+  const [show, setShow] = React.useState<"effective" | "matched">("effective");
+  const effective = (r: CmsActiveRow) => !!r.active && (!r.end_at || r.end_at > now) && r.sessions.length > 0;
+  const shown = rows.filter((r) => show === "matched" || effective(r));
+  const reasons = refresh?.unmatched_reasons;
 
   async function request() {
     setBusy(true);
@@ -68,7 +66,11 @@ export function CmsActiveSeparations({
         <span className="text-text-secondary">
           Nuskaityta iš DelPro: <b className="text-text-primary">{refresh?.finished_at ? formatVilnius(refresh.finished_at) : "dar niekada"}</b>
           {refresh?.complete === false && <Badge tone="warning" className="ml-2">Nepilnas nuskaitymas</Badge>}
-          {!!refresh?.unmatched_animals && <span className="ml-2 text-text-muted">· be GVET gyvulio: {refresh.unmatched_animals}</span>}
+          {refresh?.received != null && (
+            <span className="ml-2 text-text-muted">
+              · SortCow įrašų {refresh.received}, susieta su GVET {refresh.matched ?? "?"}, galioja {refresh.effective_active ?? "?"}
+            </span>
+          )}
         </span>
         {pending && <Badge tone="info">Laukiama ūkio kompiuterio…</Badge>}
         <Button type="button" size="sm" variant="outline" className="ml-auto" disabled={!canRequest || busy} onClick={request}>
@@ -76,10 +78,33 @@ export function CmsActiveSeparations({
         </Button>
         {message && <p className={message.ok ? "w-full text-success" : "w-full text-danger"}>{message.text}</p>}
         {(refresh?.errors ?? []).length > 0 && <p className="w-full text-[12px] text-danger">{refresh!.errors!.join(" ")}</p>}
+        {reasons && (refresh?.unmatched_animals ?? 0) > 0 && (
+          <p className="w-full text-[12px] text-text-muted">
+            Be GVET gyvulio {refresh!.unmatched_animals}: gyvulys DelPro sąraše nerastas {reasons.animal_not_in_gvet ?? 0} (dažniausiai išbrokuoti / parduoti), melžimo
+            nustatymas be gyvulio {reasons.milk_setting_without_animal ?? 0}, gyvulys GVET neaktyvus {reasons.animal_inactive_in_gvet ?? 0}.
+          </p>
+        )}
+        <div className="flex w-full flex-wrap gap-1">
+          {(
+            [
+              ["effective", `Galiojantys (${rows.filter(effective).length})`],
+              ["matched", `Visi GVET gyvulių įrašai (${rows.length})`],
+            ] as const
+          ).map(([k, label]) => (
+            <button
+              key={k}
+              type="button"
+              onClick={() => setShow(k)}
+              className={show === k ? "rounded-control bg-ink px-2.5 py-1 text-text-on-ink" : "rounded-control px-2.5 py-1 text-text-secondary hover:bg-surface-secondary"}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
       </Card>
 
       <Card className="overflow-hidden">
-        {rows.length === 0 ? (
+        {shown.length === 0 ? (
           <EmptyState icon={Split} title="Aktyvių atskyrimų nerasta" description="Rodoma tai, ką ūkio kompiuteris paskutinį kartą nuskaitė iš DelPro." className="py-10" />
         ) : (
           <div className="overflow-x-auto">
@@ -97,7 +122,7 @@ export function CmsActiveSeparations({
                 </tr>
               </thead>
               <tbody className="divide-y divide-border">
-                {rows.map((r) => {
+                {shown.map((r) => {
                   const live = r.active && (!r.end_at || r.end_at > now);
                   return (
                     <tr key={r.action_key}>

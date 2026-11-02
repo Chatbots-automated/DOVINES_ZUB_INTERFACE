@@ -125,6 +125,14 @@ export async function POST(request: NextRequest) {
           p_verified: body.verified === true,
           p_confirm: body.confirm === true,
         });
+      case "set_outbound_enabled":
+        return supabase.rpc("cms_set_outbound_enabled", { p_enabled: body.enabled === true, p_confirm: body.confirm === true });
+      case "set_destination_verified":
+        return supabase.rpc("cms_set_destination_verified", {
+          p_verified: body.verified === true,
+          p_confirm: body.confirm === true,
+          p_note: typeof body.note === "string" ? body.note : null,
+        });
       case "request_live":
         return supabase.rpc("cms_request_live_refresh", {});
       default:

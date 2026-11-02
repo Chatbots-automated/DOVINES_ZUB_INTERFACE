@@ -165,7 +165,10 @@ export function vilniusNowLocal(now = new Date()): string {
 /** A stored timestamptz shown in Europe/Vilnius (the server runs in UTC). */
 export function formatVilnius(value: string | null | undefined): string {
   if (!value) return "—";
-  return new Intl.DateTimeFormat("lt-LT", { timeZone: "Europe/Vilnius", dateStyle: "short", timeStyle: "short" }).format(new Date(value));
+  // also Postgres text form ("2026-11-02 21:45:12.48+00")
+  const t = Date.parse(value.replace(" ", "T").replace(/([+-]\d{2})$/, "$1:00"));
+  if (!Number.isFinite(t)) return "—";
+  return new Intl.DateTimeFormat("lt-LT", { timeZone: "Europe/Vilnius", dateStyle: "short", timeStyle: "short" }).format(new Date(t));
 }
 
 /** A stored timestamptz back to the datetime-local value (Europe/Vilnius) — for reopening a draft. */

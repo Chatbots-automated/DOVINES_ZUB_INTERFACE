@@ -157,6 +157,7 @@ export function CmsHistory({ jobs, isAdmin, canWrite, gate, focusBatch }: { jobs
                         {CMS_MODE_LABEL[j.mode]} · {schedule(j)}
                       </p>
                       {(j.problems ?? []).length > 0 && <p className="text-[12px] text-danger">{j.problems.map((p) => p.message).join(" ")}</p>}
+                      {j.status === "success" && j.action_key && <DelproState j={j} />}
                       {j.last_error && <p className="text-[12px] text-danger">{j.last_error}</p>}
                       {j.readback && j.readback.diffs.length > 0 && (
                         <table className="mt-1 text-[11px]">
@@ -349,6 +350,21 @@ export function CmsHistory({ jobs, isAdmin, canWrite, gate, focusBatch }: { jobs
         </DialogContent>
       </Dialog>
     </div>
+  );
+}
+
+/** The DelPro record this job created, as the farm PC last read it. GVET never re-creates a record disabled in DelPro. */
+function DelproState({ j }: { j: CmsSeparationJobView }) {
+  const [now] = React.useState(() => Date.now());
+  if (!j.delpro_seen_at) return <p className="text-[12px] text-text-muted">DelPro būsena dar nenuskaityta (Aktyvūs atskyrimai → Atnaujinti).</p>;
+  if (j.delpro_removed_at) return <p className="text-[12px] text-text-muted">DelPro įrašo {j.action_key} nebėra (pilnas nuskaitymas {formatVilnius(j.delpro_removed_at)}).</p>;
+  const ended = j.delpro_end_at && new Date(j.delpro_end_at).getTime() <= now;
+  const label = j.delpro_active === false ? "išjungtas DelPro" : ended ? "pasibaigęs" : j.delpro_active ? "galioja" : "nežinoma";
+  return (
+    <p className="text-[12px] text-text-secondary">
+      DelPro {j.action_key}: <Badge tone={j.delpro_active && !ended ? "warning" : "neutral"}>{label}</Badge>{" "}
+      <span className="text-text-muted">· nuskaityta {formatVilnius(j.delpro_seen_at)}</span>
+    </p>
   );
 }
 

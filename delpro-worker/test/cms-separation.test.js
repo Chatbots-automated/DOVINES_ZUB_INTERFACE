@@ -91,6 +91,9 @@ before(async () => {
     insert into animals (tag_no, animal_no, delpro_object_guid, source) values
       ('LT000007300337', '337', '${GUID}', 'delpro'), ('LT000007300338', null, '${GUID2}', 'vic'),
       ('LT000007300339', '339', '${GUID3}', 'delpro'), ('LT000007300340', '340', null, 'delpro');
+    -- 0049: GVET sending on + destination checked; the 0048 gates (single job / verified mode) are what these tests cover
+    update system_settings set setting_value = 'true' where setting_key = 'cms_outbound_enabled';
+    update system_settings set setting_value = '{"note":"test"}' where setting_key = 'cms_destination_verified';
   `);
 });
 
@@ -244,6 +247,48 @@ test("unmapped animal can't be submitted; a vet can't approve", async () => {
   const b = await asUser(VET, `select cms_save_batch('${JSON.stringify({ submit: true, items: [await item("LT000007300337", { start_local: "2099-12-01T08:00", end_local: "2099-12-02T08:00" })] })}'::jsonb) as r`);
   const [{ id }] = await q(`select id from cms_separation_jobs where batch_id = $1`, [b.r.batch_id]);
   await assert.rejects(asUser(VET, `select cms_approve_jobs(array['${id}']::uuid[], true)`), /administratorius/);
+});
+
+test("emergency stop in GVET: a released, approved job is not handed out; treatments are not involved", async () => {
+  const d = delproWith();
+  const ids = await approvedBatch([await item("LT000007300339", { start_local: "2099-12-10T08:00", end_local: "2099-12-11T08:00" })]);
+  await release(ids.LT000007300339);
+  await asUser(VET, `select cms_set_outbound_enabled(false)`);
+  assert.equal(await cms.runCmsOutbound(d, { jobId: ids.LT000007300339 }), 0);
+  assert.equal(d.calls.filter(([op]) => op === "CreateData").length, 0);
+  assert.equal((await job(ids.LT000007300339)).status, "approved");
+  await asUser(ADMIN, `select cms_set_outbound_enabled(true, true)`);
+  await asUser(ADMIN, `select cms_cancel_jobs(array['${ids.LT000007300339}']::uuid[])`);
+});
+
+test("live read: all milk settings in one read (no 500 limit), stats, incomplete when capped or when the bulk list missed keys", async () => {
+  const d = delproWith({ existingSortCow: true });
+  for (let i = 0; i < 700; i += 1) {
+    d.db.AnimalMilkSetting[30000 + i] = { Key: String(30000 + i), Animal: `00000000-0000-4000-8000-${String(i).padStart(12, "0")}` };
+    d.db.AnimalActionSetting[60000 + i] = { Key: String(60000 + i), AnimalMilkSetting: String(30000 + i), ActionType: "SortCow", Active: "true", StartDate: "2024-01-01T00:00:00Z", EndDate: "2024-01-02T00:00:00Z", IsValidForSession1: "true" };
+  }
+  const full = await cms.readLiveState(d, { maxRows: 5000, rowCap: 1000 });
+  assert.equal(full.complete, true, full.errors.join());
+  assert.equal(full.actions.length, 701);
+  assert.ok(full.actions.every((a) => a.animal_guid));
+  assert.equal(full.stats.milk_settings_returned, 702);
+  const getDataCalls = d.calls.filter(([op]) => op === "GetData").length;
+  assert.ok(getDataCalls <= 4, `bulk reads, not per-key lookups (${getDataCalls})`);
+
+  // top reached -> incomplete
+  assert.equal((await cms.readLiveState(d, { maxRows: 701, rowCap: 1000 })).complete, false);
+  // the bulk list silently lacks keys that exist when asked by Key -> it was truncated -> incomplete
+  const t = fakeDelpro({ hideFromBulk: (name, r) => name === "AnimalMilkSetting" && Number(r.Key) >= 30690 });
+  Object.assign(t.db, d.db);
+  const trunc = await cms.readLiveState(t, { maxRows: 5000, rowCap: 1000 });
+  assert.equal(trunc.complete, false);
+  assert.equal(trunc.stats.milk_settings_found_by_key, 10);
+  assert.ok(trunc.actions.every((a) => a.animal_guid), "found-by-key settings still mapped");
+  // a reference DelPro really doesn't have: reported, the scan stays complete
+  delete d.db.AnimalMilkSetting[30001];
+  const absent = await cms.readLiveState(d, { maxRows: 5000, rowCap: 1000 });
+  assert.equal(absent.complete, true);
+  assert.equal(absent.stats.milk_settings_absent, 1);
 });
 
 test("live state: DelPro SortCow settings + sort areas reach GVET, mapped to the animal by GUID", async () => {

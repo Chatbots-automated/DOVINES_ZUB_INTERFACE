@@ -1,6 +1,6 @@
 {
   "name": "dovines-delpro-worker",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Runs on the Dovin\u0117s \u017d\u016aB farm PC: DelPro -> GVET PRO herd + catalog sync and GVET PRO -> DelPro treatment write-back.",
   "type": "module",

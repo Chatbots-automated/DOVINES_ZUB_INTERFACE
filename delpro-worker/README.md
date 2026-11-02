@@ -121,6 +121,12 @@ GVET hands out a job only after an admin released that single job (`npm run cms:
 test. `npm run cms:dry-run -- <job>` (reads only), `cms:live` (DelPro SortCow state → GVET), `cms:inspect` (GetMetadata + samples).
 Farm steps: [`DEPLOY-WINDOWS.md`](DEPLOY-WINDOWS.md) §11.
 
+0049: verified CreateData (job 443b4846…, period mode). Claims also need GVET's `cms_outbound_enabled` (emergency stop) and, for routine
+sending, the operator's `cms_destination_verified`. `cms:live` reads all SortCow settings and ALL AnimalMilkSetting records in one
+GetData each (`CMS_LIVE_MAX_ROWS`, no paging exists) — complete only when neither read hit `top` / the known cap and no referenced
+milk setting was found only by key; exits 2 otherwise. Install / repair / status / upgrade: `scripts\gvet-worker.ps1` (§12).
+One continuous worker per folder (`logs\worker.lock`).
+
 ## Treatment write-back
 
 Preferred order (see ../AGENTS.md): DelPro's own import function → UI automation → direct SQL. The shipped

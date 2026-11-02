@@ -2408,6 +2408,9 @@ end $$;
 select 'assert' as step, '0046 frequency + duration: required, stored, in the plan, never defaulted' as what;
 
 -- 0048. CMS atskyrimai: draft -> submit -> admin approval -> gated worker claim -> report; nothing assumed about DelPro
+-- (0049's switches: GVET sending on and the destination checked, so the 0048 gates are what's tested here; 0049 block below)
+update system_settings set setting_value = 'true' where setting_key = 'cms_outbound_enabled';
+update system_settings set setting_value = '{"note":"test"}' where setting_key = 'cms_destination_verified';
 insert into animals (tag_no, animal_no, active, source, delpro_object_guid) values
   ('LT0000CMS00001', 'C1', true, 'delpro', 'c0000000-0000-4000-8000-000000000001'),
   ('LT0000CMS00002', null, true, 'vic', 'c0000000-0000-4000-8000-000000000002'),
@@ -2596,3 +2599,77 @@ do $$ begin
 end $$;
 reset role;
 select 'assert' as step, '0048 CMS: validation, submit, admin-only approval, gated single claim, readback review, adopt, mode verification' as what;
+
+-- 0049. CMS production gates: emergency stop (any staff), admin-only enable, destination check for routine sends, live reasons
+insert into animals (tag_no, animal_no, active, source, delpro_object_guid) values
+  ('LT0000CMS00010', 'C10', true, 'delpro', 'c0000000-0000-4000-8000-000000000010'),
+  ('LT0000CMS00011', 'C11', false, 'delpro', 'c0000000-0000-4000-8000-000000000011');
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000b',false);
+select set_config('t.cms49', cms_save_batch(jsonb_build_object('submit', true, 'items', jsonb_build_array(
+  jsonb_build_object('animal_id', (select id from animals where tag_no = 'LT0000CMS00010'), 'mode', 'period', 'start_local', '2099-12-03T08:00', 'end_local', '2099-12-05T08:00', 'sessions', '[1]'::jsonb))))->>'batch_id', false);
+-- the vet stops CMS sending (emergency stop) but can't switch it back on
+select cms_set_outbound_enabled(false);
+do $$ declare blocked boolean := false; begin
+  begin perform cms_set_outbound_enabled(true, true);
+  exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: vet enabled CMS sending'; end if;
+end $$;
+reset role;
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000a',false);
+select cms_approve_jobs(array(select id from cms_separation_jobs where batch_id = current_setting('t.cms49')::uuid), true);
+reset role;
+-- period is verified, but sending is stopped: nothing is handed out
+set role service_role;
+do $$ begin if cms_claim_next_job('{"worker_id":"w1"}') is not null then raise exception 'claim while CMS sending is stopped'; end if; end $$;
+reset role;
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000a',false);
+do $$ declare blocked boolean := false; begin
+  begin perform cms_set_outbound_enabled(true, false);
+  exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: enable without confirmation'; end if;
+end $$;
+select cms_set_outbound_enabled(true, true);
+-- destination not confirmed by the operator: routine sending waits
+select cms_set_destination_verified(false);
+do $$ declare blocked boolean := false; begin
+  begin perform cms_set_destination_verified(true, true, '');
+  exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: destination verified without a note'; end if;
+end $$;
+reset role;
+set role service_role;
+do $$ begin if cms_claim_next_job('{"worker_id":"w1"}') is not null then raise exception 'routine claim without a verified destination'; end if; end $$;
+reset role;
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000a',false);
+select cms_set_destination_verified(true, true, 'Rūšiavimo patalpa 1 — patikrinta');
+reset role;
+set role service_role;
+do $$ declare r jsonb; begin
+  r := cms_claim_next_job('{"worker_id":"w1"}');
+  if r is null or r#>>'{snapshot,orn}' <> 'LT0000CMS00010' then raise exception 'routine claim expected: %', r; end if;
+  if cms_claim_next_job('{"worker_id":"w2"}') is not null then raise exception 'second claim of the same job'; end if;
+  -- written and verified; DelPro key read back
+  perform cms_report_job(jsonb_build_object('job_id', r->>'job_id', 'worker_id', 'w1', 'phase', 'start', 'milk_setting_key', '777'));
+  perform cms_report_job(jsonb_build_object('job_id', r->>'job_id', 'worker_id', 'w1', 'phase', 'result', 'outcome', 'success', 'action_key', '50001',
+    'readback', jsonb_build_object('verified', true, 'diffs', '[]'::jsonb)));
+end $$;
+-- live read: the record was disabled by hand in DelPro; unmatched rows are explained; an incomplete scan removes nothing
+select 'cms_live49' as step, r->'unmatched_reasons' as reasons, r->'matched' as matched, r->'complete' as complete from (select cms_live_upload('{"complete":false,"actions":[
+  {"key":"50001","milk_setting_key":"777","animal_guid":"c0000000-0000-4000-8000-000000000010","action_type":"SortCow","active":false,"start_at":"2099-12-03T06:00:00Z","end_at":"2099-12-05T06:00:00Z","sessions":[1]},
+  {"key":"50002","milk_setting_key":"778","animal_guid":null,"action_type":"SortCow","active":true,"sessions":[1]},
+  {"key":"50003","milk_setting_key":"779","animal_guid":"c0000000-0000-4000-8000-0000000000ff","action_type":"SortCow","active":true,"sessions":[1]},
+  {"key":"50004","milk_setting_key":"780","animal_guid":"c0000000-0000-4000-8000-000000000011","action_type":"SortCow","active":true,"sessions":[1]}]}'::jsonb) as r) x;
+do $$ begin if cms_claim_next_job('{"worker_id":"w1"}') is not null then raise exception 'a finished job must never be handed out again'; end if; end $$;
+reset role;
+do $$ begin
+  if (select delpro_active from vw_cms_separation_jobs where batch_id = current_setting('t.cms49')::uuid) is not false then raise exception 'manual disable in DelPro must show on the job'; end if;
+  if (select status from cms_separation_jobs where batch_id = current_setting('t.cms49')::uuid) <> 'success' then raise exception 'job must stay success (not re-queued)'; end if;
+  if (select count(*) from cms_live_action_settings where removed_at is not null and action_key = '11981') > 0 then raise exception 'incomplete scan must not remove'; end if;
+  if (select setting_value::jsonb->'unmatched_reasons' from system_settings where setting_key = 'cms_live_last_refresh')
+     <> '{"animal_inactive_in_gvet":1,"animal_not_in_gvet":1,"milk_setting_without_animal":1}'::jsonb then raise exception 'unmatched reasons wrong'; end if;
+end $$;
+select 'assert' as step, '0049 CMS: emergency stop, admin enable, destination gate, single claim, disabled-in-DelPro visible, reasons, no removal on incomplete' as what;

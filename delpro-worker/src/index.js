@@ -12,7 +12,7 @@ import { checkCatalogJob } from "./catalog-write-check.js";
 import { TreatmentWriteError, liveChecks, treatmentProblems, writeTreatment as writeGatewayTreatment } from "./treatment-gateway.js";
 import { loadTreatmentModel, validateModel } from "./treatment-model.js";
 import { GatewayError } from "./gateway.js";
-import { prepareJob, runCmsLive, runCmsOutbound, snapshotProblems } from "./cms-separation.js";
+import { pingGateway, prepareJob, runCmsLive, runCmsOutbound, snapshotProblems } from "./cms-separation.js";
 import { log } from "./log.js";
 
 // Dovinės ŽŪB DelPro worker (Priedas §3-§4). Runs on the farm PC next to
@@ -28,7 +28,13 @@ import { log } from "./log.js";
 // outage is logged and retried on the next tick, never crashes the loop.
 
 const MAX_JOBS_PER_TICK = 20;
-const state = { lastInboundOk: null, lastCatalogOk: null, lastError: null, lastCmsLiveOk: null };
+const state = {
+  lastInboundOk: null, lastCatalogOk: null, lastError: null,
+  lastCmsLiveOk: null, lastCmsLive: null, gatewayOkAt: null, gatewayError: null,
+  // --service is passed only by the scheduled task (scripts/gvet-worker.ps1): "automatic worker running" in GVET
+  startedBy: process.argv.includes("--service") ? "task" : "manual",
+  startedAt: new Date().toISOString(),
+};
 
 function treatmentModelReady() {
   try {
@@ -56,6 +62,14 @@ async function heartbeat() {
     cms_outbound_mode: config.cmsOutboundMode,
     cms_default_sort_area_key: config.cmsDefaultSortAreaKey || null,
     cms_last_live_ok: state.lastCmsLiveOk,
+    cms_last_live: state.lastCmsLive,
+    gateway_ok_at: state.gatewayOkAt,
+    gateway_error: state.gatewayError,
+    started_by: state.startedBy,
+    started_at: state.startedAt,
+    pid: process.pid,
+    node: process.version,
+    root: ROOT,
     last_error: state.lastError,
   });
 }
@@ -296,8 +310,73 @@ export async function runCmsLiveIfDue({ force = false } = {}) {
   if (!force && !due && !(await gvet.cmsLiveRequested())) return null;
   cmsLiveAt = Date.now();
   const res = await runCmsLive(createGatewayClient());
-  state.lastCmsLiveOk = new Date().toISOString();
+  state.lastCmsLive = { at: new Date().toISOString(), complete: !!res?.complete, received: res?.received ?? null };
+  if (res?.complete) state.lastCmsLiveOk = state.lastCmsLive.at;
   return res;
+}
+
+// Read-only Gateway reachability for the activation checks (every 10 min).
+let gatewayPingAt = 0;
+export async function pingGatewayIfDue() {
+  if (config.catalogSource !== "gateway" || Date.now() - gatewayPingAt < 600_000) return;
+  gatewayPingAt = Date.now();
+  try {
+    await pingGateway(createGatewayClient());
+    state.gatewayOkAt = new Date().toISOString();
+    state.gatewayError = null;
+  } catch (err) {
+    state.gatewayError = `${new Date().toISOString()} ${err.message}`;
+  }
+}
+
+/**
+ * One continuous worker per folder: logs\worker.lock holds the PID. A second `npm start` / task instance exits instead of
+ * running beside the first (two loops would claim jobs side by side). A lock left by a dead process is taken over.
+ */
+function acquireSingleInstanceLock() {
+  const dir = path.join(ROOT, "logs");
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, "worker.lock");
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      fs.writeFileSync(file, String(process.pid), { flag: "wx" });
+      const release = () => {
+        try {
+          if (fs.readFileSync(file, "utf8").trim() === String(process.pid)) fs.unlinkSync(file);
+        } catch {
+          /* already gone */
+        }
+      };
+      process.on("exit", release);
+      setInterval(() => {
+        try {
+          const now = new Date();
+          fs.utimesSync(file, now, now);
+        } catch {
+          /* ignore */
+        }
+      }, 30_000).unref();
+      for (const sig of ["SIGINT", "SIGTERM", "SIGBREAK"]) process.on(sig, () => process.exit(0));
+      return true;
+    } catch (err) {
+      if (err.code !== "EEXIST") throw err;
+      const pid = Number(fs.readFileSync(file, "utf8").trim());
+      let alive = false;
+      try {
+        alive = Number.isInteger(pid) && pid > 0 && pid !== process.pid && process.kill(pid, 0);
+      } catch {
+        alive = false;
+      }
+      // a live PID with a lock the worker kept touching = really running; an old lock (PID reused by Windows) is stale
+      const fresh = Date.now() - fs.statSync(file).mtimeMs < 120_000;
+      if (alive && fresh) {
+        log.error(`Darbininkas jau veikia (PID ${pid}, ${file}) — antras nepaleidžiamas.`);
+        return false;
+      }
+      fs.unlinkSync(file);
+    }
+  }
+  return false;
 }
 
 function cmsJobArg(flag) {
@@ -414,7 +493,13 @@ async function main() {
     return;
   }
   if (process.argv.includes("--cms-live")) {
-    await runCmsLiveIfDue({ force: true });
+    // nonzero unless the whole scan completed (nothing is ever removed in GVET from an incomplete one)
+    const res = await runCmsLiveIfDue({ force: true });
+    if (!res) throw new Error("CMS būsena nenuskaityta: reikia CATALOG_SOURCE=gateway.");
+    if (!res.complete) {
+      log.error(`CMS būsena NEPILNA: ${(res.errors ?? []).join(" ") || "žr. aukščiau"}`);
+      process.exitCode = 2;
+    }
     return;
   }
   if (process.argv.includes("--cms-inspect")) {
@@ -452,6 +537,10 @@ async function main() {
     return;
   }
 
+  if (!acquireSingleInstanceLock()) {
+    process.exitCode = 3;
+    return;
+  }
   let inboundBusy = false;
   let outboundBusy = false;
   let catalogBusy = false;
@@ -461,6 +550,7 @@ async function main() {
     cmsBusy = true;
     await safely("cms", runCms);
     await safely("cms live", () => runCmsLiveIfDue());
+    await safely("gateway ping", pingGatewayIfDue);
     cmsBusy = false;
   };
   const catalogTick = async () => {

@@ -95,3 +95,23 @@ test("schedule text, duration helper and items", () => {
   assert.equal(m.vilniusNowLocal(new Date("2026-07-01T10:00:00Z")), "2026-07-01T13:00");
   assert.equal(m.vilniusNowLocal(new Date("2026-12-01T10:00:00Z")), "2026-12-01T12:00");
 });
+
+const actText = fs.readFileSync(path.join(root, "src/lib/cms/activation.ts"), "utf8");
+const act = await import("data:text/javascript;base64," + Buffer.from(ts.transpileModule(actText, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText).toString("base64"));
+
+test("activation: 'fully active' only when every check passes", () => {
+  const now = Date.parse("2026-11-03T12:00:00Z");
+  const good = {
+    verified_modes: ["period"], live_last_refresh: { finished_at: "2026-11-03T11:00:00Z", complete: true }, worker_cms_mode: "gateway",
+    worker_seen_at: "2026-11-03 11:59:00+00", outbound_enabled: true, destination_verified: { note: "Patalpa 1", by_name: "Admin" },
+    worker: { has_cms: true, started_by: "task", gateway_ok_at: "2026-11-03T11:55:00Z", version: "0.2.0" },
+  };
+  assert.equal(act.fullyActive(act.activationChecks(good, now)), true);
+  for (const [k, v] of [["outbound_enabled", false], ["destination_verified", null], ["worker_cms_mode", "off"], ["verified_modes", []],
+    ["live_last_refresh", { finished_at: "2026-11-03T11:00:00Z", complete: false }], ["worker_seen_at", "2026-11-03 10:00:00+00"]]) {
+    assert.equal(act.fullyActive(act.activationChecks({ ...good, [k]: v }, now)), false, k);
+  }
+  assert.equal(act.fullyActive(act.activationChecks({ ...good, worker: { ...good.worker, started_by: "manual" } }, now)), false);
+  assert.equal(act.fullyActive(act.activationChecks({ ...good, worker: { ...good.worker, has_cms: false } }, now)), false);
+  assert.equal(act.fullyActive(act.activationChecks(null, now)), false);
+});

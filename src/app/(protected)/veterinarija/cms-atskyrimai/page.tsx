@@ -5,10 +5,11 @@ import { PageHeader } from "@/components/layout/page-header";
 import { CmsNewSeparation, type CmsDraft, type CmsDraftSummary } from "@/components/cms/new-separation";
 import { CmsHistory } from "@/components/cms/separation-history";
 import { CmsActiveSeparations, type CmsActiveRow } from "@/components/cms/active-separations";
+import { CmsActivationPanel } from "@/components/cms/activation-panel";
 import { CMS_OPEN_STATUSES } from "@/lib/cms/status";
 import { emptySettings, toVilniusLocal, type CmsDraftRow, type CmsSettings } from "@/lib/cms/separation";
 import { cn } from "@/lib/utils";
-import type { CmsMode, CmsSeparationJobView } from "@/lib/supabase/types";
+import type { CmsLiveActionSettingRow, CmsMode, CmsSeparationJobView } from "@/lib/supabase/types";
 
 // CMS atskyrimai (0048, farm's request — billed separately, not in Priedas Nr. 1).
 const TABS = [
@@ -140,14 +141,21 @@ export default async function CmsAtskyrimaiPage({ searchParams }: { searchParams
       />
     );
   } else {
-    const liveRes = await supabase
-      .from("cms_live_action_settings")
-      .select("*")
-      .eq("action_type", "SortCow")
-      .is("removed_at", null)
-      .order("start_at", { ascending: false })
-      .limit(1000);
-    const live = liveRes.data ?? [];
+    // only SortCow rows tied to a GVET animal (the rest are explained by reason counts); paged past PostgREST's 1000-row cap
+    const live: CmsLiveActionSettingRow[] = [];
+    for (let from = 0; from < 10000; from += 1000) {
+      const { data } = await supabase
+        .from("cms_live_action_settings")
+        .select("*")
+        .eq("action_type", "SortCow")
+        .is("removed_at", null)
+        .not("animal_id", "is", null)
+        .order("start_at", { ascending: false })
+        .order("action_key")
+        .range(from, from + 999);
+      live.push(...(data ?? []));
+      if ((data ?? []).length < 1000) break;
+    }
     const animalIds = [...new Set(live.map((l) => l.animal_id).filter((x): x is string => !!x))];
     const keys = live.map((l) => l.action_key);
     const animals = new Map<string, { tag_no: string; animal_no: string | null }>();
@@ -196,6 +204,7 @@ export default async function CmsAtskyrimaiPage({ searchParams }: { searchParams
             </Link>
           ))}
         </nav>
+        {!migrationMissing && <CmsActivationPanel status={status ?? null} isAdmin={isAdmin} canWrite={canWrite} compact={tab !== "istorija"} />}
         {body}
       </div>
     </div>

@@ -9,7 +9,7 @@ const KEY = { Diagnosis: "Code", Drug: "Code", Treatment: "Code", DrugParameters
   AnimalMilkSetting: "Key", AnimalActionSetting: "Key", SortArea: "Key" };
 const unescape = (s) => s.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, "&");
 
-export function fakeDelpro({ onCreate, timeoutAfterCreate = 0 } = {}) {
+export function fakeDelpro({ onCreate, timeoutAfterCreate = 0, hideFromBulk = null } = {}) {
   const db = {};
   const calls = [];
   let seq = 1000;
@@ -25,6 +25,9 @@ export function fakeDelpro({ onCreate, timeoutAfterCreate = 0 } = {}) {
       const props = [...req.matchAll(/<property name="(\w+)"\/>/g)].map((m) => m[1]);
       let found = Object.values(rows(name));
       for (const [, k, v] of req.matchAll(/<equal name="(\w+)">([^<]*)<\/equal>/g)) found = found.filter((r) => String(r[k] ?? "") === unescape(v));
+      const top = Number(req.match(/<object name="\w+" top="(\d+)"/)?.[1] ?? 0);
+      if (top > 0) found = found.slice(0, top);
+      if (hideFromBulk && !/<where>/.test(req)) found = found.filter((r) => !hideFromBulk(name, r));
       const objs = found
         .map((r) => `<object name="${name}">${props.map((p) => (r[p] == null || r[p] === "" ? `<property name="${p}" />` : `<property name="${p}">${escapeXml(r[p])}</property>`)).join("")}</object>`)
         .join("");

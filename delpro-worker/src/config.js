@@ -75,6 +75,8 @@ export const config = {
   cmsDefaultSortAreaKey: env("CMS_DEFAULT_SORT_AREA_KEY", ""),
   // DelPro SortCow state -> GVET "Aktyvūs atskyrimai" (read-only; also on "Atnaujinti" in GVET). 0 = only on request.
   cmsLiveIntervalMin: Number(env("CMS_LIVE_INTERVAL_MIN", "60")),
+  // `top` for the CMS live read (one GetData per object, no verified paging). A read returning this many rows is incomplete.
+  cmsLiveMaxRows: Number(env("CMS_LIVE_MAX_ROWS", "20000")),
 };
 
 export function requireConfig() {
@@ -92,6 +94,7 @@ export function requireConfig() {
   if (!["off", "dry-run", "gateway"].includes(config.cmsOutboundMode)) missing.push("CMS_OUTBOUND_MODE (off|dry-run|gateway)");
   if (config.cmsOutboundMode === "gateway" && !config.gateway.user) missing.push("DELPRO_GATEWAY_USER");
   if (!(config.cmsPollIntervalSec >= 1)) missing.push("CMS_POLL_INTERVAL_SEC");
+  if (!(config.cmsLiveMaxRows > 0)) missing.push("CMS_LIVE_MAX_ROWS");
   if (missing.length) throw new Error(`Trūksta / neteisinga konfigūracija: ${missing.join(", ")}`);
 }
 

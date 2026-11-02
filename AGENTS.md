@@ -253,6 +253,11 @@ not look for Žibartoniai's 0013–0021 VIC/UNIFORM history here.
   but wasn't verified is `needs_review` (admin: confirm absent / adopt key), never re-sent. Live DelPro SortCow state is a read-only
   mirror (`cms_live_action_settings`, `cms_live_upload`). UI calls `/api/cms` (Route Handler + fetch). Tests: scenario 0048 block,
   `delpro-worker/test/cms-separation.test.js`, `npm run test:cms`.
+- **CMS production** (0049): `cms_outbound_enabled` (GVET master switch; any staff may stop, admin + confirmation to start) gates every
+  claim; routine (non-single) claims also need `cms_destination_verified` (operator's note — GVET still never picks a SortArea).
+  `cms_live_upload` counts why rows have no GVET animal; the view shows each job's DelPro record (`delpro_active` …) — a record disabled in
+  DelPro is never re-created (finished jobs are never handed out again). Activation checklist = `src/lib/cms/activation.ts` (heartbeat
+  `started_by=task` comes from `--service`, passed only by `scripts/gvet-worker.ps1`).
 - **DelPro write path** — preferred order: DelPro's own import function → UI automation → direct SQL insert into DelPro's
   database. Direct SQL bypasses DelPro's own logic and may affect DeLaval support: only with the farm's written OK.
   All DelPro-specific SQL lives in `delpro-worker/queries/*.sql`; files marked `TODO(discovery)` are placeholders and

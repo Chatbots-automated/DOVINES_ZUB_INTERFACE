@@ -1209,6 +1209,8 @@ export interface Database {
       cms_set_mode_verified: { Args: { p_mode: CmsMode; p_verified: boolean; p_confirm?: boolean }; Returns: { ok: boolean; verified_modes: CmsMode[] } };
       cms_request_live_refresh: { Args: Record<string, never>; Returns: { ok: boolean; message: string } };
       cms_status: { Args: Record<string, never>; Returns: CmsStatus };
+      cms_set_outbound_enabled: { Args: { p_enabled: boolean; p_confirm?: boolean }; Returns: { ok: boolean; enabled: boolean; message: string } };
+      cms_set_destination_verified: { Args: { p_verified: boolean; p_confirm?: boolean; p_note?: string | null }; Returns: { ok: boolean } };
       analytics_monthly: { Args: { p_from: string; p_to: string }; Returns: { month: string; purchased: number; consumed: number }[] };
       analytics_spend_by_category: { Args: { p_from: string; p_to: string }; Returns: { category: ProductCategory; spent: number; uses: number }[] };
       analytics_top_products: {
@@ -1534,6 +1536,13 @@ export type CmsSeparationJobView = CmsSeparationJobRow & {
   created_by_name: string | null;
   approved_by_name: string | null;
   problems: CmsProblem[];
+  // 0049: the DelPro record this job created, as last read
+  delpro_active: boolean | null;
+  delpro_start_at: string | null;
+  delpro_end_at: string | null;
+  delpro_sessions: number[] | null;
+  delpro_seen_at: string | null;
+  delpro_removed_at: string | null;
 };
 
 export type CmsSeparationEventRow = {
@@ -1564,13 +1573,41 @@ export type CmsLiveActionSettingRow = {
 
 export type CmsSortAreaRow = { area_key: string; area_number: string | null; area_name: string | null; seen_at: string };
 
+export type CmsLiveRefreshInfo = {
+  finished_at?: string;
+  received?: number;
+  matched?: number;
+  effective_active?: number;
+  complete?: boolean;
+  unmatched_animals?: number;
+  unmatched_reasons?: { milk_setting_without_animal?: number; animal_not_in_gvet?: number; animal_inactive_in_gvet?: number };
+  removed?: number;
+  errors?: string[];
+  stats?: Record<string, number>;
+};
+
 export type CmsStatus = {
   verified_modes: CmsMode[];
   single_job_id: string | null;
-  live_last_refresh: { finished_at?: string; received?: number; complete?: boolean; unmatched_animals?: number; errors?: string[] } | null;
+  live_last_refresh: CmsLiveRefreshInfo | null;
   live_requested_at: string | null;
   worker_cms_mode: string | null;
   worker_seen_at: string | null;
+  // 0049
+  outbound_enabled: boolean;
+  destination_verified: { by?: string; by_name?: string | null; at?: string; note?: string } | null;
+  worker: {
+    version: string | null;
+    host: string | null;
+    has_cms: boolean;
+    started_by: string | null;
+    gateway_ok_at: string | null;
+    gateway_error: string | null;
+    cms_last_live: { at: string; complete: boolean; received: number | null } | null;
+    outbound_mode: string | null;
+    last_error: string | null;
+  } | null;
+  any_success: boolean;
 };
 
 export type CmsCheckResult = {

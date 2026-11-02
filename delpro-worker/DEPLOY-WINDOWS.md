@@ -410,6 +410,69 @@ establishes. Until then keep `CMS_OUTBOUND_MODE=off` — preparing and approving
 7. Routine sending: set `CMS_OUTBOUND_MODE=gateway` in `.env` and restart the task. To stop at any time: set it back to `off` and
    restart, or *Sustabdyti* the mode in GVET (approved jobs then wait).
 
+## 12. Production: automatic worker + CMS activation (0049)
+
+All commands in **PowerShell started with "Run as Administrator"** while logged in as the farm account (the task runs as the
+account that installs it, at its logon). The script never deletes a task it did not create, never starts a second worker, never
+prints secrets and never changes `OUTBOUND_MODE` (treatments).
+
+**Upgrade to this package** (keeps `.env`, `treatment-model.json`, `logs\`; backs the old code up to `C:\GVET\backup\…`; adds only
+missing CMS keys to `.env`, all with `CMS_OUTBOUND_MODE=off`; re-registers the task as "at logon of this account"):
+
+```powershell
+$zip = "$env:USERPROFILE\Downloads\delpro-worker-0049.zip"
+Unblock-File $zip
+$tmp = "$env:TEMP\gvet-worker-0049"; Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
+Expand-Archive $zip $tmp
+powershell -ExecutionPolicy Bypass -File "$tmp\delpro-worker\scripts\gvet-worker.ps1" -Action upgrade -Source "$tmp\delpro-worker" -Dir C:\GVET\delpro-worker -StopRunning
+```
+
+`-StopRunning` is needed this once: the worker running now is the pre-0048 version (its heartbeat has no CMS fields), started by the
+earlier task, and does not mark itself. If no task of ours exists yet, finish with `-Action install`:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File C:\GVET\delpro-worker\scripts\gvet-worker.ps1 -Action install -StopRunning
+```
+
+If install stops with *"A task named GVET-DelPro-Worker exists that this script did not create"* or *"Task name already taken but not
+readable"*: that is the cause of the earlier *Cannot create a file when that file already exists* (a task with that name, created
+elevated / as SYSTEM, invisible to a non-elevated `Get-ScheduledTask`). Open Task Scheduler as Administrator, look at it, and
+delete or rename it yourself if it is the old GVET task; then run install again.
+
+**Operate / diagnose:**
+
+```powershell
+$w = 'C:\GVET\delpro-worker\scripts\gvet-worker.ps1'
+powershell -ExecutionPolicy Bypass -File $w -Action status     # task, processes (duplicates flagged), .env modes, GVET + Gateway reachability, CMS live result, log tail
+powershell -ExecutionPolicy Bypass -File $w -Action logs -Follow
+powershell -ExecutionPolicy Bypass -File $w -Action restart
+powershell -ExecutionPolicy Bypass -File $w -Action cms-off    # emergency: CMS_OUTBOUND_MODE=off + restart; treatments keep running
+```
+
+Starts automatically when this account logs on to Windows. Starting **without** anyone logged on needs a task running as a service
+account (e.g. SYSTEM, "Run whether user is logged on or not") — not set up by this script; test it separately before relying on it.
+A second copy started by hand exits by itself (`logs\worker.lock`).
+
+**Verify the complete CMS read** (read-only; writes nothing anywhere; exit code 0 only when the scan is complete):
+
+```powershell
+Set-Location C:\GVET\delpro-worker
+npm.cmd run cms:live; "exit code: $LASTEXITCODE"
+```
+
+Expected: `"complete":true`, `received` = number of SortCow records, `matched` = those tied to an active GVET animal, and
+`unmatched_reasons` explaining the rest (`animal_not_in_gvet` = DelPro milk settings of animals GVET doesn't have — culled/sold
+animals DelPro keeps; `milk_setting_without_animal`; `animal_inactive_in_gvet`). An incomplete scan exits 2 and removes nothing in GVET.
+
+**Activation** (GVET → CMS atskyrimai → *Laukia perdavimo / istorija* → *Aktyvavimas*). "Visiškai aktyvu" appears only when all hold:
+CMS worker installed · GVET API · Gateway · complete CMS read (< 26 h) · automatic worker (task) running · `CMS_OUTBOUND_MODE=gateway` ·
+GVET CMS sending switched on · a mode verified (*Nurodytam laikotarpiui* after job 443b4846… — admin presses *Leisti*) · physical
+destination confirmed by the farm operator (*Patvirtinti fizinę vietą*, with a note where the test cow went).
+Turn on `CMS_OUTBOUND_MODE=gateway` in `.env` only after the destination check; then `-Action restart`.
+
+**Emergency stop**: GVET *Avarinis stabdymas* (any staff member) or `-Action cms-off` on the PC. Either stops NEW CMS writes only.
+Neither — nor stopping the whole worker — cancels separations already created in DelPro: disable those in DelPro itself.
+
 ## Not enabled by this guide
 
 - **Catalog writes** need the farm's agreement, then `CATALOG_WRITE_ENABLED=true`, the GVET switch, and a validated test record
