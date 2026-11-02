@@ -17,6 +17,7 @@ import {
   ShieldCheck,
   Layers,
   KeyRound,
+  Split,
   type LucideIcon,
 } from "lucide-react";
 
@@ -52,6 +53,8 @@ export const vetNavGroups: NavGroup[] = [
       { href: "/veterinarija/sekinimas", label: "Sėklinimas", icon: Dna },
       { href: "/veterinarija/biocidai", label: "Biocidai", icon: Droplet },
       { href: "/veterinarija/nagos", label: "Nagos", icon: Footprints },
+      // 0048 — farm's request (2026-11), billed separately
+      { href: "/veterinarija/cms-atskyrimai", label: "CMS atskyrimai", icon: Split },
     ],
   },
   {

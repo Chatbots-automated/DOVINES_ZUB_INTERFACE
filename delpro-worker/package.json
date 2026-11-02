@@ -17,7 +17,11 @@
     "catalog:write-check": "node src/index.js --write-check",
     "catalog:write-one": "node src/index.js --write-one",
     "gateway-discover": "node src/discover-gateway.js",
-    "treatment-probe": "node src/treatment-probe.mjs"
+    "treatment-probe": "node src/treatment-probe.mjs",
+    "cms:dry-run": "node src/index.js --cms-dry-run",
+    "cms:write-one": "node src/index.js --cms-write-one",
+    "cms:live": "node src/index.js --cms-live",
+    "cms:inspect": "node src/index.js --cms-inspect"
   },
   "dependencies": {
     "mssql": "^11.0.1",

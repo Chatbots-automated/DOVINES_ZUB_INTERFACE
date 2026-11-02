@@ -40,4 +40,10 @@ export const gvet = {
   catalogJobResult: (body) => rpc("delpro_catalog_job_result", body),
   // 0039: one job as stored (read-only) — for the write check / one-shot write
   catalogGetJob: (body) => rpc("delpro_catalog_get_job", body),
+  // CMS atskyrimai (0048) — unnamed jsonb bodies
+  cmsClaimJob: (body) => rpc("cms_claim_next_job", body),
+  cmsReportJob: (body) => rpc("cms_report_job", body),
+  cmsGetJob: (body) => rpc("cms_get_job", body),
+  cmsLiveRequested: () => rpc("cms_live_requested", {}),
+  cmsLiveUpload: (body) => rpc("cms_live_upload", body),
 };

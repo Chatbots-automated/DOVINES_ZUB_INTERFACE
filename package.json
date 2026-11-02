@@ -11,7 +11,8 @@
     "test:worker": "node --test delpro-worker/test/",
     "typecheck": "tsc --noEmit",
     "test:guards": "node --test supabase/tests/frontend-guards.test.mjs",
-    "test:reports": "node --test netlify/test/delpro-report.test.mjs"
+    "test:reports": "node --test netlify/test/delpro-report.test.mjs",
+    "test:cms": "node --test supabase/tests/cms-separation.test.mjs"
   },
   "dependencies": {
     "@radix-ui/react-avatar": "^1.2.6",

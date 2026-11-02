@@ -352,6 +352,64 @@ It writes only when BOTH hold:
    `Dosage`, `DrugParams`, `Frequency` and `TreatCowDays` from the vet's entry in GVET.
 Without the model the worker claims nothing: treatments wait in GVET as *Laukia siuntimo*, none is lost.
 
+## 11. CMS atskyrimai (0048)
+
+GVET prepares per-animal CMS sorting instructions (DelPro `AnimalActionSetting`, `ActionType=SortCow`), an admin approves them,
+and this worker writes them. **Only the reads are verified on this farm.** Whether DelPro accepts a CreateData of
+`AnimalActionSetting`, with which properties, and where the cow physically goes, is what the supervised single-animal test below
+establishes. Until then keep `CMS_OUTBOUND_MODE=off` — preparing and approving in GVET works regardless.
+
+1. Install the new package with section 8 (keeps `.env`). Then add the CMS lines to `.env` once, without touching anything else
+   (`OUTBOUND_MODE` for treatments is separate and stays as it is):
+
+   ```powershell
+   Set-Location C:\gvet\delpro-worker
+   Copy-Item .env ".env.backup-$(Get-Date -Format yyyyMMdd-HHmm)"
+   $add = @('CMS_OUTBOUND_MODE=off', 'CMS_POLL_INTERVAL_SEC=5', 'CMS_DEFAULT_SORT_AREA_KEY=1', 'CMS_LIVE_INTERVAL_MIN=60',
+            'DELPRO_GATEWAY_ANIMAL_ORN_PROPERTY=OfficialRegNumber')
+   if ((Get-Content .env -Raw) -notmatch "`n$") { Add-Content -Path .env -Value '' }   # last line must end with a newline
+   foreach ($line in $add) {
+     $name = $line.Split('=')[0]
+     if (-not (Select-String -Path .env -Pattern "^$name=" -Quiet)) { Add-Content -Path .env -Value $line }
+   }
+   Get-ScheduledTask -TaskName 'GVET-DelPro-Worker' | Stop-ScheduledTask
+   Get-ScheduledTask -TaskName 'GVET-DelPro-Worker' | Start-ScheduledTask
+   Get-Content .\logs\worker.log -Tail 5
+   ```
+
+   The start line must end with `CMS=off`. `CMS_DEFAULT_SORT_AREA_KEY` is only reported to GVET — it is **not** sent and is not
+   proven to route the cow.
+2. Read-only checks (write nothing):
+
+   ```powershell
+   npm.cmd run cms:inspect     # GetMetadata + sample rows of AnimalActionSetting / SortArea -> discovery\cms-*
+   npm.cmd run cms:live        # DelPro SortCow settings + sort areas -> GVET "Aktyvūs atskyrimai"
+   ```
+
+   Send the `discovery\cms-*` files to the developer: the metadata may show which properties are writable.
+3. In GVET → CMS atskyrimai: prepare ONE cow **without** an active separation, a short *Nurodytam laikotarpiui* window starting in
+   the next hours, the sessions you want. Submit; an admin approves it (*Patvirtinti*).
+4. Dry run of that job (reads only, prints the exact CreateData document, saves `dry-run\cms-<job>.json`):
+
+   ```powershell
+   npm.cmd run cms:dry-run -- <job-id>
+   ```
+
+5. GVET (admin) → *Leisti siųsti tik šią* on that job. Then ONE supervised write; `CMS_OUTBOUND_MODE` is set for this process
+   only, `.env` and the scheduled task keep `off`:
+
+   ```powershell
+   $env:CMS_OUTBOUND_MODE = 'gateway'; npm.cmd run cms:write-one -- <job-id>; Remove-Item Env:CMS_OUTBOUND_MODE
+   ```
+
+   It re-checks the animal (GUID + ORN), finds its single AnimalMilkSetting, refuses if DelPro already has an active SortCow,
+   writes, reads the record back and compares every property. Expected: `Rezultatas: success`. A mismatch or an unknown outcome
+   ends in *Reikia peržiūros* — check DelPro and use *Įrašo DelPro nėra* or *Priskirti DelPro įrašą*; it is never re-sent blindly.
+6. Check the setting in DelPro itself AND that the cow is physically sorted at the start time. Only then, in GVET, *Leisti* the mode
+   (*Nurodytam laikotarpiui*). *Neterminuotas* needs its own supervised test the same way. *Vienkartinis (Sort Once)* is not supported.
+7. Routine sending: set `CMS_OUTBOUND_MODE=gateway` in `.env` and restart the task. To stop at any time: set it back to `off` and
+   restart, or *Sustabdyti* the mode in GVET (approved jobs then wait).
+
 ## Not enabled by this guide
 
 - **Catalog writes** need the farm's agreement, then `CATALOG_WRITE_ENABLED=true`, the GVET switch, and a validated test record

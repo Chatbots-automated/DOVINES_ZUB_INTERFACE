@@ -5,7 +5,8 @@ import { GatewayError, escapeXml, parseDdmData } from "../src/gateway.js";
 // (GetData with <equal> filters, CreateData, UpdateData identified by the key
 // property). A TEST DOUBLE for our own logic — it is not evidence of how the
 // real Gateway behaves; that is what the on-farm test jobs establish.
-const KEY = { Diagnosis: "Code", Drug: "Code", Treatment: "Code", DrugParameters: "Key", TreatmentDrugUsage: "Key", DiagnosesAndTreatmentEvent: "ObjectGuid", Animal: "ObjectGuid" };
+const KEY = { Diagnosis: "Code", Drug: "Code", Treatment: "Code", DrugParameters: "Key", TreatmentDrugUsage: "Key", DiagnosesAndTreatmentEvent: "ObjectGuid", Animal: "ObjectGuid",
+  AnimalMilkSetting: "Key", AnimalActionSetting: "Key", SortArea: "Key" };
 const unescape = (s) => s.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, "&");
 
 export function fakeDelpro({ onCreate, timeoutAfterCreate = 0 } = {}) {

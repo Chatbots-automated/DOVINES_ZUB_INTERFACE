@@ -701,6 +701,12 @@ export interface Database {
         Update: Updatable<TreatmentMedicineScheduleRow>;
         Relationships: [];
       };
+      // 0048 — CMS atskyrimai (read-only for the app; written by the cms_* RPCs / the worker)
+      cms_separation_batches: { Row: Row<CmsSeparationBatchRow>; Insert: Insertable<CmsSeparationBatchRow, never>; Update: Updatable<CmsSeparationBatchRow>; Relationships: [] };
+      cms_separation_jobs: { Row: Row<CmsSeparationJobRow>; Insert: Insertable<CmsSeparationJobRow, never>; Update: Updatable<CmsSeparationJobRow>; Relationships: [] };
+      cms_separation_events: { Row: Row<CmsSeparationEventRow>; Insert: Insertable<CmsSeparationEventRow, never>; Update: Updatable<CmsSeparationEventRow>; Relationships: [] };
+      cms_live_action_settings: { Row: Row<CmsLiveActionSettingRow>; Insert: Insertable<CmsLiveActionSettingRow, never>; Update: Updatable<CmsLiveActionSettingRow>; Relationships: [] };
+      cms_sort_areas: { Row: Row<CmsSortAreaRow>; Insert: Insertable<CmsSortAreaRow, never>; Update: Updatable<CmsSortAreaRow>; Relationships: [] };
       // 0042 — DelPro daily Excel reports (read-only for the app; written by delpro_report_ingest)
       delpro_report_upload_tokens: {
         Row: Row<DelproReportTokenRow>;
@@ -1186,9 +1192,23 @@ export interface Database {
         Row: Row<{ id: string; label: string; act_kinds: WriteOffKind[]; sort_order: number }>;
         Relationships: [];
       };
+      vw_cms_separation_jobs: { Row: Row<CmsSeparationJobView>; Relationships: [] };
     };
 
     Functions: {
+      cms_save_batch: { Args: { p_data: Record<string, unknown> }; Returns: { ok: boolean; batch_id: string; submitted: boolean; counts: Record<string, number> } };
+      cms_check_items: { Args: { p_items: Record<string, unknown>[] }; Returns: CmsCheckResult[] };
+      cms_delete_draft: { Args: { p_batch_id: string }; Returns: { ok: boolean } };
+      cms_approve_jobs: {
+        Args: { p_job_ids: string[]; p_confirm: boolean };
+        Returns: { ok: boolean; approved: number; unchanged: number; refused: { job_id: string; reason: string }[] };
+      };
+      cms_cancel_jobs: { Args: { p_job_ids: string[]; p_reason?: string | null }; Returns: { ok: boolean; cancelled: number; refused: { job_id: string; reason: string }[] } };
+      cms_job_action: { Args: { p_job_id: string; p_action: "retry" | "confirm_absent" | "adopt"; p_key?: string | null }; Returns: { ok: boolean } };
+      cms_release_single_job: { Args: { p_job_id: string | null }; Returns: { ok: boolean } };
+      cms_set_mode_verified: { Args: { p_mode: CmsMode; p_verified: boolean; p_confirm?: boolean }; Returns: { ok: boolean; verified_modes: CmsMode[] } };
+      cms_request_live_refresh: { Args: Record<string, never>; Returns: { ok: boolean; message: string } };
+      cms_status: { Args: Record<string, never>; Returns: CmsStatus };
       analytics_monthly: { Args: { p_from: string; p_to: string }; Returns: { month: string; purchased: number; consumed: number }[] };
       analytics_spend_by_category: { Args: { p_from: string; p_to: string }; Returns: { category: ProductCategory; spent: number; uses: number }[] };
       analytics_top_products: {
@@ -1428,6 +1448,137 @@ export type DelproPayload = {
     vet_name: string | null;
     ui_entry?: DelproUiEntry;
   };
+};
+
+// ---------------------------------------------------------------------------
+// 0048 — CMS atskyrimai
+// ---------------------------------------------------------------------------
+
+export type CmsMode = "period" | "ongoing" | "once";
+export type CmsJobStatus = "draft" | "pending_approval" | "approved" | "processing" | "success" | "error" | "needs_review" | "cancelled" | "skipped";
+export type CmsProblem = { code: string; message: string; action_key?: string };
+
+export type CmsSeparationBatchRow = {
+  id: string;
+  status: "draft" | "submitted" | "cancelled";
+  note: string | null;
+  common_settings: Record<string, unknown>;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+  submitted_by: string | null;
+  submitted_at: string | null;
+};
+
+export type CmsSnapshot = {
+  job_id: string;
+  batch_id: string;
+  animal_id: string;
+  orn: string;
+  animal_no: string | null;
+  animal_guid: string | null;
+  mode: CmsMode;
+  action_type: "SortCow";
+  start_at: string | null;
+  end_at: string | null;
+  sessions: number[];
+  sort_area_key: string | null;
+};
+
+export type CmsSeparationJobRow = {
+  id: string;
+  batch_id: string;
+  animal_id: string;
+  status: CmsJobStatus;
+  mode: CmsMode;
+  start_at: string | null;
+  end_at: string | null;
+  sessions: number[];
+  sort_area_key: string | null;
+  note: string | null;
+  existing_decision: "skip" | "modify" | null;
+  is_override: boolean;
+  requested_settings: Record<string, unknown>;
+  effective_settings: CmsSnapshot | Record<string, never>;
+  approved_snapshot: CmsSnapshot | null;
+  animal_guid: string | null;
+  milk_setting_key: string | null;
+  action_key: string | null;
+  adopt_key: string | null;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+  approved_by: string | null;
+  approved_at: string | null;
+  attempts: number;
+  next_attempt_at: string | null;
+  claimed_by: string | null;
+  claimed_at: string | null;
+  write_started_at: string | null;
+  last_error: string | null;
+  error_details: Record<string, unknown> | null;
+  gateway_summary: Record<string, unknown> | null;
+  readback: { verified: boolean; diffs: { property: string; expected: string | null; actual: string | null }[] } | null;
+  verified_at: string | null;
+};
+
+export type CmsSeparationJobView = CmsSeparationJobRow & {
+  tag_no: string;
+  animal_no: string | null;
+  animal_name: string | null;
+  group_name: string | null;
+  delpro_object_guid: string | null;
+  batch_status: CmsSeparationBatchRow["status"];
+  batch_note: string | null;
+  batch_created_at: string;
+  created_by_name: string | null;
+  approved_by_name: string | null;
+  problems: CmsProblem[];
+};
+
+export type CmsSeparationEventRow = {
+  id: string;
+  job_id: string | null;
+  batch_id: string | null;
+  event: string;
+  actor: string | null;
+  worker_id: string | null;
+  details: Record<string, unknown> | null;
+  created_at: string;
+};
+
+export type CmsLiveActionSettingRow = {
+  action_key: string;
+  milk_setting_key: string | null;
+  animal_guid: string | null;
+  animal_id: string | null;
+  action_type: string;
+  active: boolean | null;
+  start_at: string | null;
+  end_at: string | null;
+  sessions: number[];
+  last_updated_at: string | null;
+  seen_at: string;
+  removed_at: string | null;
+};
+
+export type CmsSortAreaRow = { area_key: string; area_number: string | null; area_name: string | null; seen_at: string };
+
+export type CmsStatus = {
+  verified_modes: CmsMode[];
+  single_job_id: string | null;
+  live_last_refresh: { finished_at?: string; received?: number; complete?: boolean; unmatched_animals?: number; errors?: string[] } | null;
+  live_requested_at: string | null;
+  worker_cms_mode: string | null;
+  worker_seen_at: string | null;
+};
+
+export type CmsCheckResult = {
+  animal_id: string;
+  problems: CmsProblem[];
+  start_at: string | null;
+  end_at: string | null;
+  live: CmsLiveActionSettingRow | null;
 };
 
 type TreatmentMedicineScheduleRow = {

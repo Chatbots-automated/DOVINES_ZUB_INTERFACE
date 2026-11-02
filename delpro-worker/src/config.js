@@ -51,7 +51,7 @@ export const config = {
     readRetries: Number(env("DELPRO_GATEWAY_READ_RETRIES", "2")),
     // Animal property holding the official registration number (ORN, e.g. LT000007300337).
     // Used to link GVET animals without a short DelPro Number. Empty = match by Number only.
-    animalOrnProperty: env("DELPRO_GATEWAY_ANIMAL_ORN_PROPERTY", "OfficialRegNo"),
+    animalOrnProperty: env("DELPRO_GATEWAY_ANIMAL_ORN_PROPERTY", "OfficialRegNumber"),
   },
   // off | gateway — DelPro catalog (Drug, DrugParameters, Diagnosis, Treatment,
   // TreatmentDrugUsage) + Animal ObjectGuid -> GVET. Read-only towards DelPro.
@@ -67,6 +67,14 @@ export const config = {
   // hands out jobs while its own switch is on and the operation was validated
   // with a test job on the farm's Gateway.
   catalogWriteEnabled: env("CATALOG_WRITE_ENABLED", "false") === "true",
+  // CMS atskyrimai (0048), separate from the treatment OUTBOUND_MODE:
+  //   off | dry-run (nothing claimed) | gateway (claims what GVET releases: one supervised job, or verified modes)
+  cmsOutboundMode: env("CMS_OUTBOUND_MODE", "off"),
+  cmsPollIntervalSec: Number(env("CMS_POLL_INTERVAL_SEC", "5")),
+  // Known DelPro SortArea. Reported in the heartbeat only — NOT sent with an AnimalActionSetting and NOT proven to route the cow.
+  cmsDefaultSortAreaKey: env("CMS_DEFAULT_SORT_AREA_KEY", ""),
+  // DelPro SortCow state -> GVET "Aktyvūs atskyrimai" (read-only; also on "Atnaujinti" in GVET). 0 = only on request.
+  cmsLiveIntervalMin: Number(env("CMS_LIVE_INTERVAL_MIN", "60")),
 };
 
 export function requireConfig() {
@@ -81,6 +89,9 @@ export function requireConfig() {
   if (config.catalogSource === "gateway" && !config.gateway.user) missing.push("DELPRO_GATEWAY_USER");
   if (!(config.catalogMaxRows > 0)) missing.push("CATALOG_MAX_ROWS");
   if (!(config.catalogGatewayRowCap > 0)) missing.push("CATALOG_GATEWAY_ROW_CAP");
+  if (!["off", "dry-run", "gateway"].includes(config.cmsOutboundMode)) missing.push("CMS_OUTBOUND_MODE (off|dry-run|gateway)");
+  if (config.cmsOutboundMode === "gateway" && !config.gateway.user) missing.push("DELPRO_GATEWAY_USER");
+  if (!(config.cmsPollIntervalSec >= 1)) missing.push("CMS_POLL_INTERVAL_SEC");
   if (missing.length) throw new Error(`Trūksta / neteisinga konfigūracija: ${missing.join(", ")}`);
 }
 

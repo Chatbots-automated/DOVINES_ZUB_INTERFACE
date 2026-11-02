@@ -11,7 +11,7 @@ Small Node.js process that runs on the farm PC next to DelPro (Priedas Nr. 1 §3
   pressing *Sinchronizuoti dabar*, reads Drug, DrugParameters, Diagnosis, Treatment, TreatmentDrugUsage and Animal ObjectGuids
   through the local **Gateway SOAP service** (`GetData` only) and uploads them in batches (`delpro_catalog_*`). Nothing is
   written to DelPro. Animals are linked to their DelPro ObjectGuid by ORN (`DELPRO_GATEWAY_ANIMAL_ORN_PROPERTY`,
-  default `OfficialRegNo`) or by short Number, so animals without a Number are linked too. If the Gateway rejects the ORN
+  default `OfficialRegNumber`) or by short Number, so animals without a Number are linked too. If the Gateway rejects the ORN
   property, the worker logs it and links by Number only.
 - Heartbeat on every tick → the admin screen shows "Veikia / Neatsako".
 
@@ -109,6 +109,17 @@ come from a farm-verified `treatment-model.json` (`npm run treatment-probe`, `sr
 `Dosage` (dose), `DrugParams`, `Frequency` (GVET `frequency_per_day`) and `TreatCowDays` (GVET `course_days`) — both entered by the vet,
 a missing one is a validation error, never 1. Without the model nothing is claimed — a diagnosis event with medicine names in its Comment is not a treatment, and GVET reports a job as sent only when the
 medicine records are verified.
+
+## CMS atskyrimai (0048)
+
+`src/cms-separation.js`, polled every `CMS_POLL_INTERVAL_SEC` with `CMS_OUTBOUND_MODE=gateway` (independent of `OUTBOUND_MODE`).
+One approved GVET job = one `AnimalActionSetting` (`ActionType=SortCow`) on the animal's `AnimalMilkSetting`:
+Animal `ObjectGuid` (+ ORN check) → exactly one `AnimalMilkSetting` → existing action settings (an active SortCow = no write) →
+CreateData → read back by Key → every property compared → `cms_report_job`. The CreateData shape (`AnimalMilkSetting`, `ActionType`,
+`Active`, `StartDate`, `EndDate`, `IsValidForSession1..10`) is **proposed, not verified**; no SortArea / Sort Once property is sent.
+GVET hands out a job only after an admin released that single job (`npm run cms:write-one -- <job>`) or verified its mode after such a
+test. `npm run cms:dry-run -- <job>` (reads only), `cms:live` (DelPro SortCow state → GVET), `cms:inspect` (GetMetadata + samples).
+Farm steps: [`DEPLOY-WINDOWS.md`](DEPLOY-WINDOWS.md) §11.
 
 ## Treatment write-back
 

@@ -7,7 +7,7 @@
   §4.6, Priedas §1.5/§6.3) — flag it, don't build it.
 - **Added at the farm's request (2026-10), NOT in Priedas Nr. 1 — billed separately per Sutartis §2.5/§4.6:** Sėklinimas
   (0017), Vizitai (0018), Nagos (0019), Sinchronizacijos protokolai (0025), the bulk vaccination picker/plan, the extended Biocidai tab, VIC login + daily
-  animal import (0013/0014). Don't extend them without confirming scope.
+  animal import (0013/0014), CMS atskyrimai (0048, 2026-11). Don't extend them without confirming scope.
 - **Not in scope** (built in sibling projects, deliberately removed here): masinis gydymas,
   gydymų savikaina, VIC sync beyond the animal import, UNIFORM. Animals come from DelPro, not VIC.
   The farm asked (2026-10) for an Integracija → VIC tab that only **stores** VIC logins (0013). Since 0024 there are two, one row each in
@@ -209,7 +209,7 @@ not look for Žibartoniai's 0013–0021 VIC/UNIFORM history here.
   worker look the marker up before writing. `delpro_claim_next_job(p_worker_id, p_channel)` returns nothing to a worker of the other
   channel. Problems are channel-aware (`fn_delpro_transfer_problems` wraps the renamed 0034 `fn_delpro_transfer_problems_ui`).
   Switching the channel is a farm decision — no UI toggle on purpose. `animals.delpro_object_guid` (Gateway
-  `Animal.ObjectGuid`, matched on the active herd number, or since 0047 on the ORN — `DELPRO_GATEWAY_ANIMAL_ORN_PROPERTY`, default `OfficialRegNo`,
+  `Animal.ObjectGuid`, matched on the active herd number, or since 0047 on the ORN — `DELPRO_GATEWAY_ANIMAL_ORN_PROPERTY`, default `OfficialRegNumber`,
   exact `fn_orn_normalize` — so VIC/Excel animals without a short Number get one too; ambiguous or ORN≠Number cases skipped) is groundwork for the Gateway treatment write.
   `delpro_mappings` (0034 name overrides for the UI script) is separate and unchanged.
 - **DelPro daily Excel reports** (0042, farm's request): the farm PC's own uploader posts each XLSX from
@@ -242,6 +242,17 @@ not look for Žibartoniai's 0013–0021 VIC/UNIFORM history here.
   Stored in `treatment_medicine_schedules` (treatment + product), carried per medicine by `fn_delpro_treatment_plan`, written by the
   worker as `Frequency` / `TreatCowDays` next to `Dosage` / `DrugParams` (`USAGE_PROPS`). A treatment without them: plan problems
   `frequency_missing` / `course_days_missing`, the job fails visibly.
+- **CMS atskyrimai** (0048, farm's request 2026-11, billed separately): `/veterinarija/cms-atskyrimai` (Naujas atskyrimas / istorija /
+  Aktyvūs). Drafts and per-animal jobs in `cms_separation_batches` / `cms_separation_jobs` (one open job per animal), all writes via
+  definer RPCs (`cms_save_batch` replaces a draft as a whole; submit refuses any animal with a problem — `fn_cms_job_problems` is the single
+  rule set, mirrored for instant feedback in `src/lib/cms/separation.ts`). Times are entered as Europe/Vilnius wall clock and converted in
+  SQL (`fn_cms_local_ts`). Admin-only approval (`cms_approve_jobs`, needs the physical-sorting confirmation) freezes `approved_snapshot`.
+  The worker gets a job only if an admin released that single job (`cms_single_job_id`, closes by itself) or marked its mode verified
+  (`cms_verified_modes`, only after a verified success). Nothing about the DelPro write is assumed: `once` (Sort Once) and a chosen
+  SortArea are never sendable; an existing active DelPro SortCow is never modified (skip / held as `needs_review`); a write that started
+  but wasn't verified is `needs_review` (admin: confirm absent / adopt key), never re-sent. Live DelPro SortCow state is a read-only
+  mirror (`cms_live_action_settings`, `cms_live_upload`). UI calls `/api/cms` (Route Handler + fetch). Tests: scenario 0048 block,
+  `delpro-worker/test/cms-separation.test.js`, `npm run test:cms`.
 - **DelPro write path** — preferred order: DelPro's own import function → UI automation → direct SQL insert into DelPro's
   database. Direct SQL bypasses DelPro's own logic and may affect DeLaval support: only with the farm's written OK.
   All DelPro-specific SQL lives in `delpro-worker/queries/*.sql`; files marked `TODO(discovery)` are placeholders and

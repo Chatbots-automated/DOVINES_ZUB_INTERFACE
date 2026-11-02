@@ -2406,3 +2406,193 @@ do $$ declare c text[]; begin
   if c is distinct from array['course_days_missing', 'frequency_missing'] then raise exception 'missing schedule must be a plan problem: %', c; end if;
 end $$;
 select 'assert' as step, '0046 frequency + duration: required, stored, in the plan, never defaulted' as what;
+
+-- 0048. CMS atskyrimai: draft -> submit -> admin approval -> gated worker claim -> report; nothing assumed about DelPro
+insert into animals (tag_no, animal_no, active, source, delpro_object_guid) values
+  ('LT0000CMS00001', 'C1', true, 'delpro', 'c0000000-0000-4000-8000-000000000001'),
+  ('LT0000CMS00002', null, true, 'vic', 'c0000000-0000-4000-8000-000000000002'),
+  ('LT0000CMS00003', 'C3', true, 'delpro', null),
+  ('LT0000CMS00004', 'C4', true, 'delpro', 'c0000000-0000-4000-8000-000000000004');
+-- live DelPro state: animal 4 already has an active SortCow
+set role service_role;
+select 'cms_live' as step, cms_live_upload('{"complete":true,"actions":[{"key":"11981","milk_setting_key":"8246","animal_guid":"c0000000-0000-4000-8000-000000000004",
+  "action_type":"SortCow","active":true,"start_at":"2026-09-22T09:01:00Z","sessions":[1,2]}],"sort_areas":[{"key":"1","number":"1","name":"Rūšiavimo patalpa 1"}]}'::jsonb)->>'received' as received;
+reset role;
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000b',false);
+-- per-animal settings; Vilnius wall clock -> UTC (winter: +2h)
+select set_config('t.cms_batch', cms_save_batch(jsonb_build_object('note', 'test', 'items', jsonb_build_array(
+  jsonb_build_object('animal_id', (select id from animals where tag_no = 'LT0000CMS00001'), 'mode', 'period', 'start_local', '2099-11-03T08:00', 'end_local', '2099-11-05T08:00', 'sessions', '[1,2]'::jsonb),
+  jsonb_build_object('animal_id', (select id from animals where tag_no = 'LT0000CMS00002'), 'mode', 'ongoing', 'start_local', '2099-11-04T06:30', 'sessions', '[3]'::jsonb, 'is_override', true),
+  jsonb_build_object('animal_id', (select id from animals where tag_no = 'LT0000CMS00004'), 'mode', 'period', 'start_local', '2099-11-03T08:00', 'end_local', '2099-11-05T08:00', 'sessions', '[1]'::jsonb, 'existing_decision', 'skip')
+)))->>'batch_id', false);
+do $$ begin
+  if (select start_at from cms_separation_jobs j join animals a on a.id = j.animal_id where a.tag_no = 'LT0000CMS00001') <> '2099-11-03 06:00:00+00'::timestamptz then
+    raise exception 'Vilnius -> UTC conversion wrong';
+  end if;
+  if exists (select 1 from cms_separation_jobs where batch_id = current_setting('t.cms_batch')::uuid and status <> 'draft') then raise exception 'draft must stay draft'; end if;
+end $$;
+-- preview finds every problem without saving
+do $$ declare r jsonb; c text[]; begin
+  r := cms_check_items(jsonb_build_array(
+    jsonb_build_object('animal_id', (select id from animals where tag_no = 'LT0000CMS00003'), 'mode', 'period', 'start_local', '2099-11-03T08:00', 'sessions', '[]'::jsonb),
+    jsonb_build_object('animal_id', (select id from animals where tag_no = 'LT0000CMS00001'), 'mode', 'once', 'start_local', '2099-11-03T08:00', 'sessions', '[11]'::jsonb, 'sort_area_key', '1'),
+    jsonb_build_object('animal_id', (select id from animals where tag_no = 'LT0000CMS00004'), 'mode', 'ongoing', 'start_local', '2099-11-03T08:00', 'sessions', '[1]'::jsonb)));
+  select array_agg(p->>'code' order by p->>'code') into c from jsonb_array_elements(r->0->'problems') p;
+  if c is distinct from array['end_missing', 'no_guid', 'sessions_missing'] then raise exception 'unmapped animal / missing end / no sessions: %', c; end if;
+  select array_agg(p->>'code' order by p->>'code') into c from jsonb_array_elements(r->1->'problems') p;
+  if c is distinct from array['destination_unverified', 'mode_unsupported', 'sessions_invalid'] then raise exception 'once / area / session 11: %', c; end if;
+  select array_agg(p->>'code' order by p->>'code') into c from jsonb_array_elements(r->2->'problems') p;
+  if c is distinct from array['existing_active'] then raise exception 'existing SortCow must need a decision: %', c; end if;
+end $$;
+-- a batch with an unmapped animal can't be submitted
+do $$ declare blocked boolean := false; begin
+  begin perform cms_save_batch(jsonb_build_object('submit', true, 'items', jsonb_build_array(
+    jsonb_build_object('animal_id', (select id from animals where tag_no = 'LT0000CMS00003'), 'mode', 'ongoing', 'start_local', '2099-11-03T08:00', 'sessions', '[1]'::jsonb))));
+  exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: submit with missing DelPro mapping'; end if;
+end $$;
+-- submit the draft: existing SortCow + skip -> skipped, the rest wait for an admin
+select 'cms_submit' as step, cms_save_batch(jsonb_build_object('batch_id', current_setting('t.cms_batch'), 'submit', true, 'items', jsonb_build_array(
+  jsonb_build_object('animal_id', (select id from animals where tag_no = 'LT0000CMS00001'), 'mode', 'period', 'start_local', '2099-11-03T08:00', 'end_local', '2099-11-05T08:00', 'sessions', '[1,2]'::jsonb),
+  jsonb_build_object('animal_id', (select id from animals where tag_no = 'LT0000CMS00002'), 'mode', 'ongoing', 'start_local', '2099-11-04T06:30', 'sessions', '[3]'::jsonb, 'is_override', true),
+  jsonb_build_object('animal_id', (select id from animals where tag_no = 'LT0000CMS00004'), 'mode', 'period', 'start_local', '2099-11-03T08:00', 'end_local', '2099-11-05T08:00', 'sessions', '[1]'::jsonb, 'existing_decision', 'skip')
+)))->'counts' as counts;
+-- a vet can't approve
+do $$ declare blocked boolean := false; begin
+  begin perform cms_approve_jobs(array(select id from cms_separation_jobs where batch_id = current_setting('t.cms_batch')::uuid), true);
+  exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: vet approved CMS jobs'; end if;
+end $$;
+-- an animal with an open instruction can't get a second one
+do $$ declare blocked boolean := false; begin
+  begin perform cms_save_batch(jsonb_build_object('submit', true, 'items', jsonb_build_array(
+    jsonb_build_object('animal_id', (select id from animals where tag_no = 'LT0000CMS00001'), 'mode', 'ongoing', 'start_local', '2099-11-03T08:00', 'sessions', '[1]'::jsonb))));
+  exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: second open job for one animal'; end if;
+end $$;
+reset role;
+-- nothing is claimable before approval
+set role service_role;
+do $$ begin if cms_claim_next_job('{"worker_id":"w1"}') is not null then raise exception 'unapproved CMS job claimed'; end if; end $$;
+reset role;
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000a',false);
+do $$ declare blocked boolean := false; begin
+  begin perform cms_approve_jobs(array(select id from cms_separation_jobs where batch_id = current_setting('t.cms_batch')::uuid), false);
+  exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: approval without the physical-sorting confirmation'; end if;
+end $$;
+select 'cms_approve' as step, r->'approved' as approved, jsonb_array_length(r->'refused') as refused
+from (select cms_approve_jobs(array(select id from cms_separation_jobs where batch_id = current_setting('t.cms_batch')::uuid), true) as r) x;
+-- idempotent
+select 'cms_approve_again' as step, cms_approve_jobs(array(select id from cms_separation_jobs where batch_id = current_setting('t.cms_batch')::uuid), true)->'unchanged' as unchanged;
+reset role;
+do $$ begin
+  if (select approved_snapshot->>'start_at' from cms_separation_jobs j join animals a on a.id = j.animal_id where a.tag_no = 'LT0000CMS00001') <> '2099-11-03T06:00:00Z' then
+    raise exception 'snapshot must carry UTC start';
+  end if;
+  if (select approved_snapshot->>'animal_guid' from cms_separation_jobs j join animals a on a.id = j.animal_id where a.tag_no = 'LT0000CMS00002') <> 'c0000000-0000-4000-8000-000000000002' then
+    raise exception 'snapshot must carry the DelPro animal GUID';
+  end if;
+end $$;
+-- approved, but no mode verified and no single job released: the worker gets nothing
+set role service_role;
+do $$ begin if cms_claim_next_job('{"worker_id":"w1"}') is not null then raise exception 'unverified mode claimed'; end if; end $$;
+reset role;
+-- release one job for the supervised test; only a worker naming it gets it, once
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000a',false);
+select cms_release_single_job((select j.id from cms_separation_jobs j join animals a on a.id = j.animal_id where a.tag_no = 'LT0000CMS00001'));
+do $$ declare blocked boolean := false; begin
+  begin perform cms_set_mode_verified('period', true, true);
+  exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: mode verified without a successful write'; end if;
+end $$;
+reset role;
+set role service_role;
+do $$ declare r jsonb; begin
+  if cms_claim_next_job('{"worker_id":"w1"}') is not null then raise exception 'single job handed out without naming it'; end if;
+  r := cms_claim_next_job(jsonb_build_object('worker_id', 'w1', 'job_id', (select j.id from cms_separation_jobs j join animals a on a.id = j.animal_id where a.tag_no = 'LT0000CMS00001')));
+  if r is null then raise exception 'released job not claimed'; end if;
+  perform set_config('t.cms_job1', r->>'job_id', false);
+  if cms_claim_next_job(jsonb_build_object('worker_id', 'w2', 'job_id', r->>'job_id')) is not null then raise exception 'job claimed twice'; end if;
+  -- another worker can't report it
+  begin perform cms_report_job(jsonb_build_object('job_id', r->>'job_id', 'worker_id', 'w2', 'phase', 'start'));
+    raise exception 'foreign worker reported';
+  exception when others then if sqlerrm = 'foreign worker reported' then raise; end if; end;
+  perform cms_report_job(jsonb_build_object('job_id', r->>'job_id', 'worker_id', 'w1', 'phase', 'start', 'milk_setting_key', '9001'));
+  -- read-back mismatch: never success
+  perform cms_report_job(jsonb_build_object('job_id', r->>'job_id', 'worker_id', 'w1', 'phase', 'result', 'outcome', 'success',
+    'action_key', '12000', 'readback', jsonb_build_object('verified', false, 'diffs', jsonb_build_array('EndDate'))));
+end $$;
+reset role;
+do $$ begin
+  if (select status from cms_separation_jobs where id = current_setting('t.cms_job1')::uuid) <> 'needs_review' then raise exception 'readback mismatch must need review'; end if;
+  if (select setting_value from system_settings where setting_key = 'cms_single_job_id') <> '' then raise exception 'single gate must close'; end if;
+end $$;
+-- admin: retry refused (write may have happened); adopt the key -> approved with adopt_key
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000a',false);
+do $$ declare blocked boolean := false; begin
+  begin perform cms_job_action(current_setting('t.cms_job1')::uuid, 'retry');
+  exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: blind retry after a started write'; end if;
+end $$;
+select cms_job_action(current_setting('t.cms_job1')::uuid, 'adopt', '12000');
+select cms_release_single_job(current_setting('t.cms_job1')::uuid);
+reset role;
+set role service_role;
+do $$ declare r jsonb; begin
+  r := cms_claim_next_job(jsonb_build_object('worker_id', 'w1', 'job_id', current_setting('t.cms_job1')));
+  if r->>'adopt_key' <> '12000' then raise exception 'adopt key must reach the worker'; end if;
+  perform cms_report_job(jsonb_build_object('job_id', r->>'job_id', 'worker_id', 'w1', 'phase', 'result', 'outcome', 'success',
+    'action_key', '12000', 'milk_setting_key', '9001', 'readback', jsonb_build_object('verified', true, 'diffs', '[]'::jsonb)));
+end $$;
+reset role;
+do $$ begin
+  if (select status from cms_separation_jobs where id = current_setting('t.cms_job1')::uuid) <> 'success' then raise exception 'verified job must succeed'; end if;
+end $$;
+-- now the admin may verify 'period'; an 'ongoing' job still isn't claimable (partial gate), a retryable failure backs off
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000a',false);
+select cms_set_mode_verified('period', true, true);
+reset role;
+set role service_role;
+do $$ begin if cms_claim_next_job('{"worker_id":"w1"}') is not null then raise exception 'ongoing job claimed while only period verified'; end if; end $$;
+reset role;
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000a',false);
+do $$ declare blocked boolean := false; begin
+  begin perform cms_set_mode_verified('ongoing', true, true);
+  exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: ongoing verified without its own success'; end if;
+end $$;
+-- cancel the ongoing one (admin)
+select 'cms_cancel' as step, cms_cancel_jobs(array(select j.id from cms_separation_jobs j join animals a on a.id = j.animal_id where a.tag_no = 'LT0000CMS00002'), 'test')->'cancelled' as cancelled;
+reset role;
+-- RLS: the viewer can read but not write
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000c',false);
+do $$ declare blocked boolean := false; begin
+  begin insert into cms_separation_batches (note) values ('x');
+  exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: direct insert into CMS batches'; end if;
+end $$;
+do $$ declare blocked boolean := false; begin
+  begin perform cms_save_batch(jsonb_build_object('items', jsonb_build_array(jsonb_build_object('animal_id', (select id from animals where tag_no = 'LT0000CMS00001'), 'mode', 'ongoing'))));
+  exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: viewer saved a CMS batch'; end if;
+end $$;
+reset role;
+do $$ begin
+  if (select status from cms_separation_jobs j join animals a on a.id = j.animal_id where a.tag_no = 'LT0000CMS00004') <> 'skipped' then raise exception 'existing SortCow + skip must be skipped'; end if;
+  if (select count(*) from cms_separation_events where job_id = current_setting('t.cms_job1')::uuid) < 6 then raise exception 'events must be logged'; end if;
+end $$;
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000b',false);
+do $$ begin
+  if (cms_status()->'verified_modes') <> '["period"]'::jsonb then raise exception 'cms_status must show the gate to staff: %', cms_status(); end if;
+end $$;
+reset role;
+select 'assert' as step, '0048 CMS: validation, submit, admin-only approval, gated single claim, readback review, adopt, mode verification' as what;

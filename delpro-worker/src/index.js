@@ -12,6 +12,7 @@ import { checkCatalogJob } from "./catalog-write-check.js";
 import { TreatmentWriteError, liveChecks, treatmentProblems, writeTreatment as writeGatewayTreatment } from "./treatment-gateway.js";
 import { loadTreatmentModel, validateModel } from "./treatment-model.js";
 import { GatewayError } from "./gateway.js";
+import { prepareJob, runCmsLive, runCmsOutbound, snapshotProblems } from "./cms-separation.js";
 import { log } from "./log.js";
 
 // Dovinės ŽŪB DelPro worker (Priedas §3-§4). Runs on the farm PC next to
@@ -27,7 +28,7 @@ import { log } from "./log.js";
 // outage is logged and retried on the next tick, never crashes the loop.
 
 const MAX_JOBS_PER_TICK = 20;
-const state = { lastInboundOk: null, lastCatalogOk: null, lastError: null };
+const state = { lastInboundOk: null, lastCatalogOk: null, lastError: null, lastCmsLiveOk: null };
 
 function treatmentModelReady() {
   try {
@@ -51,6 +52,10 @@ async function heartbeat() {
     catalog_source: config.catalogSource,
     catalog_write_enabled: config.catalogWriteEnabled,
     last_catalog_ok: state.lastCatalogOk,
+    // 0048 CMS atskyrimai
+    cms_outbound_mode: config.cmsOutboundMode,
+    cms_default_sort_area_key: config.cmsDefaultSortAreaKey || null,
+    cms_last_live_ok: state.lastCmsLiveOk,
     last_error: state.lastError,
   });
 }
@@ -274,6 +279,112 @@ export async function runOutbound() {
   return processed;
 }
 
+// ---------------------------------------------------------------------------
+// CMS atskyrimai (0048). Reads are always allowed with CATALOG_SOURCE=gateway; a write-enabled Gateway client is
+// made only with CMS_OUTBOUND_MODE=gateway, and GVET still decides which job (if any) may be written.
+// ---------------------------------------------------------------------------
+
+export async function runCms() {
+  if (config.cmsOutboundMode !== "gateway") return 0;
+  return runCmsOutbound(createGatewayClient({ allowWrites: true }));
+}
+
+let cmsLiveAt = 0;
+export async function runCmsLiveIfDue({ force = false } = {}) {
+  if (config.catalogSource !== "gateway") return null;
+  const due = config.cmsLiveIntervalMin > 0 && Date.now() - cmsLiveAt >= config.cmsLiveIntervalMin * 60_000;
+  if (!force && !due && !(await gvet.cmsLiveRequested())) return null;
+  cmsLiveAt = Date.now();
+  const res = await runCmsLive(createGatewayClient());
+  state.lastCmsLiveOk = new Date().toISOString();
+  return res;
+}
+
+function cmsJobArg(flag) {
+  const id = process.argv[process.argv.indexOf(flag) + 1];
+  if (!id || !UUID.test(id)) throw new Error(`Nurodykite CMS užduoties ID: npm run ${flag.slice(2)} -- <užduoties-id>`);
+  return id.toLowerCase();
+}
+
+/**
+ * `npm run cms:dry-run -- <job>`: read-only. Resolves the animal, its AnimalMilkSetting and existing action settings
+ * through the Gateway and prints the exact CreateData document the job WOULD send. Changes nothing anywhere.
+ */
+export async function runCmsDryRun(jobId) {
+  const job = await gvet.cmsGetJob({ job_id: jobId });
+  if (!job) throw new Error(`CMS užduotis ${jobId} nerasta.`);
+  const s = job.snapshot;
+  log.info(`CMS užduotis ${jobId}: ${s.orn} (DelPro Nr. ${s.animal_no ?? "—"}), būsena ${job.status}, režimas ${s.mode}, ` +
+    `${s.start_at} → ${s.end_at ?? "be pabaigos"}, sesijos ${(s.sessions ?? []).join(", ") || "—"}`);
+  for (const p of job.problems ?? []) log.warn(`  GVET: ${p.message}`);
+  const report = { job, checked_at: new Date().toISOString() };
+  const local = snapshotProblems(s);
+  if (local.length) {
+    for (const p of local) log.warn(`  ${p}`);
+    report.problems = local;
+  } else {
+    const gw = createGatewayClient();
+    try {
+      const prep = await prepareJob({ getDataXml: (xml) => gw.getDataXml(xml) }, { ...job, job_id: jobId });
+      Object.assign(report, { milk_setting_key: prep.milkKey, delpro_animal: prep.animal, existing: prep.actions.length, active_sortcow: prep.active, xml: prep.xml });
+      log.info(`  AnimalMilkSetting: ${prep.milkKey}; esami veiksmai: ${prep.actions.length}; aktyvūs SortCow: ${prep.active.map((a) => a.key).join(", ") || "nėra"}`);
+      if (prep.active.length) log.warn("  DelPro jau turi aktyvų SortCow — ši užduotis nebūtų siunčiama.");
+      log.info(`  CreateData (SIŪLOMA forma, nepatikrinta): ${prep.xml}`);
+    } catch (err) {
+      report.error = err.message;
+      log.error(`  ${err.message}`);
+    }
+  }
+  const dir = path.join(ROOT, "dry-run");
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, `cms-${jobId}-${new Date().toISOString().replace(/[:.]/g, "-")}.json`);
+  fs.writeFileSync(file, JSON.stringify(report, null, 2));
+  log.info(`SAUSAS PALEIDIMAS — nieko neįrašyta. Ataskaita: ${file}`);
+  return report;
+}
+
+/** `npm run cms:write-one -- <job>`: the supervised single-animal write. GVET must have released exactly this job. */
+export async function runCmsWriteOne(jobId) {
+  if (config.cmsOutboundMode !== "gateway") {
+    throw new Error("Rašymas išjungtas: šiai komandai nustatykite CMS_OUTBOUND_MODE=gateway (tik šiam paleidimui).");
+  }
+  const before = await gvet.cmsGetJob({ job_id: jobId });
+  if (!before) throw new Error(`CMS užduotis ${jobId} nerasta.`);
+  if (!before.single_released) throw new Error("GVET neišleido šios užduoties (CMS atskyrimai → „Leisti siųsti tik šią“) — nieko nesiųsta.");
+  await runCmsDryRun(jobId);
+  const n = await runCmsOutbound(createGatewayClient({ allowWrites: true }), { jobId });
+  if (!n) throw new Error("GVET užduoties neišdavė — į DelPro nieko nesiųsta.");
+  const after = await gvet.cmsGetJob({ job_id: jobId });
+  log.info(`Rezultatas: ${after.status}. Patikrinkite DelPro ir ar karvė realiai atskiriama.`);
+  return after;
+}
+
+/** `npm run cms:inspect`: saves GetMetadata answers + a few raw rows of the CMS objects to discovery/ (read-only). */
+export async function runCmsInspect() {
+  const gw = createGatewayClient();
+  const dir = path.join(ROOT, "discovery");
+  fs.mkdirSync(dir, { recursive: true });
+  for (const objectName of ["AnimalActionSetting", "AnimalMilkSetting", "SortArea"]) {
+    try {
+      fs.writeFileSync(path.join(dir, `cms-${objectName}.metadata.xml`), await gw.getMetadata({ objectName }));
+      log.info(`${objectName}: GetMetadata išsaugota.`);
+    } catch (err) {
+      log.warn(`${objectName}: GetMetadata nepavyko (${err.message}) — parametrų pavadinimus patikrinkite WSDL.`);
+    }
+  }
+  const { ACTION_READ_PROPS } = await import("./cms-separation.js");
+  const { buildRequestData } = await import("./gateway.js");
+  for (const [objectName, props] of [["AnimalActionSetting", ACTION_READ_PROPS], ["SortArea", ["Key", "SortAreaNumber", "SortAreaName"]]]) {
+    try {
+      fs.writeFileSync(path.join(dir, `cms-${objectName}.sample.xml`), await gw.getDataXml(buildRequestData({ objectName, properties: props, top: 20 })));
+      log.info(`${objectName}: pavyzdžiai išsaugoti.`);
+    } catch (err) {
+      log.warn(`${objectName}: ${err.message}`);
+    }
+  }
+  log.info(`Failai: ${dir}`);
+}
+
 async function safely(name, fn) {
   try {
     return await fn();
@@ -292,6 +403,24 @@ async function main() {
     if (!check.ok) process.exitCode = 2;
     return;
   }
+  if (process.argv.includes("--cms-dry-run")) {
+    const r = await runCmsDryRun(cmsJobArg("--cms-dry-run"));
+    if (r.error || r.problems?.length || r.active_sortcow?.length) process.exitCode = 2;
+    return;
+  }
+  if (process.argv.includes("--cms-write-one")) {
+    const job = await runCmsWriteOne(cmsJobArg("--cms-write-one"));
+    if (job.status !== "success") process.exitCode = 2;
+    return;
+  }
+  if (process.argv.includes("--cms-live")) {
+    await runCmsLiveIfDue({ force: true });
+    return;
+  }
+  if (process.argv.includes("--cms-inspect")) {
+    await runCmsInspect();
+    return;
+  }
   if (process.argv.includes("--write-one")) {
     const { job } = await runCatalogWriteOne(jobIdArg("--write-one"));
     if (job.status !== "success") process.exitCode = 2;
@@ -300,7 +429,7 @@ async function main() {
   if (dryRun && !process.argv.includes("--catalog")) throw new Error("--dry-run veikia tik su --catalog (npm run catalog:dry-run).");
   log.info(
     `DelPro darbininkas v${config.version} (${config.workerId}), šaltinis=${config.source}, outbound=${config.outboundMode}, ` +
-      `katalogas=${config.catalogSource}, katalogo rašymas=${config.catalogWriteEnabled ? "ĮJUNGTAS" : "išjungtas"}`,
+      `katalogas=${config.catalogSource}, katalogo rašymas=${config.catalogWriteEnabled ? "ĮJUNGTAS" : "išjungtas"}, CMS=${config.cmsOutboundMode}`,
   );
 
   if (dryRun) {
@@ -318,6 +447,7 @@ async function main() {
     await safely("catalog", runCatalog);
     await safely("outbound", runOutbound);
     await safely("catalog outbound", runCatalogOutbound);
+    await safely("cms", runCms);
     await safely("heartbeat", heartbeat);
     return;
   }
@@ -325,6 +455,14 @@ async function main() {
   let inboundBusy = false;
   let outboundBusy = false;
   let catalogBusy = false;
+  let cmsBusy = false;
+  const cmsTick = async () => {
+    if (cmsBusy) return;
+    cmsBusy = true;
+    await safely("cms", runCms);
+    await safely("cms live", () => runCmsLiveIfDue());
+    cmsBusy = false;
+  };
   const catalogTick = async () => {
     if (catalogBusy || config.catalogSource === "off") return;
     catalogBusy = true;
@@ -356,6 +494,7 @@ async function main() {
   setInterval(inboundTick, config.inboundIntervalMin * 60_000);
   setInterval(catalogTick, config.catalogIntervalMin * 60_000);
   setInterval(outboundTick, config.outboundIntervalSec * 1000);
+  setInterval(cmsTick, config.cmsPollIntervalSec * 1000);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
