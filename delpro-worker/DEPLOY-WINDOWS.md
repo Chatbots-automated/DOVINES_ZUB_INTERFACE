@@ -467,7 +467,7 @@ animals DelPro keeps; `milk_setting_without_animal`; `animal_inactive_in_gvet`).
 
 **Activation** (*superseded by §14 since 0051 — no complete CMS read needed*) (GVET → CMS atskyrimai → *Laukia perdavimo / istorija* → *Aktyvavimas*). "Visiškai aktyvu" appears only when all hold:
 CMS worker installed · GVET API · Gateway · complete CMS read (< 26 h) · automatic worker (task) running · `CMS_OUTBOUND_MODE=gateway` ·
-GVET CMS sending switched on · a mode verified (*Nurodytam laikotarpiui* after job 443b4846… — admin presses *Leisti*) · physical
+(Superseded by 0052 — see §14: approval alone sends.) GVET CMS sending switched on · a mode verified (*Nurodytam laikotarpiui* after job 443b4846… — admin presses *Leisti*) · physical
 destination confirmed by the farm operator (*Patvirtinti fizinę vietą*, with a note where the test cow went).
 Turn on `CMS_OUTBOUND_MODE=gateway` in `.env` only after the destination check; then `-Action restart`.
 
@@ -561,16 +561,16 @@ npm.cmd run cms:refresh                              # GVET's whole CMS set now
    Each line: `LT… (DelPro Nr. …, AnimalMilkSetting …): <key> effective|scheduled|inactive|ended … s[1,2]` or `NENUSKAITYTA — <reason>`.
    Exit 2 if any cow could not be read. The test record you disabled by hand must show `inactive`.
 
-5. **CMS activation** (GVET → CMS atskyrimai → *Aktyvavimas*, 7 checks: worker running by the task · Gateway · GVET API ·
-   `CMS_OUTBOUND_MODE=gateway` · GVET switch on · mode verified · physical destination + behaviour confirmed by the operator).
-   The physical check stays required: the test record appeared in DelPro, but where the cow physically went is not confirmed yet.
-   After the operator confirmed it (admin: *Patvirtinti fizinę vietą*, with a note):
+5. **CMS activation** (0052: GVET → CMS atskyrimai → *Aktyvavimas*, 5 checks: worker running by the task · Gateway · GVET API ·
+   `CMS_OUTBOUND_MODE=gateway` · GVET switch on). No mode verification, no destination note: once these are green, an admin's
+   **Patvirtinti** on a job sends it. On the PC, once:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File C:\GVET\delpro-worker\scripts\gvet-worker.ps1 -Action cms-on   # type GATEWAY
 ```
 
-   then an admin presses *Įjungti CMS siuntimą* in GVET. Sort Once and a chosen sort area stay blocked.
+   Migration 0052 switches GVET's CMS sending on; if someone pressed *Avarinis stabdymas*, an admin presses *Įjungti CMS siuntimą*.
+   Sort Once and a chosen sort area stay blocked (approval refuses them); the worker still re-checks every cow in DelPro before writing.
 
 6. **Emergency stop** (stops NEW CMS writes only; treatments keep running; separations already in DelPro are NOT cancelled —
    disable those in DelPro): GVET *Avarinis stabdymas* (any staff member, immediate — the worker gets no more jobs), and/or on the PC:

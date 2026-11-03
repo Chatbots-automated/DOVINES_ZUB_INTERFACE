@@ -2,18 +2,17 @@
 
 import * as React from "react";
 import { useRouter } from "next/navigation";
-import { AlertTriangle, CheckCheck, History, Loader2, ShieldCheck } from "lucide-react";
+import { CheckCheck, History, Loader2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Input } from "@/components/ui/input";
-import { Dialog, DialogBody, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 import { cmsPost } from "@/lib/cms/client";
 import { CMS_MODE_LABEL, formatVilnius } from "@/lib/cms/separation";
-import { CMS_APPROVAL_WARNING, CMS_STATUS_LABEL, CMS_STATUS_TONE } from "@/lib/cms/status";
-import type { CmsJobStatus, CmsMode, CmsSeparationJobView } from "@/lib/supabase/types";
+import { CMS_STATUS_LABEL, CMS_STATUS_TONE } from "@/lib/cms/status";
+import type { CmsJobStatus, CmsSeparationJobView } from "@/lib/supabase/types";
 
 type Filter = "pending" | "approved" | "problem" | "done" | "all";
 const FILTERS: Record<Filter, { label: string; statuses: CmsJobStatus[] | null }> = {
@@ -25,8 +24,6 @@ const FILTERS: Record<Filter, { label: string; statuses: CmsJobStatus[] | null }
 };
 
 export type CmsGate = {
-  verifiedModes: CmsMode[];
-  singleJobId: string | null;
   workerMode: string | null;
   workerSeenAt: string | null;
 };
@@ -39,13 +36,10 @@ export function CmsHistory({ jobs, isAdmin, canWrite, gate, focusBatch }: { jobs
   const router = useRouter();
   const [filter, setFilter] = React.useState<Filter>(jobs.some((j) => j.status === "pending_approval") ? "pending" : "all");
   const [selected, setSelected] = React.useState<Set<string>>(new Set());
-  const [approveIds, setApproveIds] = React.useState<string[] | null>(null);
-  const [understood, setUnderstood] = React.useState(false);
   const [busy, setBusy] = React.useState<string | null>(null);
   const [message, setMessage] = React.useState<{ ok: boolean; text: string } | null>(null);
   const [adoptFor, setAdoptFor] = React.useState<string | null>(null);
   const [adoptKey, setAdoptKey] = React.useState("");
-  const [verifyMode, setVerifyMode] = React.useState<CmsMode | null>(null);
 
   const statuses = FILTERS[filter].statuses;
   const shown = jobs.filter((j) => !statuses || statuses.includes(j.status));
@@ -71,6 +65,13 @@ export function CmsHistory({ jobs, isAdmin, canWrite, gate, focusBatch }: { jobs
     return true;
   }
 
+  // 0052: "Patvirtinti" is the only step — approved jobs go straight to the farm PC's worker.
+  const approve = (ids: string[]) =>
+    run("approve", "approve", { job_ids: ids, confirm: true }, (d) => {
+      const r = d as { approved: number; unchanged: number; refused: { reason: string }[] };
+      return `Patvirtinta ${r.approved} — siunčiama į DelPro${r.unchanged ? `, jau patvirtinta ${r.unchanged}` : ""}${r.refused.length ? `, atmesta ${r.refused.length}: ${r.refused.map((x) => x.reason).join(" ")}` : ""}.`;
+    });
+
   const toggle = (id: string) =>
     setSelected((prev) => {
       const n = new Set(prev);
@@ -81,7 +82,11 @@ export function CmsHistory({ jobs, isAdmin, canWrite, gate, focusBatch }: { jobs
 
   return (
     <div className="space-y-4">
-      {isAdmin && <GatePanel gate={gate} busy={busy} onVerify={(m) => setVerifyMode(m)} onUnverify={(m) => run(`unverify-${m}`, "set_mode_verified", { mode: m, verified: false })} onClearSingle={() => run("clear", "release_single", { job_id: null })} />}
+      {isAdmin && gate.workerMode !== "gateway" && (
+        <p className="rounded-control border border-warning/40 bg-warning-soft px-3 py-2 text-[13px] text-warning">
+          Ūkio kompiuteris šiuo metu nesiunčia CMS atskyrimų (CMS_OUTBOUND_MODE={gate.workerMode ?? "nežinoma"}) — patvirtinti atskyrimai lauks.
+        </p>
+      )}
 
       <Card className="overflow-hidden">
         <div className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-3">
@@ -106,10 +111,10 @@ export function CmsHistory({ jobs, isAdmin, canWrite, gate, focusBatch }: { jobs
           })}
           {isAdmin && filter === "pending" && (
             <div className="ml-auto flex flex-wrap gap-2">
-              <Button type="button" size="sm" variant="outline" disabled={selected.size === 0} onClick={() => setApproveIds([...selected])}>
+              <Button type="button" size="sm" variant="outline" disabled={selected.size === 0 || busy === "approve"} onClick={() => approve([...selected])}>
                 Patvirtinti pažymėtus ({selected.size})
               </Button>
-              <Button type="button" size="sm" disabled={approvable.length === 0} onClick={() => setApproveIds(approvable.map((j) => j.id))}>
+              <Button type="button" size="sm" disabled={approvable.length === 0 || busy === "approve"} onClick={() => approve(approvable.map((j) => j.id))}>
                 <CheckCheck className="size-4" /> Patvirtinti visus tinkamus ({approvable.length})
               </Button>
             </div>
@@ -148,10 +153,6 @@ export function CmsHistory({ jobs, isAdmin, canWrite, gate, focusBatch }: { jobs
                         </p>
                         <Badge tone={CMS_STATUS_TONE[j.status]}>{CMS_STATUS_LABEL[j.status]}</Badge>
                         {j.is_override && <Badge tone="accent">Individualūs</Badge>}
-                        {j.id === gate.singleJobId && <Badge tone="warning">Leista siųsti tik šią</Badge>}
-                        {j.status === "approved" && j.approved_snapshot && !gate.verifiedModes.includes(j.approved_snapshot.mode) && j.id !== gate.singleJobId && (
-                          <Badge tone="neutral" title="Režimas dar nepatikrintas prižiūrimu bandymu — darbininkas jo nepaims">Siuntimas išjungtas</Badge>
-                        )}
                       </div>
                       <p className="text-[12px] text-text-secondary">
                         {CMS_MODE_LABEL[j.mode]} · {schedule(j)}
@@ -215,17 +216,6 @@ export function CmsHistory({ jobs, isAdmin, canWrite, gate, focusBatch }: { jobs
                       )}
                     </div>
                     <div className="flex shrink-0 flex-col items-end gap-1">
-                      {isAdmin && j.status === "approved" && j.id !== gate.singleJobId && (
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="outline"
-                          disabled={!!busy}
-                          onClick={() => run(`single-${j.id}`, "release_single", { job_id: j.id }, () => `Leista siųsti tik šią. Ūkio kompiuteryje: npm run cms:write-one -- ${j.id}`)}
-                        >
-                          Leisti siųsti tik šią
-                        </Button>
-                      )}
                       {isAdmin && j.status === "error" && !j.write_started_at && (
                         <Button type="button" size="sm" variant="outline" disabled={!!busy} onClick={() => run(`retry-${j.id}`, "job_action", { job_id: j.id, action: "retry" })}>
                           Kartoti
@@ -274,81 +264,6 @@ export function CmsHistory({ jobs, isAdmin, canWrite, gate, focusBatch }: { jobs
         )}
       </Card>
 
-      <Dialog
-        open={!!approveIds}
-        onOpenChange={(o) => {
-          if (!o) {
-            setApproveIds(null);
-            setUnderstood(false);
-          }
-        }}
-      >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Patvirtinti {approveIds?.length ?? 0} atskyrim.?</DialogTitle>
-          </DialogHeader>
-          <DialogBody className="space-y-3 text-[13px]">
-            <p className="flex items-start gap-2 rounded-control border border-warning/40 bg-warning-soft px-3 py-2 font-medium text-warning">
-              <AlertTriangle className="mt-0.5 size-4 shrink-0" /> {CMS_APPROVAL_WARNING}
-            </p>
-            <p className="text-text-secondary">
-              Patvirtinti nustatymai užfiksuojami. Ūkio kompiuteris juos siunčia tik tada, kai režimas patikrintas prižiūrimu bandymu (dabar patikrinti:{" "}
-              {gate.verifiedModes.length ? gate.verifiedModes.map((m) => CMS_MODE_LABEL[m]).join(", ") : "nė vienas"}).
-            </p>
-            <label className="flex items-center gap-2">
-              <input type="checkbox" checked={understood} onChange={(e) => setUnderstood(e.target.checked)} /> Suprantu ir tvirtinu
-            </label>
-          </DialogBody>
-          <DialogFooter>
-            <Button type="button" variant="ghost" onClick={() => setApproveIds(null)}>
-              Atšaukti
-            </Button>
-            <Button
-              type="button"
-              disabled={!understood || busy === "approve"}
-              onClick={async () => {
-                const ids = approveIds ?? [];
-                setApproveIds(null);
-                setUnderstood(false);
-                await run("approve", "approve", { job_ids: ids, confirm: true }, (d) => {
-                  const r = d as { approved: number; unchanged: number; refused: { reason: string }[] };
-                  return `Patvirtinta ${r.approved}${r.unchanged ? `, jau patvirtinta ${r.unchanged}` : ""}${r.refused.length ? `, atmesta ${r.refused.length}: ${r.refused.map((x) => x.reason).join(" ")}` : ""}.`;
-                });
-              }}
-            >
-              <ShieldCheck className="size-4" /> Patvirtinti
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog open={!!verifyMode} onOpenChange={(o) => !o && setVerifyMode(null)}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Leisti siųsti režimą „{verifyMode ? CMS_MODE_LABEL[verifyMode] : ""}“?</DialogTitle>
-          </DialogHeader>
-          <DialogBody className="space-y-2 text-[13px]">
-            <p>Patvirtinkite tik tada, kai prižiūrimo bandymo karvė DelPro sistemoje buvo realiai atskirta pagal nustatytą grafiką.</p>
-            <p className="text-text-secondary">Po to ūkio kompiuteris automatiškai siųs visus patvirtintus šio režimo atskyrimus.</p>
-          </DialogBody>
-          <DialogFooter>
-            <Button type="button" variant="ghost" onClick={() => setVerifyMode(null)}>
-              Atšaukti
-            </Button>
-            <Button
-              type="button"
-              variant="danger"
-              onClick={async () => {
-                const m = verifyMode;
-                setVerifyMode(null);
-                if (m) await run(`verify-${m}`, "set_mode_verified", { mode: m, verified: true, confirm: true });
-              }}
-            >
-              Karvė buvo atskirta — leisti
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
     </div>
   );
 }
@@ -367,57 +282,3 @@ function DelproState({ j }: { j: CmsSeparationJobView }) {
     </p>
   );
 }
-
-function GatePanel({
-  gate,
-  busy,
-  onVerify,
-  onUnverify,
-  onClearSingle,
-}: {
-  gate: CmsGate;
-  busy: string | null;
-  onVerify: (m: CmsMode) => void;
-  onUnverify: (m: CmsMode) => void;
-  onClearSingle: () => void;
-}) {
-  return (
-    <Card className="space-y-2 px-4 py-3 text-[13px]">
-      <div className="flex flex-wrap items-center gap-2">
-        <span className="font-medium text-text-primary">Siuntimas į DelPro</span>
-        <Badge tone={gate.workerMode === "gateway" ? "warning" : "neutral"}>Ūkio kompiuteris: CMS_OUTBOUND_MODE={gate.workerMode ?? "nežinoma"}</Badge>
-        {gate.workerSeenAt && <span className="text-[12px] text-text-muted">paskutinį kartą {formatVilnius(gate.workerSeenAt)}</span>}
-      </div>
-      <div className="flex flex-wrap items-center gap-2">
-        {(["period", "ongoing"] as CmsMode[]).map((m) => {
-          const on = gate.verifiedModes.includes(m);
-          return (
-            <span key={m} className="flex items-center gap-1.5 rounded-control border border-border px-2 py-1">
-              {CMS_MODE_LABEL[m]}: <Badge tone={on ? "success" : "neutral"}>{on ? "siunčiama" : "nepatikrinta"}</Badge>
-              <Button type="button" size="sm" variant="ghost" disabled={!!busy} onClick={() => (on ? onUnverify(m) : onVerify(m))}>
-                {on ? "Sustabdyti" : "Leisti"}
-              </Button>
-            </span>
-          );
-        })}
-        <span className="flex items-center gap-1.5 rounded-control border border-border px-2 py-1">
-          {CMS_MODE_LABEL.once}: <Badge tone="danger">nepalaikoma</Badge>
-        </span>
-      </div>
-      {gate.singleJobId ? (
-        <p className="text-[12px] text-warning">
-          Leista siųsti tik vieną užduotį. Ūkio kompiuteryje: <code className="font-mono">npm run cms:write-one -- {gate.singleJobId}</code>{" "}
-          <button type="button" className="ml-1 underline" onClick={onClearSingle}>
-            atšaukti leidimą
-          </button>
-        </p>
-      ) : (
-        <p className="text-[12px] text-text-muted">
-          Pirmas siuntimas — vienas gyvulys: patvirtinkite, spauskite „Leisti siųsti tik šią“, paleiskite komandą ūkio kompiuteryje ir patikrinkite DelPro bei realų
-          atskyrimą. Tik tada leiskite režimą.
-        </p>
-      )}
-    </Card>
-  );
-}
-

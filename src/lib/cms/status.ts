@@ -29,4 +29,3 @@ export const CMS_STATUS_TONE: Record<CmsJobStatus, CmsTone> = {
 
 export const CMS_OPEN_STATUSES: CmsJobStatus[] = ["pending_approval", "approved", "processing", "needs_review"];
 
-export const CMS_APPROVAL_WARNING = "Šie nustatymai gali valdyti fizinį gyvulių atskyrimą per DelPro CMS.";

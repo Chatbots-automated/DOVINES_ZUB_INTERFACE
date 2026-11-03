@@ -108,12 +108,14 @@ test("activation: 'fully active' only when every operational check passes; the h
   };
   const checks = act.activationChecks(good, now);
   assert.equal(act.fullyActive(checks), true);
-  assert.deepEqual(checks.map((c) => c.id), ["worker", "gateway", "gvet", "local", "gvet_switch", "mode", "destination"]);
+  assert.deepEqual(checks.map((c) => c.id), ["worker", "gateway", "gvet", "local", "gvet_switch"]);
+  // 0052: no verified mode / destination confirmation needed
+  assert.equal(act.fullyActive(act.activationChecks({ ...good, verified_modes: [], destination_verified: null }, now)), true);
   // a broken / incomplete / never-run full DelPro scan changes nothing
   for (const live of [null, { finished_at: "2026-11-01T00:00:00Z", complete: false }]) {
     assert.equal(act.fullyActive(act.activationChecks({ ...good, live_last_refresh: live }, now)), true);
   }
-  for (const [k, v] of [["outbound_enabled", false], ["destination_verified", null], ["worker_cms_mode", "off"], ["verified_modes", []],
+  for (const [k, v] of [["outbound_enabled", false], ["worker_cms_mode", "off"],
     ["worker_seen_at", "2026-11-03 10:00:00+00"]]) {
     assert.equal(act.fullyActive(act.activationChecks({ ...good, [k]: v }, now)), false, k);
   }

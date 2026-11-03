@@ -127,6 +127,9 @@ GetData each (`CMS_LIVE_MAX_ROWS`, no paging exists) — complete only when neit
 milk setting was found only by key; exits 2 otherwise. Install / repair / status / upgrade: `scripts\gvet-worker.ps1` (§12).
 One continuous worker per folder (`logs\worker.lock`).
 
+0052: an admin's *Patvirtinti* is enough — the routine claim no longer needs a verified mode or the destination note (the emergency stop
+`cms_outbound_enabled` and `CMS_OUTBOUND_MODE=gateway` still apply; the per-animal DelPro re-check still runs before every write).
+
 0050 (worker 0.3.0): `GetData AnimalMilkSetting [Key, Animal]` breaks above ~1000 rows on the farm (`System.NullReferenceException`,
 shown as `GETDATA_ERROR`). The live read now takes the keys alone, maps ≤ `CMS_LIVE_MILK_BULK_TOP` (1000) in one read and the rest
 by Key (`CMS_LIVE_CONCURRENCY`, `CMS_LIVE_READ_ATTEMPTS`); SortCow by the `ActionType` filter, per milk setting if that read fails or

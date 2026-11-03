@@ -1,4 +1,5 @@
-// CMS atskyrimai — the activation checklist (0049, simplified in 0051). Pure (no imports): supabase/tests/cms-separation.test.mjs tests it.
+// CMS atskyrimai — the activation checklist (0049, simplified in 0051 and 0052). Pure (no imports): supabase/tests/cms-separation.test.mjs tests it.
+// 0052: no "mode verified" / "destination confirmed" steps — an admin's "Patvirtinti" releases a job to the worker.
 // Farm-wide operational readiness only. The historical full DelPro scan is NOT a condition (0051): the worker checks each animal
 // (identity, its one milk setting, its existing SortCow records) right before writing — that per-job check is shown as a note,
 // never as a global green tick. "Fully active" = every check below passes.
@@ -45,13 +46,6 @@ export function activationChecks(s: ActivationStatus | null, now = Date.now()): 
     { id: "gvet", label: "GVET API pasiekiamas", ok: seen < 5, detail: Number.isFinite(seen) ? `paskutinis signalas prieš ${Math.round(seen)} min.` : "signalo nėra" },
     { id: "local", label: "CMS_OUTBOUND_MODE=gateway", ok: s?.worker_cms_mode === "gateway", detail: `ūkio kompiuteryje: ${s?.worker_cms_mode ?? "?"}` },
     { id: "gvet_switch", label: "CMS siuntimas įjungtas GVET", ok: !!s?.outbound_enabled, detail: s?.outbound_enabled ? "įjungta" : "sustabdyta" },
-    { id: "mode", label: "Režimas patvirtintas", ok: (s?.verified_modes ?? []).length > 0, detail: (s?.verified_modes ?? []).join(", ") || "nė vienas" },
-    {
-      id: "destination",
-      label: "Fizinė vieta ir elgsena patikrinta",
-      ok: !!s?.destination_verified,
-      detail: s?.destination_verified ? `${s.destination_verified.note ?? ""}${s.destination_verified.by_name ? ` (${s.destination_verified.by_name})` : ""}` : "ūkio operatorius dar nepatvirtino",
-    },
   ];
 }
 

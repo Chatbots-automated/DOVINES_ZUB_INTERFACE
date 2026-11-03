@@ -6,17 +6,14 @@ import { CheckCircle2, CircleSlash, Loader2, OctagonX, Power, XCircle } from "lu
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { Input, Label } from "@/components/ui/input";
-import { Dialog, DialogBody, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 import { cmsPost } from "@/lib/cms/client";
 import { PER_JOB_CHECK_NOTE, activationChecks, fullyActive } from "@/lib/cms/activation";
-import { formatVilnius } from "@/lib/cms/separation";
 import type { CmsStatus } from "@/lib/supabase/types";
 
 const STOP_NOTE = "Sustabdžius siuntimą (ar patį darbininką), jau DelPro sukurti atskyrimai NEATŠAUKIAMI — juos išjunkite DelPro programoje.";
 
-/** CMS activation checklist + GVET master switch (emergency stop) + the operator's destination confirmation. */
+/** CMS activation checklist + GVET master switch (emergency stop). 0052: approval alone sends — no destination / mode steps. */
 export function CmsActivationPanel({ status, isAdmin, canWrite, compact }: { status: CmsStatus | null; isAdmin: boolean; canWrite: boolean; compact?: boolean }) {
   const router = useRouter();
   const [now] = React.useState(() => Date.now());
@@ -24,9 +21,6 @@ export function CmsActivationPanel({ status, isAdmin, canWrite, compact }: { sta
   const active = fullyActive(checks);
   const [busy, setBusy] = React.useState<string | null>(null);
   const [message, setMessage] = React.useState<{ ok: boolean; text: string } | null>(null);
-  const [dialog, setDialog] = React.useState<"enable" | "destination" | null>(null);
-  const [understood, setUnderstood] = React.useState(false);
-  const [note, setNote] = React.useState("");
 
   async function run(key: string, op: string, payload: Record<string, unknown>, okText?: string) {
     setBusy(key);
@@ -71,7 +65,7 @@ export function CmsActivationPanel({ status, isAdmin, canWrite, compact }: { sta
         <Badge tone={active ? "success" : "neutral"}>{active ? "Visiškai aktyvu" : `Neįvykdyta: ${checks.filter((c) => !c.ok).length} iš ${checks.length}`}</Badge>
         {stopButton}
         {isAdmin && !status?.outbound_enabled && (
-          <Button type="button" size="sm" variant="outline" disabled={!!busy} onClick={() => setDialog("enable")}>
+          <Button type="button" size="sm" variant="outline" disabled={!!busy} onClick={() => run("enable", "set_outbound_enabled", { enabled: true, confirm: true })}>
             <Power className="size-4" /> Įjungti CMS siuntimą
           </Button>
         )}
@@ -91,77 +85,8 @@ export function CmsActivationPanel({ status, isAdmin, canWrite, compact }: { sta
       <div className="flex flex-wrap items-center gap-2 border-t border-border bg-surface-secondary px-4 py-2 text-[12px] text-text-secondary">
         <CircleSlash className="size-4 shrink-0" />
         <span className="mr-auto">{STOP_NOTE} Ūkio kompiuteryje: <code className="font-mono">scripts\gvet-worker.ps1 -Action cms-off</code></span>
-        {isAdmin &&
-          (status?.destination_verified ? (
-            <span>
-              Vieta patikrinta {formatVilnius(status.destination_verified.at)}{" "}
-              <button type="button" className="underline" disabled={!!busy} onClick={() => run("dest-off", "set_destination_verified", { verified: false })}>
-                atšaukti
-              </button>
-            </span>
-          ) : (
-            <Button type="button" size="sm" variant="ghost" onClick={() => setDialog("destination")}>
-              Patvirtinti fizinę vietą
-            </Button>
-          ))}
       </div>
       {message && <p className={cn("px-4 py-2 text-[13px]", message.ok ? "text-success" : "text-danger")}>{message.text}</p>}
-
-      <Dialog
-        open={!!dialog}
-        onOpenChange={(o) => {
-          if (!o) {
-            setDialog(null);
-            setUnderstood(false);
-          }
-        }}
-      >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>{dialog === "enable" ? "Įjungti CMS siuntimą?" : "Fizinė atskyrimo vieta patikrinta?"}</DialogTitle>
-          </DialogHeader>
-          <DialogBody className="space-y-3 text-[13px]">
-            {dialog === "enable" ? (
-              <>
-                <p>Ūkio kompiuteris galės siųsti patvirtintus atskyrimus (patvirtintų režimų, jei patikrinta fizinė vieta; arba vieną išleistą užduotį).</p>
-                <p className="text-text-secondary">Tam dar reikia CMS_OUTBOUND_MODE=gateway ūkio kompiuteryje. Gydymų siuntimas neliečiamas.</p>
-              </>
-            ) : (
-              <>
-                <p>
-                  GVET nenurodo rūšiavimo vietos — DelPro pats nukreipia SortCow karvę. Patvirtinkite tik tada, kai ūkio operatorius matė, kur bandymo karvė realiai
-                  buvo nukreipta.
-                </p>
-                <div>
-                  <Label htmlFor="cms-dest-note">Kur karvė buvo nukreipta (privaloma)</Label>
-                  <Input id="cms-dest-note" value={note} maxLength={300} onChange={(e) => setNote(e.target.value)} placeholder="pvz. Rūšiavimo patalpa 1, 2026-11-03 rytinis melžimas" />
-                </div>
-              </>
-            )}
-            <label className="flex items-center gap-2">
-              <input type="checkbox" checked={understood} onChange={(e) => setUnderstood(e.target.checked)} /> Patvirtinu
-            </label>
-          </DialogBody>
-          <DialogFooter>
-            <Button type="button" variant="ghost" onClick={() => setDialog(null)}>
-              Atšaukti
-            </Button>
-            <Button
-              type="button"
-              disabled={!understood || (dialog === "destination" && !note.trim())}
-              onClick={async () => {
-                const d = dialog;
-                setDialog(null);
-                setUnderstood(false);
-                if (d === "enable") await run("enable", "set_outbound_enabled", { enabled: true, confirm: true });
-                else await run("dest", "set_destination_verified", { verified: true, confirm: true, note }, "Vieta patvirtinta.");
-              }}
-            >
-              Patvirtinti
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
     </Card>
   );
 }

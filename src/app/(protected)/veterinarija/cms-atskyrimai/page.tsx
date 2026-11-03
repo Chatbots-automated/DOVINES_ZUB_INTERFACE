@@ -133,8 +133,6 @@ export default async function CmsAtskyrimaiPage({ searchParams }: { searchParams
         canWrite={canWrite}
         focusBatch={sp.batch ?? null}
         gate={{
-          verifiedModes: status?.verified_modes ?? [],
-          singleJobId: status?.single_job_id ?? null,
           workerMode: status?.worker_cms_mode ?? null,
           workerSeenAt: status?.worker_seen_at ?? null,
         }}

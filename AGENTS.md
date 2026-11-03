@@ -273,6 +273,11 @@ not look for Žibartoniai's 0013–0021 VIC/UNIFORM history here.
   keeps the old rows and marks `cms_animal_live_checks.ok=false`). Staff request reads with `cms_request_animal_refresh(uuid[])`; saving a
   batch requests its cows. Activation = 7 operational checks (`src/lib/cms/activation.ts`). Windows: the task runs the hidden supervisor
   `scripts\gvet-worker.ps1 -Action run` (restarts node; exit 3 = lock held → wait); the lock is stale after 2 min or when its PID isn't node.exe.
+- **CMS approve = send** (0052, farm's decision 2026-11-03): an admin's *Patvirtinti* releases the job to the worker — no "Suprantu" checkbox,
+  no verified mode (`cms_verified_modes`), no destination note (`cms_destination_verified`); both settings/functions stay but nothing reads
+  them. Still enforced: admin-only approval refusing any job with a problem (Sort Once / SortArea never approvable), the claim's own
+  `period`/`ongoing` + no-SortArea filter, the emergency stop `cms_outbound_enabled` (0052 switched it on), worker `CMS_OUTBOUND_MODE=gateway`,
+  the per-animal DelPro re-check, needs_review on an unverified write. A worker naming a job (`cms:write-one`) gets that approved job.
 - **DelPro write path** — preferred order: DelPro's own import function → UI automation → direct SQL insert into DelPro's
   database. Direct SQL bypasses DelPro's own logic and may affect DeLaval support: only with the farm's written OK.
   All DelPro-specific SQL lives in `delpro-worker/queries/*.sql`; files marked `TODO(discovery)` are placeholders and

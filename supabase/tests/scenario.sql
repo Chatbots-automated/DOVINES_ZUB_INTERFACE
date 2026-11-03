@@ -2481,11 +2481,6 @@ do $$ begin if cms_claim_next_job('{"worker_id":"w1"}') is not null then raise e
 reset role;
 set role authenticated;
 select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000a',false);
-do $$ declare blocked boolean := false; begin
-  begin perform cms_approve_jobs(array(select id from cms_separation_jobs where batch_id = current_setting('t.cms_batch')::uuid), false);
-  exception when others then blocked := true; end;
-  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: approval without the physical-sorting confirmation'; end if;
-end $$;
 select 'cms_approve' as step, r->'approved' as approved, jsonb_array_length(r->'refused') as refused
 from (select cms_approve_jobs(array(select id from cms_separation_jobs where batch_id = current_setting('t.cms_batch')::uuid), true) as r) x;
 -- idempotent
@@ -2499,10 +2494,6 @@ do $$ begin
     raise exception 'snapshot must carry the DelPro animal GUID';
   end if;
 end $$;
--- approved, but no mode verified and no single job released: the worker gets nothing
-set role service_role;
-do $$ begin if cms_claim_next_job('{"worker_id":"w1"}') is not null then raise exception 'unverified mode claimed'; end if; end $$;
-reset role;
 -- release one job for the supervised test; only a worker naming it gets it, once
 set role authenticated;
 select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000a',false);
@@ -2560,12 +2551,6 @@ end $$;
 set role authenticated;
 select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000a',false);
 select cms_set_mode_verified('period', true, true);
-reset role;
-set role service_role;
-do $$ begin if cms_claim_next_job('{"worker_id":"w1"}') is not null then raise exception 'ongoing job claimed while only period verified'; end if; end $$;
-reset role;
-set role authenticated;
-select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000a',false);
 do $$ declare blocked boolean := false; begin
   begin perform cms_set_mode_verified('ongoing', true, true);
   exception when others then blocked := true; end;
@@ -2639,9 +2624,6 @@ do $$ declare blocked boolean := false; begin
   exception when others then blocked := true; end;
   if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: destination verified without a note'; end if;
 end $$;
-reset role;
-set role service_role;
-do $$ begin if cms_claim_next_job('{"worker_id":"w1"}') is not null then raise exception 'routine claim without a verified destination'; end if; end $$;
 reset role;
 set role authenticated;
 select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000a',false);
@@ -2789,3 +2771,30 @@ do $$ begin
 end $$;
 reset role;
 select 'assert' as step, '0051 CMS: targeted per-animal state, requests, per-animal removal, failed read kept, no full-scan gate' as what;
+
+-- 0052. "Patvirtinti" is the only step: no verified mode, no destination note, no confirmation flag — the emergency stop still wins.
+update system_settings set setting_value = '' where setting_key in ('cms_verified_modes', 'cms_destination_verified', 'cms_single_job_id');
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000b',false);
+select set_config('t.cms52', cms_save_batch(jsonb_build_object('submit', true, 'items', jsonb_build_array(
+  jsonb_build_object('animal_id', (select id from animals where tag_no = 'LT0000CMS00020'), 'mode', 'ongoing', 'start_local', '2099-12-03T08:00', 'sessions', '[2]'::jsonb))))->>'batch_id', false);
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000a',false);
+select 'cms_approve52' as step, cms_approve_jobs(array(select id from cms_separation_jobs where batch_id = current_setting('t.cms52')::uuid))->'approved' as approved;
+select cms_set_outbound_enabled(false);
+reset role;
+set role service_role;
+do $$ begin if cms_claim_next_job('{"worker_id":"w1"}') is not null then raise exception 'emergency stop must still block'; end if; end $$;
+reset role;
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000a',false);
+select cms_set_outbound_enabled(true, true);
+reset role;
+set role service_role;
+do $$ declare r jsonb; begin
+  if fn_cms_destination_verified() or cardinality(fn_cms_verified_modes()) > 0 then raise exception 'precondition: no mode / destination gate set'; end if;
+  r := cms_claim_next_job('{"worker_id":"w1"}');
+  if r is null or r#>>'{snapshot,orn}' <> 'LT0000CMS00020' or r#>>'{snapshot,mode}' <> 'ongoing' then raise exception 'approved job must go straight to the worker: %', r; end if;
+  perform cms_report_job(jsonb_build_object('job_id', r->>'job_id', 'worker_id', 'w1', 'phase', 'result', 'outcome', 'error', 'error_message', 'test'));
+end $$;
+reset role;
+select 'assert' as step, '0052 CMS: approval alone releases the job; emergency stop still blocks' as what;

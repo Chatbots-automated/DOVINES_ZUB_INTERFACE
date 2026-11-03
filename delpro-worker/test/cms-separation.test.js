@@ -119,7 +119,7 @@ test("dry-run XML: proposed AnimalActionSetting, every session explicit, no Sort
   assert.doesNotMatch(cms.buildActionSettingXml({ ...SNAP, mode: "ongoing", end_at: null }, "8246"), /EndDate/);
 });
 
-test("snapshot validation: missing dates, invalid sessions, unverified modes and destinations are refused", () => {
+test("snapshot validation: missing dates, invalid sessions, Sort Once and a chosen SortArea are refused", () => {
   const now = new Date("2026-11-02T00:00:00Z");
   assert.deepEqual(cms.snapshotProblems(SNAP, now), []);
   assert.match(cms.snapshotProblems({ ...SNAP, end_at: null }, now).join(), /pabaigos/);
@@ -149,12 +149,10 @@ test("milk-setting lookup: exactly one, else nothing is written", async () => {
   await assert.rejects(cms.findMilkSetting(d, GUID), /2 AnimalMilkSetting/);
 });
 
-test("worker with CMS_OUTBOUND_MODE=off claims nothing; approved jobs wait, unverified modes are never handed out", async () => {
+test("worker with CMS_OUTBOUND_MODE=off claims nothing; approved jobs wait", async () => {
   const ids = await approvedBatch([await item("LT000007300337")]);
   assert.equal(await idx.runCms(), 0);
   assert.equal((await job(ids.LT000007300337)).status, "approved");
-  // even a write-enabled worker gets nothing until GVET releases a job or a mode is verified
-  assert.equal(await cms.runCmsOutbound(delproWith()), 0);
   await asUser(ADMIN, `select cms_cancel_jobs(array['${ids.LT000007300337}']::uuid[])`);
 });
 
@@ -171,11 +169,11 @@ test("supervised single write: created, read back, every property compared -> su
   assert.equal(created.StartDate, "2099-11-03T06:00:00Z");
   assert.equal(created.IsValidForSession3, "false");
   assert.equal(j.readback.verified, true);
-  // gate closed; the other job (other mode) is not handed out, and nothing is sent twice
+  // nothing is sent twice (0052: the other approved job would now go routinely — cancel it to check that alone)
   assert.equal(await cms.runCmsOutbound(d, { jobId: ids.LT000007300337 }), 0);
+  await asUser(ADMIN, `select cms_cancel_jobs(array['${ids.LT000007300338}']::uuid[])`);
   assert.equal(await cms.runCmsOutbound(d), 0);
   assert.equal(d.calls.filter(([op]) => op === "CreateData").length, 1);
-  await asUser(ADMIN, `select cms_cancel_jobs(array['${ids.LT000007300338}']::uuid[])`);
 });
 
 test("existing active SortCow in DelPro: never overwritten or duplicated, job fails visibly", async () => {
