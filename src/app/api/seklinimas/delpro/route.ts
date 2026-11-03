@@ -9,6 +9,7 @@ export const dynamic = "force-dynamic";
 // Authorization lives in the RPCs (fn_is_active_staff); this file only checks the origin and the session.
 //   { op: "request", tags?: string[], animal_ids?: string[] }  -> the farm PC re-reads those animals from DelPro
 //   { op: "dismiss_duplicate", id }                             -> "Palikti abu"
+//   { op: "set_semen_name", semen_key, name }                   -> shared name for every insemination with that Semen key (0055)
 
 function sameOrigin(request: NextRequest) {
   const origin = request.headers.get("origin");
@@ -47,6 +48,13 @@ export async function POST(request: NextRequest) {
     if (error) return fail(error.message);
     revalidatePath("/veterinarija/sekinimas");
     return NextResponse.json({ ok: true, data: { ...data, message: "Pažymėta: tai du skirtingi sėklinimai." } });
+  }
+  if (body.op === "set_semen_name") {
+    if (typeof body.semen_key !== "string" || typeof body.name !== "string") return fail("Nurodykite spermą ir pavadinimą.");
+    const { data, error } = await supabase.rpc("delpro_semen_set_name", { p_semen_key: body.semen_key, p_name: body.name });
+    if (error) return fail(error.message);
+    revalidatePath("/veterinarija/sekinimas");
+    return NextResponse.json({ ok: true, data });
   }
   return fail("Nežinomas veiksmas.");
 }

@@ -446,7 +446,8 @@ test("0054 semen names: existing imports enriched in place with the verified Sem
   const res = await ins.runInseminationSync(readOnly(d), { tags: [tag] });
   assert.equal(res.ok, 1, "ok counts the cows read successfully");
   assert.equal(res.inserted, 0);
-  assert.ok(res.updated >= 3);
+  // 0055: the shared catalog may already have filled a row before its own upload compares it (then "unchanged")
+  assert.ok(res.updated + res.unchanged >= 3);
   const rows = await recs(tag);
   assert.equal(rows.length, countBefore, "no record duplicated");
   const a = byGuid(rows, g(80));
@@ -492,5 +493,50 @@ test("0054 semen names: existing imports enriched in place with the verified Sem
   const round = JSON.parse((await q(`select setting_value from system_settings where setting_key = 'delpro_insemination_last_round'`))[0].setting_value);
   assert.equal(round.counts.ok, 1);
   assert.equal(round.counts.targets, 1);
+  onlyGetData(d);
+});
+
+test("0055 shared semen names: one name per Semen key for every insemination; resolving or naming it once fills all rows", async () => {
+  await db.exec(`insert into animals (tag_no, animal_no, delpro_object_guid, source) values
+    ('LT000009373761', '3761', '${g(600)}', 'delpro'), ('LT000009174799', '4799', '${g(601)}', 'delpro')`);
+  const d = farm();
+  addEvent(d, g(90), g(600), "2026-11-03T06:00:00Z", { Semen: "2106" });
+  addEvent(d, g(91), g(601), "2026-11-03T06:00:00Z", { Semen: "2106" });
+  // DelPro has no readable name for 2106 at first
+  ins.clearSemenCache();
+  await ins.runInseminationSync(readOnly(d), { tags: ["LT000009373761", "LT000009174799"] });
+  const row = async (gd) => (await q(`select * from insemination_records where delpro_event_guid = $1`, [gd]))[0];
+  assert.equal((await row(g(90))).delpro_semen_label, null);
+  assert.equal((await q(`select count(*)::int as n from delpro_semen where semen_key = '2106'`))[0].n, 1);
+
+  // staff name the key once -> both cows' rows show it (and bull_name follows)
+  const r = (await asUser(VET, `select delpro_semen_set_name('2106', 'Very Syn sex') as r`)).r;
+  assert.equal(r.inseminations, 2);
+  for (const gd of [g(90), g(91)]) {
+    assert.equal((await row(gd)).delpro_semen_label, "Very Syn sex");
+    assert.equal((await row(gd)).bull_name, "Very Syn sex");
+  }
+  // DelPro later returns a name for 2106 while reading ONE cow: the staff name still wins everywhere, DelPro's is stored
+  d.db.Semen = { ...(d.db.Semen ?? {}), 2106: { Key: "2106", SemenName: "VerySyn Sexed", Comment: "Telyčioms" } };
+  ins.clearSemenCache();
+  const res = await ins.runInseminationSync(readOnly(d), { tags: ["LT000009373761"] });
+  assert.equal(res.inserted, 0);
+  const cat = (await q(`select * from delpro_semen where semen_key = '2106'`))[0];
+  assert.equal(cat.delpro_name, "VerySyn Sexed");
+  assert.equal(cat.name_override, "Very Syn sex");
+  assert.equal((await row(g(91))).delpro_semen_label, "Very Syn sex");
+  assert.equal((await row(g(91))).delpro_semen_comment, "Telyčioms", "the other cow got the comment without being re-read");
+  // clearing the staff name -> DelPro's name on every row, without re-reading
+  await asUser(VET, `select delpro_semen_set_name('2106', '')`);
+  assert.equal((await row(g(90))).delpro_semen_label, "VerySyn Sexed");
+  assert.equal((await row(g(91))).bull_name, "VerySyn Sexed");
+  // a bull typed in GVET is never replaced by the catalog
+  await asUser(VET, `update insemination_records set bull_name = 'Rankinis' where delpro_event_guid = '${g(91)}'`);
+  await asUser(VET, `select delpro_semen_set_name('2106', 'Kitas')`);
+  assert.equal((await row(g(91))).bull_name, "Rankinis");
+  assert.equal((await row(g(91))).delpro_semen_label, "Kitas");
+  // viewers can't name semen; the catalog itself is not client-writable
+  await asUser(VET, `update delpro_semen set name_override = 'x' where semen_key = '2106'`).catch(() => null);
+  assert.equal((await q(`select name_override from delpro_semen where semen_key = '2106'`))[0].name_override, "Kitas", "no client UPDATE policy");
   onlyGetData(d);
 });

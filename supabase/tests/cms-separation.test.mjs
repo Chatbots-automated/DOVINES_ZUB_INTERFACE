@@ -167,3 +167,13 @@ test("Sėklinimas 'Bulius / sperma': SemenName, else 'Sperma #<key>', '—' only
   assert.equal(sek.semenColumnText({ ...base, source: "gvet", sperm: { name: "Produktas" } }), "Produktas");
   assert.equal(sek.semenColumnText({ ...base, source: "gvet", delpro_semen_key: "2111" }), "—");
 });
+
+test("Sėklinimas panel: Postgres heartbeat text is parsed (was shown as 'Ūkio kompiuteris neatsako')", () => {
+  const want = Date.parse("2026-11-03T21:20:12.123Z");
+  assert.equal(sek.parsePgTimestamp("2026-11-03 21:20:12.123456+00"), want);
+  assert.equal(sek.parsePgTimestamp("2026-11-03 23:20:12.123+02"), want);
+  assert.equal(sek.parsePgTimestamp("2026-11-03T21:20:12.123Z"), want);
+  assert.equal(sek.parsePgTimestamp("2026-11-03 21:20:12.123+0000"), want);
+  assert.ok(Number.isNaN(sek.parsePgTimestamp(null)));
+  assert.ok(Number.isNaN(sek.parsePgTimestamp("nonsense")));
+});

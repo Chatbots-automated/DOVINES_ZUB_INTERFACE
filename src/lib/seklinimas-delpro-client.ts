@@ -1,7 +1,7 @@
 // Browser -> /api/seklinimas/delpro (0053). Any non-JSON answer (login redirect, proxy error) becomes a readable error.
 export type DelproInsResult = { ok: true; data: { message?: string; requested?: number } | null } | { ok: false; error: string };
 
-export async function delproInseminationPost(op: "request" | "dismiss_duplicate", payload: Record<string, unknown>): Promise<DelproInsResult> {
+export async function delproInseminationPost(op: "request" | "dismiss_duplicate" | "set_semen_name", payload: Record<string, unknown>): Promise<DelproInsResult> {
   let res: Response;
   try {
     res = await fetch("/api/seklinimas/delpro", {

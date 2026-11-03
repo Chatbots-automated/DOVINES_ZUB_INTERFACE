@@ -727,6 +727,8 @@ export interface Database {
       cms_sort_areas: { Row: Row<CmsSortAreaRow>; Insert: Insertable<CmsSortAreaRow, never>; Update: Updatable<CmsSortAreaRow>; Relationships: [] };
       // 0051 — per-animal targeted DelPro reads (written by cms_request_animal_refresh / the worker)
       cms_animal_live_checks: { Row: Row<CmsAnimalLiveCheckRow>; Insert: Insertable<CmsAnimalLiveCheckRow, never>; Update: Updatable<CmsAnimalLiveCheckRow>; Relationships: [] };
+      // 0055 — shared semen names per DelPro Semen.Key (written by the import / delpro_semen_set_name)
+      delpro_semen: { Row: Row<DelproSemenRow>; Insert: Insertable<DelproSemenRow, "semen_key">; Update: Updatable<DelproSemenRow>; Relationships: [] };
       // 0053 — per-animal DelPro insemination reads (written by the worker / delpro_insemination_request)
       delpro_insemination_scans: {
         Row: Row<DelproInseminationScanRow>;
@@ -1239,6 +1241,7 @@ export interface Database {
       cms_status: { Args: Record<string, never>; Returns: CmsStatus };
       // 0053 DelPro -> GVET inseminations
       delpro_insemination_request: { Args: { p_body: { animal_ids?: string[]; tags?: string[] } }; Returns: { ok: boolean; requested: number; not_linked: number; message: string } };
+      delpro_semen_set_name: { Args: { p_semen_key: string; p_name: string }; Returns: { ok: boolean; inseminations: number; message: string } };
       delpro_insemination_dismiss_duplicate: { Args: { p_id: string }; Returns: { ok: boolean } };
       delpro_insemination_status: { Args: Record<string, never>; Returns: DelproInseminationStatus };
       cms_set_outbound_enabled: { Args: { p_enabled: boolean; p_confirm?: boolean }; Returns: { ok: boolean; enabled: boolean; message: string } };
@@ -1601,6 +1604,16 @@ export type CmsLiveActionSettingRow = {
   last_updated_at: string | null;
   seen_at: string;
   removed_at: string | null;
+};
+
+export type DelproSemenRow = {
+  semen_key: string;
+  delpro_name: string | null;
+  delpro_comment: string | null;
+  name_override: string | null;
+  synced_at: string | null;
+  updated_at: string;
+  updated_by: string | null;
 };
 
 export type DelproInseminationScanRow = {

@@ -290,6 +290,10 @@ not look for Žibartoniai's 0013–0021 VIC/UNIFORM history here.
   0054 (worker 0.5.1): `Semen [Key, SemenName, Comment]` (verified) — `delpro_semen_label` = SemenName, `delpro_semen_comment` = Comment,
   `bull_name` = DelPro Bull else SemenName while nobody edited it; a lookup that failed omits `semen_label` and GVET keeps the stored one
   (`fn_ins_semen_value`). Display rule = `semenColumnText()` in `src/lib/seklinimas.ts`. Never map Semen.Key / SemenName to `reproduktoriaus_id`.
+  0055: shared semen names — `delpro_semen` (one row per Semen.Key: `delpro_name`/`delpro_comment` from DelPro, staff `name_override`
+  via `delpro_semen_set_name`); the import stores resolved names per key and gives every row the catalog name, and a catalog change is
+  copied to all rows with that key (`fn_delpro_semen_propagate`; `bull_name` only while not typed in GVET). Edited in the Sėklinimas panel.
+  `parsePgTimestamp()` (`src/lib/seklinimas.ts`) for Postgres text timestamps — `Date.parse` can't read "+00".
   VIC: still only the CSV export (as in Monika — there is no VIC API link); DelPro rows lack pažymėjimo Nr. / sėklintojo kodas / bull KK
   until VIC work fills them (`delpro_semen_key` kept for that).
 - **DelPro write path** — preferred order: DelPro's own import function → UI automation → direct SQL insert into DelPro's

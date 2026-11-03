@@ -70,6 +70,21 @@ export type InseminationRow = {
   delpro_possible_duplicate_of: string | null;
 };
 
+/**
+ * A Postgres timestamptz as text ("2026-11-03 21:20:12.123456+00", what system_settings / now()::text hold) or ISO -> epoch ms.
+ * Date.parse can't read the "+00" offset or a space separator, which made the heartbeat look missing.
+ */
+export function parsePgTimestamp(v: string | null | undefined): number {
+  if (!v) return NaN;
+  const t = v.trim().replace(" ", "T");
+  if (!t.includes("T")) return Date.parse(t);
+  const iso = t
+    .replace(/(\.\d{3})\d+/, "$1")
+    .replace(/([+-]\d{2})$/, "$1:00")
+    .replace(/([+-]\d{2})(\d{2})$/, "$1:$2");
+  return Date.parse(iso);
+}
+
 /** Europe/Vilnius wall clock of a DelPro instant ("2014-06-09 00:00"). */
 export function vilniusDateTime(iso: string | null | undefined): string {
   if (!iso) return "—";
