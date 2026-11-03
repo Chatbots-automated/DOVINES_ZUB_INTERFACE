@@ -581,6 +581,66 @@ powershell -ExecutionPolicy Bypass -File C:\GVET\delpro-worker\scripts\gvet-work
 
 Optional, diagnostic only: `npm.cmd run cms:live` (whole DelPro, slow, may be incomplete — blocks nothing).
 
+## 15. DelPro → GVET inseminations (0053, worker 0.5.0)
+
+What it does: the worker reads, for each GVET cow linked to DelPro (`animals.delpro_object_guid`), its `InseminationEvent` records
+(filter `Animal`) and, for each one, the `AnimalEvent` with the same `ObjectGuid` (the date, UTC). Valid events land in GVET
+**Sėklinimas** as `source = DelPro`, one row per DelPro event GUID. **DelPro is only read** (GetData). It is independent of treatments
+(`OUTBOUND_MODE`) and CMS (`CMS_OUTBOUND_MODE`), and arrives **off** (`INSEMINATION_SOURCE=off`).
+
+1. Developer: apply `supabase/migrations/0053_delpro_inseminations.sql` (after a backup) **before** the worker upgrade. It needs 0051
+   and 0052 applied first (apply any of 0051–0053 not applied yet, in order).
+2. Farm PC, PowerShell **as Administrator**, logged in as the farm account. Run the script **from the new package**:
+
+```powershell
+$zip = "$env:USERPROFILE\Downloads\delpro-worker-0053.zip"
+Unblock-File $zip
+$tmp = "$env:TEMP\gvet-worker-0053"
+Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
+Expand-Archive $zip $tmp
+powershell -ExecutionPolicy Bypass -File "$tmp\delpro-worker\scripts\gvet-worker.ps1" -Action upgrade -Source "$tmp\delpro-worker" -Dir C:\GVET\delpro-worker
+```
+
+   `.env` is kept; only missing keys are added (`INSEMINATION_SOURCE=off` …). `OUTBOUND_MODE` / `CMS_OUTBOUND_MODE` are not touched.
+
+3. Worker, treatments and CMS still running:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File C:\GVET\delpro-worker\scripts\gvet-worker.ps1 -Action status
+```
+
+   Expect `.env: OUTBOUND_MODE=gateway  CMS_OUTBOUND_MODE=gateway … INSEMINATION_SOURCE=off`, `Supervisor running`, one worker
+   process, heartbeat < 300 s; the log's first line shows `v0.5.0 … CMS=gateway … sėklinimai=off`.
+
+4. Read-only check (writes nothing to GVET or DelPro; zero events is a valid answer):
+
+```powershell
+Set-Location C:\GVET\delpro-worker
+npm.cmd run insemination:preview -- --tag LT000009526299
+npm.cmd run insemination:inspect          # optional: GetMetadata + samples of InseminationEvent / AnimalEvent / Semen -> discovery\
+```
+
+   Each event prints as `<Lithuanian date> (<UTC instant>) <event GUID> Nr.<n> metodas <code> sperma <Semen key> → new|changed|unchanged`.
+   Exit code 2 = a cow could not be read completely / an event failed a check / the tag is not DelPro-linked.
+   If `insemination:inspect` shows readable Semen properties (e.g. a name or code), put them in `.env`
+   `INSEMINATION_SEMEN_PROPERTIES=Name,Code` (only names the metadata shows) and repeat the preview.
+
+5. One cow into GVET (writes to GVET only), then check it in GVET → Sėklinimas (source filter *Iš DelPro*):
+
+```powershell
+npm.cmd run insemination:sync-one -- --tag LT000009526299
+```
+
+6. Automatic sync (incremental, every 60 s a few cows; every cow re-read every 6 h; requests from *Atnaujinti iš DelPro* first):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File C:\GVET\delpro-worker\scripts\gvet-worker.ps1 -Action inseminations-on
+```
+
+   The initial backfill (last `INSEMINATION_BACKFILL_MONTHS`=24 months) happens by itself as every linked cow is read for the
+   first time (~1 100 cows ≈ 1 h at the defaults). To do it in one go instead: `npm.cmd run insemination:sync-all`.
+   Off again: `-Action inseminations-off` (treatments and CMS untouched).
+
 ## Not enabled by this guide
 
 - **Catalog writes** need the farm's agreement, then `CATALOG_WRITE_ENABLED=true`, the GVET switch, and a validated test record

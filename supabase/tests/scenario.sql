@@ -2798,3 +2798,45 @@ do $$ declare r jsonb; begin
 end $$;
 reset role;
 select 'assert' as step, '0052 CMS: approval alone releases the job; emergency stop still blocks' as what;
+
+-- 0053. DelPro -> GVET inseminations: one row per DelPro event GUID, Vilnius date, import-only DelPro fields, nothing deleted.
+insert into animals (tag_no, animal_no, active, source, delpro_object_guid) values
+  ('LT0000INS00001', 'I1', true, 'delpro', 'd0000000-0000-4000-8000-000000000001');
+set role service_role;
+do $$ declare r jsonb; v_body jsonb; begin
+  v_body := jsonb_build_object('worker_id', 'w1', 'round', jsonb_build_object('mode', 'tags'), 'results', jsonb_build_array(jsonb_build_object(
+    'animal_id', (select id from animals where tag_no = 'LT0000INS00001'), 'animal_guid', 'D0000000-0000-4000-8000-000000000001',
+    'ok', true, 'complete', true, 'events', jsonb_build_array(
+      jsonb_build_object('guid', '46379d22-d258-468d-b8e8-cdca825860d9', 'event_at', '2014-06-08T21:00:00.020Z', 'semen_key', '4',
+        'insemination_number', 1, 'method_code', '2', 'heat_event_guid', '70e77011-56ab-4b40-b0ab-d73819ebd3b0', 'hash', 'h1')))));
+  r := delpro_insemination_upload(v_body);
+  if r->>'inserted' <> '1' then raise exception 'insemination import: %', r; end if;
+  r := delpro_insemination_upload(v_body);
+  if r->>'unchanged' <> '1' or r->>'inserted' <> '0' then raise exception 'insemination re-import must not duplicate: %', r; end if;
+  if (select insemination_date from insemination_records where delpro_event_guid = '46379d22-d258-468d-b8e8-cdca825860d9') <> '2014-06-09' then
+    raise exception 'Vilnius date expected';
+  end if;
+  -- failed read: only the scan row changes
+  r := delpro_insemination_upload(jsonb_build_object('worker_id', 'w1', 'results', jsonb_build_array(jsonb_build_object(
+    'animal_id', (select id from animals where tag_no = 'LT0000INS00001'), 'animal_guid', 'd0000000-0000-4000-8000-000000000001', 'ok', false, 'error', 'TIMEOUT'))));
+  if not exists (select 1 from insemination_records where delpro_event_guid = '46379d22-d258-468d-b8e8-cdca825860d9' and delpro_missing_at is null) then
+    raise exception 'failed read must keep the import';
+  end if;
+end $$;
+reset role;
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000b',false);
+do $$ declare blocked boolean := false; begin
+  begin delete from insemination_records where delpro_event_guid = '46379d22-d258-468d-b8e8-cdca825860d9';
+  exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: deleting a DelPro insemination in GVET'; end if;
+end $$;
+do $$ declare blocked boolean := false; begin
+  begin perform delpro_insemination_targets('{}'::jsonb);
+  exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: staff called the worker RPC'; end if;
+end $$;
+update insemination_records set pregnancy_confirmed = true where delpro_event_guid = '46379d22-d258-468d-b8e8-cdca825860d9';
+select 'ins_request' as step, delpro_insemination_request('{"tags":["LT0000INS00001"]}'::jsonb)->'requested' as requested;
+reset role;
+select 'assert' as step, '0053 DelPro inseminations: idempotent by event GUID, Vilnius date, failed read keeps data, import-only rows' as what;

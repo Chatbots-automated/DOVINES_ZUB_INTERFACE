@@ -278,6 +278,17 @@ not look for Žibartoniai's 0013–0021 VIC/UNIFORM history here.
   them. Still enforced: admin-only approval refusing any job with a problem (Sort Once / SortArea never approvable), the claim's own
   `period`/`ongoing` + no-SortArea filter, the emergency stop `cms_outbound_enabled` (0052 switched it on), worker `CMS_OUTBOUND_MODE=gateway`,
   the per-animal DelPro re-check, needs_review on an unverified write. A worker naming a job (`cms:write-one`) gets that approved job.
+- **DelPro → GVET inseminations** (0053, worker 0.5.0, farm's request 2026-11 — extends Sėklinimas, billed with it): read-only towards
+  DelPro, `INSEMINATION_SOURCE` (off by default; independent of OUTBOUND_MODE / CMS_OUTBOUND_MODE). Verified Gateway shape:
+  `InseminationEvent` by `Animal`, its date in `AnimalEvent` with the **same ObjectGuid** (UTC `EventDate`; `HeatEvent` is another object).
+  Imported into `insemination_records` (`source='delpro'`, unique `delpro_event_guid`, `insemination_date` = Vilnius date of
+  `delpro_event_at`); DelPro fields are written only by `delpro_insemination_upload` (guard trigger keyed on `gvet.delpro_import`), a
+  DelPro row can't be deleted in GVET, GVET-side fields (pregnancy, a bull typed in GVET) are never overwritten. Nothing is deleted:
+  absent on a complete read = `delpro_missing_at`; a manual same-day record = `delpro_possible_duplicate_of` (staff "Palikti abu").
+  Per-cow progress `delpro_insemination_scans` (complete_at only advances on a complete read). `InseminationMethod` stays a raw code;
+  Semen label only from `INSEMINATION_SEMEN_PROPERTIES` (verified names). UI: Sėklinimas tab panel + row badges, `/api/seklinimas/delpro`.
+  VIC: still only the CSV export (as in Monika — there is no VIC API link); DelPro rows lack pažymėjimo Nr. / sėklintojo kodas / bull KK
+  until VIC work fills them (`delpro_semen_key` kept for that).
 - **DelPro write path** — preferred order: DelPro's own import function → UI automation → direct SQL insert into DelPro's
   database. Direct SQL bypasses DelPro's own logic and may affect DeLaval support: only with the farm's written OK.
   All DelPro-specific SQL lives in `delpro-worker/queries/*.sql`; files marked `TODO(discovery)` are placeholders and

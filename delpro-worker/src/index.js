@@ -14,6 +14,7 @@ import { TreatmentWriteError, liveChecks, treatmentProblems, writeTreatment as w
 import { loadTreatmentModel, validateModel } from "./treatment-model.js";
 import { GatewayError } from "./gateway.js";
 import { diagnoseMilkSettings, pingGateway, prepareJob, runCmsLive, runCmsOutbound, runCmsTargetedRefresh, snapshotProblems } from "./cms-separation.js";
+import { runInseminationSync } from "./inseminations.js";
 import { log } from "./log.js";
 
 // Dovinės ŽŪB DelPro worker (Priedas §3-§4). Runs on the farm PC next to
@@ -26,6 +27,8 @@ import { log } from "./log.js";
 //            "Sinchronizuoti dabar"): Gateway GetData -> delpro_catalog_* (read-only)
 //   cms      (every CMS_POLL_INTERVAL_SEC): claim approved CMS jobs -> per-animal check -> SortCow write -> read back;
 //            every CMS_REFRESH_POLL_SEC: DelPro state of GVET's CMS animals only (targeted, 0051) -> GVET
+//   inseminations (every INSEMINATION_POLL_SEC, INSEMINATION_SOURCE=gateway, 0053): DelPro InseminationEvent + AnimalEvent of
+//            GVET-linked animals -> Sėklinimas (read-only towards DelPro; its own tick, never delays treatments or CMS)
 //
 // Every step is independent and failure-tolerant: a DelPro or network
 // outage is logged and retried on the next tick, never crashes the loop.
@@ -33,7 +36,7 @@ import { log } from "./log.js";
 const MAX_JOBS_PER_TICK = 20;
 const state = {
   lastInboundOk: null, lastCatalogOk: null, lastError: null,
-  lastCmsLiveOk: null, lastCmsLive: null, lastCmsRefresh: null, gatewayOkAt: null, gatewayError: null,
+  lastCmsLiveOk: null, lastCmsLive: null, lastCmsRefresh: null, gatewayOkAt: null, gatewayError: null, lastInseminationRound: null,
   // --service is passed only by the scheduled task (scripts/gvet-worker.ps1): "automatic worker running" in GVET
   startedBy: process.argv.includes("--service") ? "task" : "manual",
   startedAt: new Date().toISOString(),
@@ -71,6 +74,9 @@ async function heartbeat() {
     cms_last_refresh: state.lastCmsRefresh,
     cms_batch_limit: config.cmsBatchLimit,
     cms_concurrency: config.cmsConcurrency,
+    // 0053 DelPro -> GVET inseminations
+    insemination_source: config.inseminationSource,
+    insemination_last_round: state.lastInseminationRound,
     gateway_ok_at: state.gatewayOkAt,
     gateway_error: state.gatewayError,
     started_by: state.startedBy,
@@ -560,6 +566,85 @@ export async function runCmsRefresh(argv = process.argv) {
   return { ...res, tags };
 }
 
+/** A Gateway client that can only read (GetData): the insemination import never gets CreateData / UpdateData at all. */
+function readOnlyGateway() {
+  const gw = createGatewayClient();
+  return { getDataXml: (xml) => gw.getDataXml(xml) };
+}
+
+/** Automatic round (INSEMINATION_SOURCE=gateway): due / requested / retry animals, INSEMINATION_BATCH at most. */
+export async function runInseminations(client = null) {
+  if (config.inseminationSource !== "gateway") return null;
+  const res = await runInseminationSync(client ?? readOnlyGateway());
+  if (res.targets) {
+    state.lastInseminationRound = { at: new Date().toISOString(), ...res, results: undefined };
+  }
+  return res;
+}
+
+const tagArgs = (argv) => argv.flatMap((a, i) => (a === "--tag" && argv[i + 1] ? [argv[i + 1]] : []));
+
+/**
+ * `npm run insemination:preview -- --tag LT…` (read-only everywhere), `insemination:sync-one -- --tag LT…`,
+ * `insemination:sync-all` (both write to GVET only). Prints every event with its Lithuanian date. Exit 2 when an animal
+ * could not be read completely, an event was invalid, or a tag was not found / not DelPro-linked.
+ */
+export async function runInseminationCommand(argv = process.argv, client = null) {
+  const tags = tagArgs(argv);
+  const preview = argv.includes("--insemination-preview");
+  const all = argv.includes("--insemination-sync-all");
+  if (argv.includes("--insemination-sync-one") && !tags.length) throw new Error("Nurodykite gyvulį: npm run insemination:sync-one -- --tag LT000009526299");
+  const res = await runInseminationSync(client ?? readOnlyGateway(), {
+    tags: tags.length ? tags : null,
+    all,
+    upload: !preview,
+    recheckDates: argv.includes("--recheck-dates"),
+  });
+  for (const r of res.results) {
+    const who = `${r.orn} (DelPro Nr. ${r.animal_no ?? "—"})`;
+    if (!r.ok) {
+      log.error(`  ${who}: NENUSKAITYTA — ${r.error}`);
+      continue;
+    }
+    log.info(`  ${who}: ${r.events.length} sėklinim.${r.skipped.length ? `, ${r.skipped.length} senesni nei INSEMINATION_BACKFILL_MONTHS (neimportuojami)` : ""}` +
+      `${r.complete ? "" : ` — NEPILNA: ${r.error}`}`);
+    for (const e of r.events) {
+      log.info(`    ${e.date_lt} (${e.event_at}) ${e.guid} Nr.${e.insemination_number ?? "—"} metodas ${e.method_code ?? "—"} ` +
+        `sperma ${e.semen_label ?? e.semen_key ?? "—"}${e.bull ? ` bulius ${e.bull}` : ""}${e.breeder ? ` sėklintojas ${e.breeder}` : ""} → ${e.state}`);
+    }
+    for (const i of r.invalid) log.warn(`    NETINKAMAS ${i.guid ?? "?"}: ${i.error}`);
+  }
+  const missingTags = tags.length && res.results.length < tags.length;
+  if (missingTags) log.warn(`Rasta ${res.results.length} iš ${tags.length}: kiti GVET nerasti arba neturi DelPro ObjectGuid.`);
+  if (tags.length && res.results.length === 0) log.warn("Nėra ką skaityti.");
+  log.info(preview ? "PERŽIŪRA — niekas neįrašyta nei į GVET, nei į DelPro." : "Įrašyta tik į GVET (DelPro tik skaitytas).");
+  return { ...res, tags, exitCode: res.failed || res.incomplete || missingTags ? 2 : 0 };
+}
+
+/** `npm run insemination:inspect`: GetMetadata + a few raw rows of InseminationEvent / AnimalEvent / Semen to discovery/ (read-only). */
+export async function runInseminationInspect() {
+  const gw = createGatewayClient();
+  const dir = path.join(ROOT, "discovery");
+  fs.mkdirSync(dir, { recursive: true });
+  const { buildRequestData } = await import("./gateway.js");
+  const { EVENT_PROPS, BASE_PROPS } = await import("./inseminations.js");
+  for (const [objectName, props] of [["InseminationEvent", EVENT_PROPS], ["AnimalEvent", BASE_PROPS], ["Semen", ["Key", ...config.inseminationSemenProperties]]]) {
+    try {
+      fs.writeFileSync(path.join(dir, `insemination-${objectName}.metadata.xml`), await gw.getMetadata({ objectName }));
+      log.info(`${objectName}: GetMetadata išsaugota.`);
+    } catch (err) {
+      log.warn(`${objectName}: GetMetadata nepavyko (${err.message}) — savybių pavadinimus patikrinkite WSDL / schema failuose.`);
+    }
+    try {
+      fs.writeFileSync(path.join(dir, `insemination-${objectName}.sample.xml`), await gw.getDataXml(buildRequestData({ objectName, properties: props, top: 5 })));
+      log.info(`${objectName}: pavyzdžiai išsaugoti.`);
+    } catch (err) {
+      log.warn(`${objectName}: ${err.message}`);
+    }
+  }
+  log.info(`Failai: ${dir}. Semen savybes, kurias rodo metadata, galima įrašyti į INSEMINATION_SEMEN_PROPERTIES.`);
+}
+
 async function safely(name, fn) {
   try {
     return await fn();
@@ -604,6 +689,16 @@ async function main() {
     if (res.failed || (res.tags?.length && res.results.length < res.tags.length)) process.exitCode = 2;
     return;
   }
+  if (["--insemination-preview", "--insemination-sync-one", "--insemination-sync-all"].some((f) => process.argv.includes(f))) {
+    if (!config.gateway.user) throw new Error("Reikia DELPRO_GATEWAY_USER (.env).");
+    const res = await runInseminationCommand();
+    process.exitCode = res.exitCode;
+    return;
+  }
+  if (process.argv.includes("--insemination-inspect")) {
+    await runInseminationInspect();
+    return;
+  }
   if (process.argv.includes("--cms-inspect")) {
     await runCmsInspect();
     return;
@@ -621,7 +716,7 @@ async function main() {
   log.info(
     `DelPro darbininkas v${config.version} (${config.workerId}), šaltinis=${config.source}, outbound=${config.outboundMode}, ` +
       `katalogas=${config.catalogSource}, katalogo rašymas=${config.catalogWriteEnabled ? "ĮJUNGTAS" : "išjungtas"}, CMS=${config.cmsOutboundMode}` +
-      ` (po ${config.cmsBatchLimit}, lygiagrečiai ${config.cmsConcurrency})`,
+      ` (po ${config.cmsBatchLimit}, lygiagrečiai ${config.cmsConcurrency}), sėklinimai=${config.inseminationSource}`,
   );
 
   if (dryRun) {
@@ -640,6 +735,7 @@ async function main() {
     await safely("outbound", runOutbound);
     await safely("catalog outbound", runCatalogOutbound);
     await safely("cms", runCms);
+    await safely("inseminations", () => runInseminations());
     await safely("heartbeat", heartbeat);
     return;
   }
@@ -663,6 +759,13 @@ async function main() {
   let outboundBusy = false;
   let catalogBusy = false;
   let cmsBusy = false;
+  let inseminationBusy = false;
+  const inseminationTick = async () => {
+    if (inseminationBusy || config.inseminationSource !== "gateway") return;
+    inseminationBusy = true;
+    await safely("inseminations", () => runInseminations());
+    inseminationBusy = false;
+  };
   const cmsTick = async () => {
     if (cmsBusy) return;
     cmsBusy = true;
@@ -704,6 +807,7 @@ async function main() {
   setInterval(catalogTick, config.catalogIntervalMin * 60_000);
   setInterval(outboundTick, config.outboundIntervalSec * 1000);
   setInterval(cmsTick, config.cmsPollIntervalSec * 1000);
+  setInterval(inseminationTick, config.inseminationPollSec * 1000);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

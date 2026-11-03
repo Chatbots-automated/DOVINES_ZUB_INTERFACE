@@ -1,6 +1,6 @@
 {
   "name": "dovines-delpro-worker",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "private": true,
   "description": "Runs on the Dovin\u0117s \u017d\u016aB farm PC: DelPro -> GVET PRO herd + catalog sync and GVET PRO -> DelPro treatment write-back.",
   "type": "module",
@@ -24,7 +24,11 @@
     "cms:inspect": "node src/index.js --cms-inspect",
     "cms:milk-diagnose": "node src/index.js --cms-milk-diagnose",
     "cms:refresh": "node src/index.js --cms-refresh",
-    "cms:full-scan": "node src/index.js --cms-live"
+    "cms:full-scan": "node src/index.js --cms-live",
+    "insemination:preview": "node src/index.js --insemination-preview",
+    "insemination:sync-one": "node src/index.js --insemination-sync-one",
+    "insemination:sync-all": "node src/index.js --insemination-sync-all",
+    "insemination:inspect": "node src/index.js --insemination-inspect"
   },
   "dependencies": {
     "mssql": "^11.0.1",

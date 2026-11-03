@@ -509,6 +509,23 @@ export interface Database {
           performed_by: string | null;
           created_at: string;
           updated_at: string;
+          // 0053 — DelPro import (written only by delpro_insemination_upload)
+          source: "gvet" | "delpro";
+          delpro_event_guid: string | null;
+          delpro_event_at: string | null;
+          delpro_event_time: string | null;
+          delpro_semen_key: string | null;
+          delpro_semen_label: string | null;
+          delpro_bull: string | null;
+          delpro_breeder: string | null;
+          delpro_insemination_number: number | null;
+          delpro_method_code: string | null;
+          delpro_heat_event_guid: string | null;
+          delpro_comment: string | null;
+          delpro_record_hash: string | null;
+          delpro_synced_at: string | null;
+          delpro_missing_at: string | null;
+          delpro_possible_duplicate_of: string | null;
         }>;
         Insert: Insertable<Database["public"]["Tables"]["insemination_records"]["Row"], "animal_id">;
         Update: Updatable<Database["public"]["Tables"]["insemination_records"]["Row"]>;
@@ -709,6 +726,13 @@ export interface Database {
       cms_sort_areas: { Row: Row<CmsSortAreaRow>; Insert: Insertable<CmsSortAreaRow, never>; Update: Updatable<CmsSortAreaRow>; Relationships: [] };
       // 0051 — per-animal targeted DelPro reads (written by cms_request_animal_refresh / the worker)
       cms_animal_live_checks: { Row: Row<CmsAnimalLiveCheckRow>; Insert: Insertable<CmsAnimalLiveCheckRow, never>; Update: Updatable<CmsAnimalLiveCheckRow>; Relationships: [] };
+      // 0053 — per-animal DelPro insemination reads (written by the worker / delpro_insemination_request)
+      delpro_insemination_scans: {
+        Row: Row<DelproInseminationScanRow>;
+        Insert: Insertable<DelproInseminationScanRow, never>;
+        Update: Updatable<DelproInseminationScanRow>;
+        Relationships: [{ foreignKeyName: "delpro_insemination_scans_animal_id_fkey"; columns: ["animal_id"]; isOneToOne: true; referencedRelation: "animals"; referencedColumns: ["id"] }];
+      };
       // 0042 — DelPro daily Excel reports (read-only for the app; written by delpro_report_ingest)
       delpro_report_upload_tokens: {
         Row: Row<DelproReportTokenRow>;
@@ -1212,6 +1236,10 @@ export interface Database {
       cms_request_live_refresh: { Args: Record<string, never>; Returns: { ok: boolean; message: string } };
       cms_request_animal_refresh: { Args: { p_animal_ids: string[] }; Returns: { ok: boolean; requested: number; not_linked: number; message: string } };
       cms_status: { Args: Record<string, never>; Returns: CmsStatus };
+      // 0053 DelPro -> GVET inseminations
+      delpro_insemination_request: { Args: { p_body: { animal_ids?: string[]; tags?: string[] } }; Returns: { ok: boolean; requested: number; not_linked: number; message: string } };
+      delpro_insemination_dismiss_duplicate: { Args: { p_id: string }; Returns: { ok: boolean } };
+      delpro_insemination_status: { Args: Record<string, never>; Returns: DelproInseminationStatus };
       cms_set_outbound_enabled: { Args: { p_enabled: boolean; p_confirm?: boolean }; Returns: { ok: boolean; enabled: boolean; message: string } };
       cms_set_destination_verified: { Args: { p_verified: boolean; p_confirm?: boolean; p_note?: string | null }; Returns: { ok: boolean } };
       analytics_monthly: { Args: { p_from: string; p_to: string }; Returns: { month: string; purchased: number; consumed: number }[] };
@@ -1572,6 +1600,34 @@ export type CmsLiveActionSettingRow = {
   last_updated_at: string | null;
   seen_at: string;
   removed_at: string | null;
+};
+
+export type DelproInseminationScanRow = {
+  animal_id: string;
+  requested_at: string | null;
+  checked_at: string | null;
+  complete_at: string | null;
+  ok: boolean | null;
+  complete: boolean | null;
+  error: string | null;
+  event_count: number | null;
+  invalid: { guid: string | null; error: string }[];
+  skipped: { guid: string; event_at: string; hash?: string }[];
+  worker_id: string | null;
+};
+
+export type DelproInseminationStatus = {
+  source: string | null;
+  worker_version: string | null;
+  worker_seen_at: string | null;
+  last_round: { finished_at?: string; started_at?: string; mode?: string; targets?: number; counts?: Record<string, number> } | null;
+  linked_animals: number;
+  read_animals: number;
+  problem_animals: number;
+  pending_requests: number;
+  imported: number;
+  possible_duplicates: number;
+  invalid_events: number;
 };
 
 export type CmsAnimalLiveCheckRow = {

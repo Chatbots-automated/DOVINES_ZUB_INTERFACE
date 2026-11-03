@@ -4,7 +4,7 @@ import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/ui/empty-state";
 import { formatDate } from "@/lib/utils";
-import { INSEMINATION_SELECT, PREGNANCY_LABELS, expectedCalvingDate, pregnancyStatus, type InseminationRow } from "@/lib/seklinimas";
+import { INSEMINATION_SELECT, PREGNANCY_LABELS, delproSemenText, expectedCalvingDate, pregnancyStatus, type InseminationRow } from "@/lib/seklinimas";
 
 // Per-animal insemination history for the animal card (self-fetching, so the
 // page only has to render <AnimalInseminationCard animalId={id} />).
@@ -32,11 +32,14 @@ export async function AnimalInseminationCard({ animalId }: { animalId: string })
               return (
                 <div key={i.id} className="px-5 py-3">
                   <div className="mb-1 flex items-center justify-between">
-                    <p className="text-[14px] font-medium text-text-primary">{formatDate(i.insemination_date)}</p>
+                    <p className="flex items-center gap-2 text-[14px] font-medium text-text-primary">
+                      {formatDate(i.insemination_date)}
+                      {i.source === "delpro" && <Badge tone="accent">DelPro</Badge>}
+                    </p>
                     <Badge tone={status === "confirmed" ? "success" : status === "not_confirmed" ? "danger" : "neutral"}>{PREGNANCY_LABELS[status]}</Badge>
                   </div>
                   <p className="text-[13px] text-text-secondary">
-                    {i.sperm?.name ?? i.bull_name ?? "—"}
+                    {i.sperm?.name ?? i.bull_name ?? delproSemenText(i) ?? "—"}
                     {i.reproduktoriaus_id ? ` · KK Nr. ${i.reproduktoriaus_id}` : ""}
                     {i.inseminator_name ? ` · ${i.inseminator_name}` : ""}
                   </p>

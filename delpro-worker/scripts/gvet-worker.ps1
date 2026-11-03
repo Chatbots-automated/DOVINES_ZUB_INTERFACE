@@ -7,6 +7,8 @@
     ... -Action upgrade -Source <extracted package>\delpro-worker   (or -Zip <package.zip>)
     ... -Action cms-off                            (emergency: CMS_OUTBOUND_MODE=off + restart; treatments untouched)
     ... -Action cms-on                             (CMS_OUTBOUND_MODE=gateway + restart; asks to type GATEWAY)
+    ... -Action inseminations-on                   (INSEMINATION_SOURCE=gateway + restart: DelPro -> GVET inseminations, read-only)
+    ... -Action inseminations-off                  (INSEMINATION_SOURCE=off + restart; treatments and CMS untouched)
     ... -Action run                                (what the scheduled task runs: the supervisor loop, hidden window)
 
   Rules: never deletes or replaces a scheduled task it did not create, never starts a second worker, never prints secrets,
@@ -25,7 +27,7 @@
 #>
 [CmdletBinding()]
 param(
-  [ValidateSet('status', 'install', 'start', 'stop', 'restart', 'logs', 'upgrade', 'cms-off', 'cms-on', 'run')]
+  [ValidateSet('status', 'install', 'start', 'stop', 'restart', 'logs', 'upgrade', 'cms-off', 'cms-on', 'inseminations-on', 'inseminations-off', 'run')]
   [string]$Action = 'status',
   [string]$Dir = 'C:\GVET\delpro-worker',
   [string]$Zip,
@@ -204,7 +206,7 @@ function Show-Status {
   $envFile = Join-Path $Dir '.env'
   $e = Read-DotEnv $envFile
   if ($e.Count -eq 0) { Bad '.env missing or empty' } else {
-    Ok (".env: OUTBOUND_MODE={0}  CMS_OUTBOUND_MODE={1}  CATALOG_SOURCE={2}  DELPRO_SOURCE={3}" -f $e['OUTBOUND_MODE'], $e['CMS_OUTBOUND_MODE'], $e['CATALOG_SOURCE'], $e['DELPRO_SOURCE'])
+    Ok (".env: OUTBOUND_MODE={0}  CMS_OUTBOUND_MODE={1}  CATALOG_SOURCE={2}  DELPRO_SOURCE={3}  INSEMINATION_SOURCE={4}" -f $e['OUTBOUND_MODE'], $e['CMS_OUTBOUND_MODE'], $e['CATALOG_SOURCE'], $e['DELPRO_SOURCE'], $e['INSEMINATION_SOURCE'])
     if (-not $e['SUPABASE_URL'] -or -not $e['SUPABASE_SERVICE_ROLE_KEY']) { Bad '.env: SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY missing' }
   }
   if (Test-Path (Join-Path $Dir 'treatment-model.json')) { Ok 'treatment-model.json present' } else { Warn 'treatment-model.json missing (treatments are not sent without it)' }
@@ -252,7 +254,7 @@ function Show-Status {
     $base = $e['SUPABASE_URL'].TrimEnd('/')
     if (Test-Url 'GVET API' "$base/rest/v1/system_settings?select=setting_key&limit=1" $h) {
       try {
-        $rows = Invoke-RestMethod -Uri "$base/rest/v1/system_settings?setting_key=in.(delpro_worker_last_seen_at,cms_live_last_refresh,cms_targeted_last_refresh,cms_outbound_enabled)&select=setting_key,setting_value" -Headers $h -TimeoutSec 15
+        $rows = Invoke-RestMethod -Uri "$base/rest/v1/system_settings?setting_key=in.(delpro_worker_last_seen_at,cms_live_last_refresh,cms_targeted_last_refresh,cms_outbound_enabled,delpro_insemination_last_round)&select=setting_key,setting_value" -Headers $h -TimeoutSec 15
         foreach ($r in $rows) {
           if ($r.setting_key -eq 'delpro_worker_last_seen_at' -and $r.setting_value) {
             $age = [int]((Get-Date).ToUniversalTime() - ([datetime]::Parse($r.setting_value)).ToUniversalTime()).TotalSeconds
@@ -263,6 +265,12 @@ function Show-Status {
             $l = $r.setting_value | ConvertFrom-Json
             $msg = "CMS state read (targeted) $($l.finished_at): animals ok=$($l.ok) failed=$($l.failed)"
             if ($l.failed -gt 0) { Warn $msg } else { Ok $msg }
+          }
+          if ($r.setting_key -eq 'delpro_insemination_last_round' -and $r.setting_value) {
+            $l = $r.setting_value | ConvertFrom-Json
+            $c = $l.counts
+            $msg = "DelPro inseminations read $($l.finished_at) ($($l.mode)): animals ok=$($c.ok) failed=$($c.failed), new=$($c.inserted) updated=$($c.updated)"
+            if ($c.failed -gt 0) { Warn $msg } else { Ok $msg }
           }
           if ($r.setting_key -eq 'cms_live_last_refresh' -and $r.setting_value) {
             $l = $r.setting_value | ConvertFrom-Json
@@ -365,6 +373,8 @@ function Upgrade-Worker {
     CMS_LIVE_MAX_ROWS = '20000'; DELPRO_GATEWAY_ANIMAL_ORN_PROPERTY = 'OfficialRegNumber'
     CMS_LIVE_MILK_BULK_TOP = '1000'; CMS_LIVE_CONCURRENCY = '3'; CMS_LIVE_READ_ATTEMPTS = '2'
     CMS_BATCH_LIMIT = '10'; CMS_CONCURRENCY = '2'; CMS_REFRESH_BATCH = '50'; CMS_REFRESH_POLL_SEC = '30'
+    INSEMINATION_SOURCE = 'off'; INSEMINATION_POLL_SEC = '60'; INSEMINATION_BATCH = '20'; INSEMINATION_CONCURRENCY = '3'
+    INSEMINATION_INTERVAL_MIN = '360'; INSEMINATION_BACKFILL_MONTHS = '24'
   }
   foreach ($k in $defaults.Keys) { if (Set-DotEnvValue $envFile $k $defaults[$k] -OnlyIfMissing) { Say "  .env: added $k=$($defaults[$k])" } }
 
@@ -406,6 +416,15 @@ function Set-CmsOn {
   [void](Set-DotEnvValue $envFile 'CMS_OUTBOUND_MODE' 'gateway')
   Ok 'CMS_OUTBOUND_MODE=gateway'
   Stop-Worker; Start-Worker; Show-Status
+}
+
+function Set-InseminationSource([string]$mode) {
+  $envFile = Join-Path $Dir '.env'
+  if (-not (Test-Path $envFile)) { Stop-Script "$envFile missing" }
+  [void](Set-DotEnvValue $envFile 'INSEMINATION_SOURCE' $mode)
+  Ok "INSEMINATION_SOURCE=$mode (OUTBOUND_MODE and CMS_OUTBOUND_MODE not changed; DelPro is only read)"
+  if ($mode -eq 'gateway') { Stop-Worker; Start-Worker; Show-Status }
+  elseif (@(Get-WorkerProcesses).Count -gt 0) { Stop-Worker; Start-Worker }
 }
 
 function Write-Sup([string]$m) {
@@ -461,5 +480,7 @@ switch ($Action) {
   'upgrade' { Upgrade-Worker }
   'cms-off' { Set-CmsOff }
   'cms-on' { Set-CmsOn }
+  'inseminations-on' { Set-InseminationSource 'gateway' }
+  'inseminations-off' { Set-InseminationSource 'off' }
   'run' { Invoke-Supervisor }
 }

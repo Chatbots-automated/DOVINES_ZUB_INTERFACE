@@ -89,6 +89,25 @@ export const config = {
   cmsLiveMilkBulkTop: Number(env("CMS_LIVE_MILK_BULK_TOP", "1000")),
   cmsLiveConcurrency: Number(env("CMS_LIVE_CONCURRENCY", "3")),
   cmsLiveReadAttempts: Number(env("CMS_LIVE_READ_ATTEMPTS", "2")),
+  // 0053: DelPro -> GVET inseminations (read-only towards DelPro), independent of treatments and CMS:
+  //   off (default) | gateway. The insemination:* commands work in either mode (they need only the Gateway login).
+  inseminationSource: env("INSEMINATION_SOURCE", "off"),
+  inseminationPollSec: Number(env("INSEMINATION_POLL_SEC", "60")),
+  // animals per automatic round; an animal is re-read when its last complete read is older than INSEMINATION_INTERVAL_MIN,
+  // a failed / incomplete one after INSEMINATION_RETRY_MIN; "Atnaujinti iš DelPro" requests go first
+  inseminationBatch: Number(env("INSEMINATION_BATCH", "20")),
+  inseminationConcurrency: Number(env("INSEMINATION_CONCURRENCY", "3")),
+  inseminationIntervalMin: Number(env("INSEMINATION_INTERVAL_MIN", "360")),
+  inseminationRetryMin: Number(env("INSEMINATION_RETRY_MIN", "30")),
+  // InseminationEvent rows per animal read; reaching it -> one re-read with the max; still full -> the animal is incomplete
+  inseminationEventTop: Number(env("INSEMINATION_EVENT_TOP", "100")),
+  inseminationEventMaxTop: Number(env("INSEMINATION_EVENT_MAX_TOP", "1000")),
+  // AnimalEvent (the date) is re-read for events this recent even when GVET has them (late corrections)
+  inseminationOverlapDays: Number(env("INSEMINATION_OVERLAP_DAYS", "14")),
+  // events older than this are not imported (0 = everything); applied to the Vilnius-normalized EventDate
+  inseminationBackfillMonths: Number(env("INSEMINATION_BACKFILL_MONTHS", "24")),
+  // Semen properties to show as the semen / bull label, e.g. "Name,Code" — ONLY names `npm run insemination:inspect` showed exist
+  inseminationSemenProperties: env("INSEMINATION_SEMEN_PROPERTIES", "").split(",").map((s) => s.trim()).filter(Boolean),
 };
 
 export function requireConfig() {
@@ -115,6 +134,18 @@ export function requireConfig() {
   if (!(config.cmsLiveMilkBulkTop >= 0 && config.cmsLiveMilkBulkTop <= 1000)) missing.push("CMS_LIVE_MILK_BULK_TOP (0-1000)");
   if (!(config.cmsLiveConcurrency >= 1 && config.cmsLiveConcurrency <= 8)) missing.push("CMS_LIVE_CONCURRENCY (1-8)");
   if (!(config.cmsLiveReadAttempts >= 1 && config.cmsLiveReadAttempts <= 5)) missing.push("CMS_LIVE_READ_ATTEMPTS (1-5)");
+  if (!["off", "gateway"].includes(config.inseminationSource)) missing.push("INSEMINATION_SOURCE (off|gateway)");
+  if (config.inseminationSource === "gateway" && !config.gateway.user) missing.push("DELPRO_GATEWAY_USER");
+  if (!(config.inseminationPollSec >= 10)) missing.push("INSEMINATION_POLL_SEC (>= 10)");
+  if (!(config.inseminationBatch >= 1 && config.inseminationBatch <= 200)) missing.push("INSEMINATION_BATCH (1-200)");
+  if (!(config.inseminationConcurrency >= 1 && config.inseminationConcurrency <= 6)) missing.push("INSEMINATION_CONCURRENCY (1-6)");
+  if (!(config.inseminationIntervalMin >= 5)) missing.push("INSEMINATION_INTERVAL_MIN (>= 5)");
+  if (!(config.inseminationRetryMin >= 1)) missing.push("INSEMINATION_RETRY_MIN (>= 1)");
+  if (!(config.inseminationEventTop >= 1 && config.inseminationEventTop <= 1000)) missing.push("INSEMINATION_EVENT_TOP (1-1000)");
+  if (!(config.inseminationEventMaxTop >= config.inseminationEventTop && config.inseminationEventMaxTop <= 1000)) missing.push("INSEMINATION_EVENT_MAX_TOP (TOP-1000)");
+  if (!(config.inseminationOverlapDays >= 0)) missing.push("INSEMINATION_OVERLAP_DAYS");
+  if (!(config.inseminationBackfillMonths >= 0)) missing.push("INSEMINATION_BACKFILL_MONTHS");
+  if (config.inseminationSemenProperties.some((p) => !/^[A-Za-z_][\w.-]*$/.test(p))) missing.push("INSEMINATION_SEMEN_PROPERTIES");
   if (missing.length) throw new Error(`Trūksta / neteisinga konfigūracija: ${missing.join(", ")}`);
 }
 

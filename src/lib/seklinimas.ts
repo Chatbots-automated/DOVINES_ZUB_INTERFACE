@@ -54,7 +54,33 @@ export type InseminationRow = {
   animals: { tag_no: string; animal_no: string | null } | null;
   sperm: { name: string } | null;
   glove: { name: string } | null;
+  // 0053 DelPro import
+  source: "gvet" | "delpro";
+  delpro_event_guid: string | null;
+  delpro_event_at: string | null;
+  delpro_semen_key: string | null;
+  delpro_semen_label: string | null;
+  delpro_bull: string | null;
+  delpro_breeder: string | null;
+  delpro_insemination_number: number | null;
+  delpro_method_code: string | null;
+  delpro_synced_at: string | null;
+  delpro_missing_at: string | null;
+  delpro_possible_duplicate_of: string | null;
 };
 
+/** Europe/Vilnius wall clock of a DelPro instant ("2014-06-09 00:00"). */
+export function vilniusDateTime(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  return new Intl.DateTimeFormat("lt-LT", { timeZone: "Europe/Vilnius", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }).format(d);
+}
+
+/** Semen / bull text of an imported row: bull, Semen label (INSEMINATION_SEMEN_PROPERTIES) or the raw Semen key. */
+export function delproSemenText(r: Pick<InseminationRow, "delpro_bull" | "delpro_semen_label" | "delpro_semen_key">): string | null {
+  return r.delpro_bull ?? r.delpro_semen_label ?? (r.delpro_semen_key ? `Sperma #${r.delpro_semen_key}` : null);
+}
+
 export const INSEMINATION_SELECT =
-  "id, animal_id, insemination_date, pazymejimo_nr, seklintojo_kodas, inseminator_name, karves_id, imones_kodas, bull_name, reproduktoriaus_id, reproduktoriaus_kk_kodas, sp_savininkas, sperm_quantity, glove_quantity, pregnancy_confirmed, pregnancy_check_date, next_pregnancy_check_date, pregnancy_notes, notes, animals(tag_no, animal_no), sperm:products!insemination_records_sperm_product_id_fkey(name), glove:products!insemination_records_glove_product_id_fkey(name)";
+  "id, animal_id, insemination_date, pazymejimo_nr, seklintojo_kodas, inseminator_name, karves_id, imones_kodas, bull_name, reproduktoriaus_id, reproduktoriaus_kk_kodas, sp_savininkas, sperm_quantity, glove_quantity, pregnancy_confirmed, pregnancy_check_date, next_pregnancy_check_date, pregnancy_notes, notes, source, delpro_event_guid, delpro_event_at, delpro_semen_key, delpro_semen_label, delpro_bull, delpro_breeder, delpro_insemination_number, delpro_method_code, delpro_synced_at, delpro_missing_at, delpro_possible_duplicate_of, animals(tag_no, animal_no), sperm:products!insemination_records_sperm_product_id_fkey(name), glove:products!insemination_records_glove_product_id_fkey(name)";

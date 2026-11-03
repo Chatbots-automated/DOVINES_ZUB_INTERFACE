@@ -127,6 +127,13 @@ GetData each (`CMS_LIVE_MAX_ROWS`, no paging exists) — complete only when neit
 milk setting was found only by key; exits 2 otherwise. Install / repair / status / upgrade: `scripts\gvet-worker.ps1` (§12).
 One continuous worker per folder (`logs\worker.lock`).
 
+0053 (worker 0.5.0) — **DelPro → GVET inseminations**, read-only towards DelPro, `INSEMINATION_SOURCE=off|gateway` (default off,
+independent of treatments and CMS). `src/inseminations.js`: per GVET-linked cow `InseminationEvent` (filter `Animal`, top 100 → one
+re-read with 1000, still full = incomplete) + `AnimalEvent` by the same `ObjectGuid` (exactly one, same GUID + animal, zoned EventDate)
+→ `delpro_insemination_upload`. Dates: the Europe/Vilnius date of the UTC instant. GVET picks the cows (`delpro_insemination_targets`:
+requested, never read, retry, due). Commands: `insemination:preview` (writes nothing), `insemination:sync-one -- --tag …`,
+`insemination:sync-all`, `insemination:inspect`. Farm steps: [`DEPLOY-WINDOWS.md`](DEPLOY-WINDOWS.md) §15.
+
 0052: an admin's *Patvirtinti* is enough — the routine claim no longer needs a verified mode or the destination note (the emergency stop
 `cms_outbound_enabled` and `CMS_OUTBOUND_MODE=gateway` still apply; the per-animal DelPro re-check still runs before every write).
 

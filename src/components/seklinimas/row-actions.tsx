@@ -2,11 +2,13 @@
 
 import * as React from "react";
 import { useActionState } from "react";
-import { Check, Trash2, Undo2, X } from "lucide-react";
+import { useRouter } from "next/navigation";
+import { Check, Loader2, RefreshCw, Trash2, Undo2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { deleteInsemination, setPregnancyResult, type ActionResult } from "@/lib/actions/insemination";
 import { PREGNANCY_LABELS, pregnancyStatus } from "@/lib/seklinimas";
+import { delproInseminationPost } from "@/lib/seklinimas-delpro-client";
 
 // Tri-state pregnancy badge + result buttons (Laukiama / Patvirtinta /
 // Nepatvirtinta). Each button submits the same form with its own `result`.
@@ -56,5 +58,34 @@ export function DeleteInseminationButton({ id }: { id: string }) {
       </Button>
       {state && !state.ok && <span className="max-w-[220px] text-[12px] text-danger">{state.error}</span>}
     </form>
+  );
+}
+
+/** DelPro-imported row (0053): re-read this animal from DelPro; "Palikti abu" for a flagged possible duplicate. Never deletes. */
+export function DelproRowActions({ id, animalId, duplicate }: { id: string; animalId: string; duplicate: boolean }) {
+  const router = useRouter();
+  const [busy, setBusy] = React.useState<string | null>(null);
+  const [message, setMessage] = React.useState<{ ok: boolean; text: string } | null>(null);
+  async function run(key: string, op: "request" | "dismiss_duplicate", payload: Record<string, unknown>) {
+    setBusy(key);
+    const res = await delproInseminationPost(op, payload);
+    setBusy(null);
+    setMessage(res.ok ? { ok: true, text: res.data?.message ?? "Atlikta." } : { ok: false, text: res.error });
+    if (res.ok) router.refresh();
+  }
+  return (
+    <div className="flex flex-col items-end gap-1">
+      <div className="flex items-center gap-1">
+        {duplicate && (
+          <Button type="button" size="sm" variant="ghost" disabled={!!busy} onClick={() => run("dup", "dismiss_duplicate", { id })} title="Tai du skirtingi sėklinimai">
+            Palikti abu
+          </Button>
+        )}
+        <Button type="button" size="sm" variant="ghost" disabled={!!busy} onClick={() => run("req", "request", { animal_ids: [animalId] })} title="Atnaujinti šį gyvulį iš DelPro">
+          {busy === "req" ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
+        </Button>
+      </div>
+      {message && <span className={`max-w-[220px] text-right text-[12px] ${message.ok ? "text-success" : "text-danger"}`}>{message.text}</span>}
+    </div>
   );
 }

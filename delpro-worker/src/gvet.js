@@ -49,4 +49,7 @@ export const gvet = {
   // 0051: targeted per-animal state
   cmsLiveTargets: (body) => rpc("cms_live_targets", body),
   cmsLiveUploadAnimals: (body) => rpc("cms_live_upload_animals", body),
+  // 0053: DelPro -> GVET inseminations
+  inseminationTargets: (body) => rpc("delpro_insemination_targets", body),
+  inseminationUpload: (body) => rpc("delpro_insemination_upload", body),
 };
