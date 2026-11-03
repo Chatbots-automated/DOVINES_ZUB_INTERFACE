@@ -106,8 +106,9 @@ export const config = {
   inseminationOverlapDays: Number(env("INSEMINATION_OVERLAP_DAYS", "14")),
   // events older than this are not imported (0 = everything); applied to the Vilnius-normalized EventDate
   inseminationBackfillMonths: Number(env("INSEMINATION_BACKFILL_MONTHS", "24")),
-  // Semen properties to show as the semen / bull label, e.g. "Name,Code" — ONLY names `npm run insemination:inspect` showed exist
-  inseminationSemenProperties: env("INSEMINATION_SEMEN_PROPERTIES", "").split(",").map((s) => s.trim()).filter(Boolean),
+  // Semen catalog: "<name property>,<comment property>", verified on the farm Gateway (Semen [Key, SemenName, Comment]).
+  // The name is shown in "Bulius / sperma"; the comment is supporting text only. Empty value in .env = this default.
+  inseminationSemenProperties: env("INSEMINATION_SEMEN_PROPERTIES", "SemenName,Comment").split(",").map((s) => s.trim()).filter(Boolean),
 };
 
 export function requireConfig() {
@@ -145,7 +146,9 @@ export function requireConfig() {
   if (!(config.inseminationEventMaxTop >= config.inseminationEventTop && config.inseminationEventMaxTop <= 1000)) missing.push("INSEMINATION_EVENT_MAX_TOP (TOP-1000)");
   if (!(config.inseminationOverlapDays >= 0)) missing.push("INSEMINATION_OVERLAP_DAYS");
   if (!(config.inseminationBackfillMonths >= 0)) missing.push("INSEMINATION_BACKFILL_MONTHS");
-  if (config.inseminationSemenProperties.some((p) => !/^[A-Za-z_][\w.-]*$/.test(p))) missing.push("INSEMINATION_SEMEN_PROPERTIES");
+  if (config.inseminationSemenProperties.length > 2 || config.inseminationSemenProperties.some((p) => !/^[A-Za-z_][\w.-]*$/.test(p))) {
+    missing.push("INSEMINATION_SEMEN_PROPERTIES (<pavadinimas>,<komentaras>, pvz. SemenName,Comment)");
+  }
   if (missing.length) throw new Error(`Trūksta / neteisinga konfigūracija: ${missing.join(", ")}`);
 }
 

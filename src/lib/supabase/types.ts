@@ -516,6 +516,7 @@ export interface Database {
           delpro_event_time: string | null;
           delpro_semen_key: string | null;
           delpro_semen_label: string | null;
+          delpro_semen_comment: string | null; // 0054
           delpro_bull: string | null;
           delpro_breeder: string | null;
           delpro_insemination_number: number | null;

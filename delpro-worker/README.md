@@ -127,6 +127,10 @@ GetData each (`CMS_LIVE_MAX_ROWS`, no paging exists) — complete only when neit
 milk setting was found only by key; exits 2 otherwise. Install / repair / status / upgrade: `scripts\gvet-worker.ps1` (§12).
 One continuous worker per folder (`logs\worker.lock`).
 
+0054 (worker 0.5.1) — Semen names: `InseminationEvent.Semen` -> `Semen [Key, SemenName, Comment]` by Key (cached 6 h, one read per
+key) -> `delpro_semen_label` / `delpro_semen_comment`, and `bull_name` while not edited in GVET. A failed lookup sends no label (GVET
+keeps it). Round totals (`ok`, …) are counted by the worker and stored once per round.
+
 0053 (worker 0.5.0) — **DelPro → GVET inseminations**, read-only towards DelPro, `INSEMINATION_SOURCE=off|gateway` (default off,
 independent of treatments and CMS). `src/inseminations.js`: per GVET-linked cow `InseminationEvent` (filter `Animal`, top 100 → one
 re-read with 1000, still full = incomplete) + `AnimalEvent` by the same `ObjectGuid` (exactly one, same GUID + animal, zoned EventDate)

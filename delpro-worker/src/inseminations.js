@@ -14,8 +14,9 @@ import { log } from "./log.js";
 // Per animal: one InseminationEvent read (top INSEMINATION_EVENT_TOP; reaching it = re-read once with the max top, still full =
 // incomplete), then one AnimalEvent read per event GVET doesn't have yet / that changed / is inside the overlap window.
 // An event that fails any check is reported as invalid, never imported. A Gateway error fails the whole animal (retried later;
-// what GVET already has stays). Semen: only Semen.Key is verified — INSEMINATION_SEMEN_PROPERTIES (from `insemination:inspect`)
-// adds a readable label; empty = the key only.
+// what GVET already has stays). Semen (verified 2026-11: Semen [Key, SemenName, Comment]): InseminationEvent.Semen is resolved by
+// Key, cached across rounds; INSEMINATION_SEMEN_PROPERTIES = "<name property>,<comment property>" (default "SemenName,Comment").
+// SemenName is a catalog name, never an official bull KK number. A failed lookup sends no label, so GVET keeps the stored one.
 
 export const EVENT_PROPS = ["ObjectGuid", "Animal", "Semen", "Bull", "Breeder", "Comment", "EventTime", "InseminationNumber", "InseminationMethod", "HeatEvent"];
 export const BASE_PROPS = ["ObjectGuid", "Animal", "EventDate"];
@@ -112,26 +113,44 @@ export async function readAnimalEvents(client, animalGuid, { top = config.insemi
   return { rows, complete: rows.length < used, top: used };
 }
 
-/** Semen.Key -> readable label (cached per run), only with INSEMINATION_SEMEN_PROPERTIES. A failed lookup is just "no label". */
+const SEMEN_TTL_MS = 6 * 3_600_000;
+const semenCache = new Map(); // key -> { at, value: { label, comment } } — shared by every round of this process
+
+/** Test hook: forget cached Semen records. */
+export function clearSemenCache() {
+  semenCache.clear();
+}
+
+/**
+ * Semen.Key -> { label: SemenName, comment: Comment } (either may be null when DelPro has none), or null when the lookup
+ * failed / was ambiguous (then the caller sends no label and GVET keeps what it has). One GetData per key per 6 h.
+ */
 export function semenLabeler(client, properties = config.inseminationSemenProperties) {
-  if (!properties?.length) return async () => null;
-  const cache = new Map();
+  const [nameProp, commentProp] = properties ?? [];
+  if (!nameProp) return async () => null;
+  const inflight = new Map();
   return async (key) => {
-    if (!key) return null;
-    if (!cache.has(key)) {
-      cache.set(key, (async () => {
+    if (!key) return { label: null, comment: null };
+    const hit = semenCache.get(key);
+    if (hit && Date.now() - hit.at < SEMEN_TTL_MS) return hit.value;
+    if (!inflight.has(key)) {
+      inflight.set(key, (async () => {
         try {
-          const rows = await getRows(client, "Semen", ["Key", ...properties], [{ name: "Key", value: key }], 2);
-          if (rows.length !== 1) return null;
-          const parts = properties.map((p) => val(rows[0], p)).filter(Boolean);
-          return parts.length ? parts.join(" · ") : null;
+          const rows = await getRows(client, "Semen", ["Key", nameProp, ...(commentProp ? [commentProp] : [])], [{ name: "Key", value: key }], 2);
+          if (rows.length !== 1 || val(rows[0], "Key") !== String(key)) {
+            log.warn(`Semen ${key}: DelPro grąžino ${rows.length} įraš. — pavadinimas nenustatytas.`);
+            return null;
+          }
+          const value = { label: val(rows[0], nameProp), comment: commentProp ? val(rows[0], commentProp) : null };
+          semenCache.set(key, { at: Date.now(), value });
+          return value;
         } catch (err) {
           log.warn(`Semen ${key}: ${errText(err)}`);
           return null;
         }
       })());
     }
-    return cache.get(key);
+    return inflight.get(key);
   };
 }
 
@@ -189,7 +208,9 @@ export async function readAnimalInseminations(client, target, {
         skipped.push({ guid: event.guid, event_at: eventAt, hash });
         continue;
       }
-      events.push({ ...event, event_at: eventAt, semen_label: await semen(event.semen_key), hash });
+      const sm = await semen(event.semen_key);
+      // resolved (or no semen at all) -> send the name / comment (null clears); lookup failed -> leave them out, GVET keeps its own
+      events.push({ ...event, event_at: eventAt, ...(sm ? { semen_label: sm.label, semen_comment: sm.comment } : {}), hash });
     }
     const complete = read.complete && invalid.length === 0;
     const error = !read.complete
@@ -260,6 +281,7 @@ export async function runInseminationSync(client, {
         totals.failed += 1;
         log.warn(`Sėklinimai ${t.orn}: NENUSKAITYTA — ${r.error}`);
       } else {
+        totals.ok += 1;
         if (!r.complete) totals.incomplete += 1;
         totals.events += r.events.length;
         totals.invalid += r.invalid.length;
@@ -269,15 +291,18 @@ export async function runInseminationSync(client, {
     const final = tags?.length || !all || list.length < limit;
     if (upload) {
       for (let i = 0; i < results.length; i += 50) {
-        const last = final && i + 50 >= results.length;
-        const round_meta = { started_at: startedAt, mode: tags?.length ? "tags" : all ? "all" : "auto", targets: totals.targets };
-        const res = await gvet.inseminationUpload({ worker_id: config.workerId, results: results.slice(i, i + 50), ...(last ? { round: round_meta } : {}) });
+        const res = await gvet.inseminationUpload({ worker_id: config.workerId, results: results.slice(i, i + 50) });
         for (const k of ["inserted", "updated", "unchanged", "conflicts", "flagged_duplicates", "missing", "mismatched"]) totals[k] += res?.[k] ?? 0;
         for (const c of res?.conflict_list ?? []) log.warn(`Sėklinimas ${c.guid}: GVET jau priskirtas kitam gyvuliui — nepakeista.`);
       }
     }
     all_results.push(...results.map((r, i) => ({ ...r, orn: list[i].orn, animal_no: list[i].animal_no, events: r.ok ? classify(r, list[i]) : [] })));
     if (final) break;
+  }
+  // the round summary for GVET / `-Action status`: the whole run's totals (one call after every chunk was stored)
+  if (upload && totals.targets) {
+    await gvet.inseminationUpload({ worker_id: config.workerId, results: [],
+      round: { started_at: startedAt, mode: tags?.length ? "tags" : all ? "all" : "auto", targets: totals.targets, counts: { ...totals } } });
   }
   if (totals.targets) log.info(`DelPro sėklinimai → GVET${upload ? "" : " (PERŽIŪRA, niekas neįrašyta)"}: ${JSON.stringify(totals)}`);
   return { ...totals, results: all_results };

@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Dna } from "lucide-react";
 import { formatDate } from "@/lib/utils";
-import { delproSemenText, expectedCalvingDate, pregnancyStatus, vilniusDateTime, type InseminationRow } from "@/lib/seklinimas";
+import { expectedCalvingDate, semenColumnText, pregnancyStatus, vilniusDateTime, type InseminationRow } from "@/lib/seklinimas";
 import { DelproRowActions, DeleteInseminationButton, PregnancyActions } from "./row-actions";
 
 type StatusFilter = "" | "pending" | "confirmed" | "not_confirmed";
@@ -45,7 +45,7 @@ export function InseminationTable({ rows }: { rows: InseminationRow[] }) {
       return [
         r.animals?.tag_no, r.animals?.animal_no, r.karves_id, r.pazymejimo_nr, r.seklintojo_kodas, r.inseminator_name,
         r.bull_name, r.reproduktoriaus_id, r.sperm?.name, r.sp_savininkas, r.imones_kodas, r.notes,
-        r.delpro_semen_label, r.delpro_semen_key, r.delpro_bull, r.delpro_breeder,
+        r.delpro_semen_label, r.delpro_semen_comment, r.delpro_semen_key, r.delpro_bull, r.delpro_breeder,
       ].some((v) => (v ?? "").toLowerCase().includes(term));
     });
   }, [rows, search, status, from, to, source]);
@@ -142,7 +142,7 @@ export function InseminationTable({ rows }: { rows: InseminationRow[] }) {
                     {r.seklintojo_kodas && <span className="block text-[12px] text-text-muted">{r.seklintojo_kodas}</span>}
                   </td>
                   <td className="px-4 py-3 text-text-secondary">
-                    {r.sperm?.name ?? r.bull_name ?? delproSemenText(r) ?? "—"}
+                    {semenColumnText(r)}
                     {r.sperm && r.sperm_quantity ? <span className="text-text-muted"> · {r.sperm_quantity} d.</span> : null}
                     {r.reproduktoriaus_id && <span className="block text-[12px] text-text-muted">KK Nr. {r.reproduktoriaus_id}</span>}
                     {r.source === "delpro" && (
@@ -150,7 +150,8 @@ export function InseminationTable({ rows }: { rows: InseminationRow[] }) {
                         {[
                           r.delpro_insemination_number != null && `sėklinimas Nr. ${r.delpro_insemination_number}`,
                           r.delpro_method_code && `metodas (DelPro kodas) ${r.delpro_method_code}`,
-                          r.delpro_semen_key && r.bull_name && `Semen #${r.delpro_semen_key}`,
+                          r.delpro_semen_key && semenColumnText(r) !== `Sperma #${r.delpro_semen_key}` && `Semen #${r.delpro_semen_key}`,
+                          r.delpro_semen_comment,
                         ]
                           .filter(Boolean)
                           .join(" · ")}

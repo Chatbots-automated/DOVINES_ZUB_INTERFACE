@@ -287,6 +287,9 @@ not look for Žibartoniai's 0013–0021 VIC/UNIFORM history here.
   absent on a complete read = `delpro_missing_at`; a manual same-day record = `delpro_possible_duplicate_of` (staff "Palikti abu").
   Per-cow progress `delpro_insemination_scans` (complete_at only advances on a complete read). `InseminationMethod` stays a raw code;
   Semen label only from `INSEMINATION_SEMEN_PROPERTIES` (verified names). UI: Sėklinimas tab panel + row badges, `/api/seklinimas/delpro`.
+  0054 (worker 0.5.1): `Semen [Key, SemenName, Comment]` (verified) — `delpro_semen_label` = SemenName, `delpro_semen_comment` = Comment,
+  `bull_name` = DelPro Bull else SemenName while nobody edited it; a lookup that failed omits `semen_label` and GVET keeps the stored one
+  (`fn_ins_semen_value`). Display rule = `semenColumnText()` in `src/lib/seklinimas.ts`. Never map Semen.Key / SemenName to `reproduktoriaus_id`.
   VIC: still only the CSV export (as in Monika — there is no VIC API link); DelPro rows lack pažymėjimo Nr. / sėklintojo kodas / bull KK
   until VIC work fills them (`delpro_semen_key` kept for that).
 - **DelPro write path** — preferred order: DelPro's own import function → UI automation → direct SQL insert into DelPro's

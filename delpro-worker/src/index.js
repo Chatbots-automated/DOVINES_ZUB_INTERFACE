@@ -610,7 +610,7 @@ export async function runInseminationCommand(argv = process.argv, client = null)
       `${r.complete ? "" : ` — NEPILNA: ${r.error}`}`);
     for (const e of r.events) {
       log.info(`    ${e.date_lt} (${e.event_at}) ${e.guid} Nr.${e.insemination_number ?? "—"} metodas ${e.method_code ?? "—"} ` +
-        `sperma ${e.semen_label ?? e.semen_key ?? "—"}${e.bull ? ` bulius ${e.bull}` : ""}${e.breeder ? ` sėklintojas ${e.breeder}` : ""} → ${e.state}`);
+        `sperma ${e.semen_key ? `${e.semen_label ?? "(pavadinimas nenustatytas)"} #${e.semen_key}${e.semen_comment ? ` (${e.semen_comment})` : ""}` : "—"}${e.bull ? ` bulius ${e.bull}` : ""}${e.breeder ? ` sėklintojas ${e.breeder}` : ""} → ${e.state}`);
     }
     for (const i of r.invalid) log.warn(`    NETINKAMAS ${i.guid ?? "?"}: ${i.error}`);
   }

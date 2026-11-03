@@ -641,6 +641,36 @@ powershell -ExecutionPolicy Bypass -File C:\GVET\delpro-worker\scripts\gvet-work
    first time (~1 100 cows ≈ 1 h at the defaults). To do it in one go instead: `npm.cmd run insemination:sync-all`.
    Off again: `-Action inseminations-off` (treatments and CMS untouched).
 
+## 16. Semen names in Sėklinimas (0054, worker 0.5.1)
+
+Verified on the farm Gateway: `Semen [Key, SemenName, Comment]` (2111 = Heavenly / Karvėms, 2104 = Mcclain Sex / Telyčioms). The
+worker now resolves each insemination's `Semen` key (one read per key, cached 6 h) and GVET shows `SemenName` in *Bulius / sperma*
+(`Sperma #<key>` when the name can't be read, `—` only without semen). `Semen.Key` stays on the row; neither the key nor the name is
+ever used as the bull's KK number. A failed lookup keeps the name GVET already has. Existing rows are enriched in place.
+
+1. Developer: apply `supabase/migrations/0054_delpro_semen_names.sql` **before** the worker upgrade, then merge the branch to `main`
+   (the Sėklinimas DelPro columns are in the web app — until it is deployed the column stays empty).
+2. Farm PC (Administrator), from the new package:
+
+```powershell
+$zip = "$env:USERPROFILE\Downloads\delpro-worker-0054.zip"; Unblock-File $zip
+$tmp = "$env:TEMP\gvet-worker-0054"; Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue; Expand-Archive $zip $tmp
+powershell -ExecutionPolicy Bypass -File "$tmp\delpro-worker\scripts\gvet-worker.ps1" -Action upgrade -Source "$tmp\delpro-worker" -Dir C:\GVET\delpro-worker
+```
+
+   `.env` is kept. If it has `INSEMINATION_SEMEN_PROPERTIES=` empty or unset, the default `SemenName,Comment` applies; if you set it
+   by hand, make it exactly `INSEMINATION_SEMEN_PROPERTIES=SemenName,Comment`.
+3. Check (read-only), then enrich every imported cow now instead of waiting for the 6-hourly re-read:
+
+```powershell
+Set-Location C:\GVET\delpro-worker
+npm.cmd run insemination:preview -- --tag LT000009526299     # expect "sperma Heavenly #2111 (Karvėms)" and "Mcclain Sex #2104 (Telyčioms)"
+npm.cmd run insemination:sync-all
+powershell -ExecutionPolicy Bypass -File C:\GVET\delpro-worker\scripts\gvet-worker.ps1 -Action status
+```
+
+   No rows are created by this (same event GUIDs); dates, pregnancy and certificate fields are untouched.
+
 ## Not enabled by this guide
 
 - **Catalog writes** need the farm's agreement, then `CATALOG_WRITE_ENABLED=true`, the GVET switch, and a validated test record

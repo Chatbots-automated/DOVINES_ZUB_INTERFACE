@@ -416,3 +416,81 @@ test("staff only: a viewer can't request reads; worker RPCs are service_role onl
   assert.equal(bad.mismatched, 1);
   assert.equal((await recs("LT000009526299")).every((r) => !r.delpro_missing_at), true);
 });
+
+test("0054 semen names: existing imports enriched in place with the verified SemenName; cached by Key; a failed lookup keeps the name", async () => {
+  const tag = "LT000009526299";
+  const d = farm();
+  // the two farm events (verified catalog: 2111 = Heavenly / Karvėms, 2104 = Mcclain Sex / Telyčioms)
+  addEvent(d, g(80), COW, "2026-11-02T07:15:00Z", { Semen: "2111", InseminationNumber: "3" });
+  addEvent(d, g(81), COW, "2025-11-13T08:00:00Z", { Semen: "2104", InseminationNumber: "2" });
+  addEvent(d, g(82), COW, "2026-11-02T16:00:00Z", { Semen: "2111", InseminationNumber: "4" });
+  d.db.Semen = { 2111: { Key: "2111", SemenName: "Heavenly", Comment: "Karvėms" }, 2104: { Key: "2104", SemenName: "Mcclain Sex", Comment: "Telyčioms" } };
+  // imported first without names (as 0.5.0 did on the farm)
+  const saved = cfg.inseminationSemenProperties;
+  cfg.inseminationSemenProperties = [];
+  try {
+    await ins.runInseminationSync(readOnly(d), { tags: [tag] });
+  } finally {
+    cfg.inseminationSemenProperties = saved;
+  }
+  const before = await recs(tag);
+  const byGuid = (rows, gd) => rows.find((r) => r.delpro_event_guid === gd);
+  assert.equal(byGuid(before, g(80)).delpro_semen_label, null);
+  assert.equal(byGuid(before, g(80)).bull_name, null);
+  const countBefore = before.length;
+  await asUser(VET, `update insemination_records set pregnancy_confirmed = false, pazymejimo_nr = '2600010001' where delpro_event_guid = '${g(81)}'`);
+
+  // 0.5.1 default properties: SemenName,Comment
+  assert.deepEqual(cfg.inseminationSemenProperties, ["SemenName", "Comment"]);
+  ins.clearSemenCache();
+  const res = await ins.runInseminationSync(readOnly(d), { tags: [tag] });
+  assert.equal(res.ok, 1, "ok counts the cows read successfully");
+  assert.equal(res.inserted, 0);
+  assert.ok(res.updated >= 3);
+  const rows = await recs(tag);
+  assert.equal(rows.length, countBefore, "no record duplicated");
+  const a = byGuid(rows, g(80));
+  const b = byGuid(rows, g(81));
+  assert.equal(a.delpro_semen_label, "Heavenly");
+  assert.equal(a.delpro_semen_comment, "Karvėms");
+  assert.equal(a.bull_name, "Heavenly");
+  assert.equal(a.delpro_semen_key, "2111");
+  assert.equal(a.reproduktoriaus_id, null, "Semen.Key / SemenName are never the bull's KK number");
+  assert.equal(new Date(a.insemination_date).toISOString().slice(0, 10), "2026-11-02");
+  assert.equal(b.delpro_semen_label, "Mcclain Sex");
+  assert.equal(b.delpro_semen_comment, "Telyčioms");
+  assert.equal(new Date(b.insemination_date).toISOString().slice(0, 10), "2025-11-13");
+  assert.equal(b.pregnancy_confirmed, false, "pregnancy kept");
+  assert.equal(b.pazymejimo_nr, "2600010001", "certificate field kept");
+  assert.equal(byGuid(rows, g(82)).delpro_semen_label, "Heavenly");
+  // a bull typed in GVET earlier (2014 event) is not replaced by a catalog name
+  assert.equal(byGuid(rows, EV).bull_name, "Rankinis");
+  // one Semen read per key, not per insemination (2111 is used twice)
+  const semenReads = (key) => d.calls.filter(([, x]) => /object name="Semen"/.test(x) && x.includes(`>${key}<`)).length;
+  assert.equal(semenReads("2111"), 1);
+  assert.equal(semenReads("2104"), 1);
+  // the cache also spans rounds
+  await ins.runInseminationSync(readOnly(d), { tags: [tag] });
+  assert.equal(semenReads("2111"), 1);
+
+  // a Semen lookup that fails keeps the stored name (same key)
+  ins.clearSemenCache();
+  d.setFailGetData(({ name }) => name === "Semen");
+  await ins.runInseminationSync(readOnly(d), { tags: [tag] });
+  d.setFailGetData(null);
+  assert.equal(byGuid(await recs(tag), g(80)).delpro_semen_label, "Heavenly");
+  // a GVET edit of the bull is kept on later reads; DelPro's semen fields stay import-only
+  await asUser(VET, `update insemination_records set bull_name = 'Heavenly (rankinis)' where delpro_event_guid = '${g(80)}'`);
+  d.db.Semen[2111].SemenName = "Heavenly ET";
+  ins.clearSemenCache();
+  await ins.runInseminationSync(readOnly(d), { tags: [tag] });
+  const c = byGuid(await recs(tag), g(80));
+  assert.equal(c.delpro_semen_label, "Heavenly ET");
+  assert.equal(c.bull_name, "Heavenly (rankinis)");
+  await assert.rejects(asUser(VET, `update insemination_records set delpro_semen_comment = 'x' where delpro_event_guid = '${g(80)}'`), /DelPro laukų/);
+  // round summary carries the run's totals (not one chunk's)
+  const round = JSON.parse((await q(`select setting_value from system_settings where setting_key = 'delpro_insemination_last_round'`))[0].setting_value);
+  assert.equal(round.counts.ok, 1);
+  assert.equal(round.counts.targets, 1);
+  onlyGetData(d);
+});

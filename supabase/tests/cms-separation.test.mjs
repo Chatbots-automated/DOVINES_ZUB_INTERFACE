@@ -152,3 +152,18 @@ test("live freshness (0051): pending request, never read, failed read, stale vs 
   assert.equal(live.cmsFreshness({ checked_at: "2026-11-03T11:30:00Z", ok: false, requested_at: null }, now), "failed");
   assert.equal(live.cmsFreshness({ checked_at: "2026-11-03T11:30:00Z", ok: true, requested_at: "2026-11-03T11:45:00Z" }, now), "pending");
 });
+
+// 0054 (Sėklinimas, not CMS — kept here because this file already loads pure TS helpers): "Bulius / sperma" column
+const sekText = fs.readFileSync(path.join(root, "src/lib/seklinimas.ts"), "utf8");
+const sek = await import("data:text/javascript;base64," + Buffer.from(ts.transpileModule(sekText, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText).toString("base64"));
+
+test("Sėklinimas 'Bulius / sperma': SemenName, else 'Sperma #<key>', '—' only without semen; GVET values first", () => {
+  const base = { source: "delpro", sperm: null, bull_name: null, delpro_bull: null, delpro_semen_label: null, delpro_semen_key: null };
+  assert.equal(sek.semenColumnText({ ...base, bull_name: "Heavenly", delpro_semen_label: "Heavenly", delpro_semen_key: "2111" }), "Heavenly");
+  assert.equal(sek.semenColumnText({ ...base, delpro_semen_label: "Mcclain Sex", delpro_semen_key: "2104" }), "Mcclain Sex");
+  assert.equal(sek.semenColumnText({ ...base, delpro_semen_key: "2111" }), "Sperma #2111");
+  assert.equal(sek.semenColumnText(base), "—");
+  assert.equal(sek.semenColumnText({ ...base, bull_name: "Rankinis", delpro_semen_label: "Heavenly", delpro_semen_key: "2111" }), "Rankinis");
+  assert.equal(sek.semenColumnText({ ...base, source: "gvet", sperm: { name: "Produktas" } }), "Produktas");
+  assert.equal(sek.semenColumnText({ ...base, source: "gvet", delpro_semen_key: "2111" }), "—");
+});
