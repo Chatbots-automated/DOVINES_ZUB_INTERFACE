@@ -460,3 +460,252 @@ test("milk diagnose (read-only): finds the record that breaks the bulk read, or 
   assert.equal(s.first_failing_top, 1401);
   assert.match(s.conclusion, /dydžio problema/);
 });
+
+// ---------------------------------------------------------------------------------------------------------------------
+// 0051: targeted CMS — each job / refresh reads only its own animal; the full-herd scan never gates anything.
+// ---------------------------------------------------------------------------------------------------------------------
+const T = Array.from({ length: 8 }, (_, i) => ({
+  guid: `a0000000-0000-4000-8000-0000000005${String(i).padStart(2, "0")}`,
+  orn: `LT0000073005${String(i).padStart(2, "0")}`,
+  no: `5${String(i).padStart(2, "0")}`,
+  milk: String(8500 + i),
+}));
+let t51 = false;
+async function setup51() {
+  if (t51) return;
+  t51 = true;
+  await db.exec(`insert into animals (tag_no, animal_no, delpro_object_guid, source) values
+    ${T.map((a) => `('${a.orn}', '${a.no}', '${a.guid}', 'delpro')`).join(", ")}`);
+}
+/** ONE DelPro for every 0051 test (records written by one test are there for the next, as on the farm). */
+let D51 = null;
+function targeted({ failGetData = null } = {}) {
+  if (!D51) {
+    D51 = fakeDelpro();
+    Object.assign(D51.db, delproWith({ existingSortCow: true }).db);
+    for (const a of T) {
+      D51.db.Animal[a.guid] = { ObjectGuid: a.guid, Number: a.no, OfficialRegNumber: a.orn };
+      D51.db.AnimalMilkSetting[a.milk] = { Key: a.milk, Animal: a.guid };
+    }
+  }
+  D51.setFailGetData(failGetData);
+  D51.calls.length = 0;
+  return D51;
+}
+const creates = (d) => d.calls.filter(([op]) => op === "CreateData").length;
+const svc = async (sql, params) => {
+  await db.exec("set role service_role");
+  try {
+    return (await db.query(sql, params)).rows;
+  } finally {
+    await db.exec("reset role");
+  }
+};
+const summary = (props) => cms.actionSummary({ properties: Object.fromEntries(Object.entries(props).map(([k, v]) => [k, { value: v }])) });
+
+test("0051 effective status: dates, sessions and Active decide; unreadable values are 'unknown' and conflict", () => {
+  const now = new Date("2026-11-03T12:00:00Z");
+  const st = (p) => cms.actionStatus(summary({ Key: "1", ActionType: "SortCow", ...p }), now);
+  assert.equal(st({ Active: "true", StartDate: "2026-11-01T00:00:00Z", IsValidForSession1: "true" }), "effective");
+  assert.equal(st({ Active: "true", StartDate: "2026-11-05T00:00:00Z", IsValidForSession2: "true" }), "scheduled");
+  assert.equal(st({ Active: "true", StartDate: "2026-11-01T00:00:00Z", EndDate: "2026-11-02T00:00:00Z", IsValidForSession1: "true" }), "ended");
+  assert.equal(st({ Active: "false", StartDate: "2026-11-01T00:00:00Z", IsValidForSession1: "true" }), "inactive");
+  assert.equal(st({ Active: "true", StartDate: "2026-11-01T00:00:00Z" }), "no_sessions");
+  assert.equal(st({ StartDate: "2026-11-01T00:00:00Z", IsValidForSession1: "true" }), "unknown", "Active missing");
+  assert.equal(st({ Active: "yes", IsValidForSession1: "true" }), "unknown", "Active not a boolean");
+  assert.equal(st({ Active: "true", EndDate: "rytoj", IsValidForSession1: "true" }), "unknown", "unreadable date");
+  // what blocks a new write: anything that is or may become active, or can't be read
+  for (const s of ["effective", "scheduled", "no_sessions", "unknown"]) assert.ok(cms.CONFLICTING.has(s), s);
+  for (const s of ["ended", "inactive"]) assert.ok(!cms.CONFLICTING.has(s), s);
+});
+
+test("0051 milk setting by Animal GUID: one GetData with the Animal filter and top 10; a full page = ambiguous", async () => {
+  await setup51();
+  const d = targeted();
+  assert.equal(await cms.findMilkSetting(d, T[0].guid), T[0].milk);
+  const [, req] = d.calls.at(-1);
+  assert.match(req, new RegExp(`<equal name="Animal">${T[0].guid}</equal>`));
+  assert.match(req, /top="10"/);
+  assert.equal(await cms.findMilkSetting(d, T[1].guid, { optional: true }), T[1].milk);
+  assert.equal(await cms.findMilkSetting(d, GUID3, { optional: true }), null, "read-only: no milk setting = no separations");
+  const many = fakeDelpro();
+  many.db.AnimalMilkSetting = {};
+  for (let i = 0; i < 10; i += 1) many.db.AnimalMilkSetting[9100 + i] = { Key: String(9100 + i), Animal: T[2].guid };
+  await assert.rejects(cms.findMilkSetting(many, T[2].guid), (e) => e.code === "milk_setting_ambiguous");
+});
+
+test("0051 actions read: SortCow filtered from the animal's own milk setting; truncated or keyless answers fail closed", async () => {
+  const d = fakeDelpro();
+  d.db.AnimalActionSetting = {};
+  for (let i = 0; i < 20; i += 1) d.db.AnimalActionSetting[70000 + i] = { Key: String(70000 + i), AnimalMilkSetting: "1", ActionType: "DumpMilk", Active: "false" };
+  await assert.rejects(cms.readActions(d, "1"), (e) => e.code === "actions_truncated");
+  d.db.AnimalActionSetting = { 70100: { AnimalMilkSetting: "2", ActionType: "SortCow", Active: "true" } };
+  await assert.rejects(cms.readActions(d, "2"), (e) => e.code === "actions_unreadable");
+});
+
+test("0051 identity: GUID + ORN, or GUID + Number when DelPro has no ORN; never an ORN against a Number", async () => {
+  const d = fakeDelpro();
+  d.db.Animal = { [T[0].guid]: { ObjectGuid: T[0].guid, Number: T[0].no, OfficialRegNumber: T[0].orn } };
+  const s = { animal_guid: T[0].guid, orn: T[0].orn, animal_no: T[0].no };
+  assert.deepEqual(await cms.verifyAnimal(d, s), { number: T[0].no, orn: T[0].orn });
+  await assert.rejects(cms.verifyAnimal(d, { ...s, orn: T[1].orn }), (e) => e.code === "animal_orn_mismatch");
+  delete d.db.Animal[T[0].guid].OfficialRegNumber;
+  assert.equal((await cms.verifyAnimal(d, s)).number, T[0].no);
+  await assert.rejects(cms.verifyAnimal(d, { ...s, animal_no: "999" }), (e) => e.code === "animal_number_mismatch");
+  // GVET's ORN must not be compared with DelPro's short Number
+  await assert.rejects(cms.verifyAnimal(d, { ...s, animal_no: null }), (e) => e.code === "animal_identity_unverified");
+  await assert.rejects(cms.verifyAnimal(d, { ...s, animal_guid: "a0000000-0000-4000-8000-0000000009ff" }), (e) => e.code === "animal_not_found");
+});
+
+test("0051 multi-cow: approved jobs sent independently, bounded concurrency, the full-scan failure blocks nothing", async () => {
+  await setup51();
+  // the historical full scan is broken / incomplete — exactly the farm's situation
+  const broken = farm({ milk: 1200, failGetData: (r) => NULLREF_BULK(r) || (r.name === "AnimalMilkSetting" && r.where.Key === "31100") });
+  const scan = await cms.readLiveState(broken, LIVE);
+  assert.equal(scan.complete, false);
+  assert.equal((await svc(`select cms_live_upload($1::jsonb) as r`, [JSON.stringify(scan)]))[0].r.complete, false);
+
+  // the same DelPro breaks every bulk read, but each cow's own reads work
+  const d = targeted({ failGetData: (r) => NULLREF_BULK(r) || (r.name === "AnimalMilkSetting" && !r.where.Animal && r.props.includes("Animal")) });
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const client = { ...d, async getDataXml(x) {
+    inFlight += 1;
+    maxInFlight = Math.max(maxInFlight, inFlight);
+    await new Promise((r) => setImmediate(r));
+    try { return await d.getDataXml(x); } finally { inFlight -= 1; }
+  }, createData: (x) => d.createData(x) };
+  const ids = await approvedBatch([await item(T[0].orn), await item(T[1].orn, { sessions: [3] }), await item(T[2].orn)]);
+  assert.equal(await cms.runCmsOutbound(client, { concurrency: 2, max: 10 }), 3);
+  for (const orn of [T[0].orn, T[1].orn, T[2].orn]) {
+    const j = await job(ids[orn]);
+    assert.equal(j.status, "success", `${orn}: ${j.last_error}`);
+    assert.equal(j.readback.verified, true);
+    assert.ok(d.db.AnimalActionSetting[j.action_key], "real DelPro key recorded");
+  }
+  assert.equal(creates(d), 3);
+  assert.ok(maxInFlight <= 2, `bounded concurrency (${maxInFlight})`);
+  // no global herd read before or during sending
+  assert.equal(d.calls.filter(([op, x]) => op === "GetData" && !/<where>/.test(x)).length, 0, "every read is filtered to one animal");
+  // nothing is sent twice
+  assert.equal(await cms.runCmsOutbound(client), 0);
+  assert.equal(creates(d), 3);
+});
+
+test("0051 per-cow failures: missing animal, ambiguous milk setting, unreadable or active existing action — only that cow stops", async () => {
+  const d = targeted();
+  // T[4]: an existing SortCow whose Active can't be read -> unknown -> never written next to it
+  d.db.AnimalActionSetting[71000] = { Key: "71000", AnimalMilkSetting: T[4].milk, ActionType: "SortCow", StartDate: "2026-01-01T00:00:00Z", IsValidForSession1: "true" };
+  delete d.db.Animal[T[3].guid]; // T[3]: gone from DelPro
+  d.db.AnimalMilkSetting[8999] = { Key: "8999", Animal: T[5].guid }; // T[5]: two milk settings
+  const ids = await approvedBatch([await item(T[3].orn), await item(T[4].orn), await item(T[5].orn)]);
+  assert.equal(await cms.runCmsOutbound(d), 3);
+  const [missing, unknown, ambiguous] = await Promise.all([job(ids[T[3].orn]), job(ids[T[4].orn]), job(ids[T[5].orn])]);
+  assert.equal(missing.status, "error");
+  assert.equal(missing.error_details.code, "animal_not_found");
+  assert.equal(unknown.status, "error");
+  assert.match(unknown.last_error, /71000 unknown/);
+  assert.equal(ambiguous.status, "error");
+  assert.equal(ambiguous.error_details.code, "milk_setting_ambiguous");
+  assert.equal(creates(d), 0, "nothing written for any of them");
+  for (const j of [missing, unknown, ambiguous]) assert.equal(j.write_started_at, null);
+});
+
+test("0051 targeted refresh: only GVET's CMS animals, per-animal removal, a failed read keeps the old state as stale", async () => {
+  const d = targeted();
+  const jT0 = (await q(`select action_key from cms_separation_jobs j join animals a on a.id = j.animal_id where a.tag_no = $1 and j.status = 'success'`, [T[0].orn]))[0];
+  const targets = await svc(`select cms_live_targets('{"limit":100,"due_minutes":60}'::jsonb) as r`);
+  const orns = targets[0].r.map((t) => t.orn);
+  assert.ok(orns.includes(T[0].orn) && orns.includes(T[1].orn), "GVET-written animals are refreshed");
+  assert.ok(!orns.includes("LT000007300340"), "unlinked animals never");
+  const res = await cms.runCmsTargetedRefresh(d, { limit: 100, dueMinutes: 60 });
+  assert.equal(res.failed, 0);
+  assert.ok(d.calls.every(([op, x]) => op === "GetData" && /<where>/.test(x)), "read-only, filtered reads only");
+  let [row] = await q(`select active, sessions, removed_at, animal_id from cms_live_action_settings where action_key = $1`, [jT0.action_key]);
+  assert.equal(row.active, true);
+  assert.ok(row.animal_id);
+  const [chk] = await q(`select c.* from cms_animal_live_checks c join animals a on a.id = c.animal_id where a.tag_no = $1`, [T[0].orn]);
+  assert.equal(chk.ok, true);
+  assert.equal(chk.milk_setting_key, T[0].milk);
+  // nothing is due again right away
+  assert.equal((await svc(`select cms_live_targets('{"limit":100,"due_minutes":60}'::jsonb) as r`))[0].r.length, 0);
+
+  // a read of T[0] fails: its record stays as it was, the check says when and why
+  const bad = targeted({ failGetData: (r) => r.where.Animal === T[0].guid });
+  const one = await cms.runCmsTargetedRefresh(bad, { tags: [T[0].orn] });
+  assert.equal(one.failed, 1);
+  [row] = await q(`select active, removed_at from cms_live_action_settings where action_key = $1`, [jT0.action_key]);
+  assert.equal(row.active, true);
+  assert.equal(row.removed_at, null);
+  const [chk2] = await q(`select c.* from cms_animal_live_checks c join animals a on a.id = c.animal_id where a.tag_no = $1`, [T[0].orn]);
+  assert.equal(chk2.ok, false);
+  assert.match(chk2.error, /NullReferenceException/);
+});
+
+test("0051 disabled by hand in DelPro: GVET shows it on the next refresh and never re-creates it", async () => {
+  const d = targeted();
+  const [{ id, action_key: key }] = await q(`select j.id, j.action_key from cms_separation_jobs j join animals a on a.id = j.animal_id where a.tag_no = $1 and j.status = 'success'`, [T[1].orn]);
+  d.db.AnimalActionSetting[key] = { Key: key, AnimalMilkSetting: T[1].milk, ActionType: "SortCow", Active: "false", StartDate: "2099-11-03T06:00:00Z", EndDate: "2099-11-05T06:00:00Z", IsValidForSession3: "true" };
+  // someone asks for this one cow in GVET
+  await asUser(VET, `select cms_request_animal_refresh(array['${await animalId(T[1].orn)}']::uuid[])`);
+  const res = await cms.runCmsTargetedRefresh(d, { limit: 10, dueMinutes: 60 });
+  assert.equal(res.targets, 1);
+  const [v] = await q(`select status, delpro_active from vw_cms_separation_jobs where id = $1`, [id]);
+  assert.equal(v.delpro_active, false);
+  assert.equal(v.status, "success");
+  assert.equal(await cms.runCmsOutbound(d), 0);
+  assert.equal(creates(d), 0);
+  // record deleted in DelPro: removed for this animal only
+  delete d.db.AnimalActionSetting[key];
+  await cms.runCmsTargetedRefresh(d, { tags: [T[1].orn] });
+  assert.ok((await q(`select removed_at from cms_live_action_settings where action_key = $1`, [key]))[0].removed_at);
+  assert.equal((await q(`select count(*)::int as n from cms_live_action_settings where removed_at is not null and action_key = '11981'`))[0].n, 0, "other animals untouched");
+});
+
+test("0051 emergency stop: routine multi-cow sending stops at the claim, nothing reaches DelPro", async () => {
+  const d = targeted();
+  const ids = await approvedBatch([await item(T[6].orn), await item(T[7].orn)]);
+  await asUser(VET, `select cms_set_outbound_enabled(false)`);
+  assert.equal(await cms.runCmsOutbound(d), 0);
+  for (const orn of [T[6].orn, T[7].orn]) assert.equal((await job(ids[orn])).status, "approved");
+  assert.equal(creates(d), 0);
+
+  // GVET's mirror is stale (DelPro got a separation for T[7] by hand since): the cow's own pre-write read refuses it
+  d.db.AnimalActionSetting[72000] = { Key: "72000", AnimalMilkSetting: T[7].milk, ActionType: "SortCow", Active: "true", StartDate: "2026-01-01T00:00:00Z", IsValidForSession2: "true" };
+  await asUser(ADMIN, `select cms_set_outbound_enabled(true, true)`);
+  assert.equal(await cms.runCmsOutbound(d), 2);
+  assert.equal((await job(ids[T[6].orn])).status, "success");
+  const j = await job(ids[T[7].orn]);
+  assert.equal(j.status, "error");
+  assert.equal(j.error_details.code, "existing_active_sortcow");
+  assert.match(j.last_error, /72000 effective/);
+  assert.equal(creates(d), 1);
+});
+
+test("0051 single instance: a live worker's fresh lock refuses a second; stale or foreign-PID locks are taken over, nothing killed", async () => {
+  const fs = await import("node:fs");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gvet-lock-"));
+  const file = path.join(dir, "worker.lock");
+  fs.writeFileSync(file, JSON.stringify({ pid: 4242 }));
+  assert.equal(idx.acquireSingleInstanceLock({ dir, alive: () => true }).ok, false, "fresh lock of a running worker");
+  // PID reused by another program / process gone
+  const taken = idx.acquireSingleInstanceLock({ dir, alive: () => false });
+  assert.equal(taken.ok, true);
+  assert.equal(JSON.parse(fs.readFileSync(file, "utf8")).pid, process.pid);
+  taken.release();
+  // an old 0.3.0 lock (bare PID) not touched for 3 minutes
+  fs.writeFileSync(file, "4242");
+  const old = new Date(Date.now() - 180_000);
+  fs.utimesSync(file, old, old);
+  const t2 = idx.acquireSingleInstanceLock({ dir, alive: () => true });
+  assert.equal(t2.ok, true);
+  t2.release();
+  assert.equal(fs.existsSync(file), false);
+  // Windows: a PID that exists but isn't node.exe is not a worker
+  const win = (image) => idx.isNodeProcess(process.ppid, { platform: "win32", exec: () => `"${image}","${process.ppid}","Console","1","10,000 K"` });
+  assert.equal(win("node.exe"), true);
+  assert.equal(win("chrome.exe"), false);
+  assert.equal(idx.isNodeProcess(99999999, { platform: "win32", exec: () => "" }), false, "no such process");
+});

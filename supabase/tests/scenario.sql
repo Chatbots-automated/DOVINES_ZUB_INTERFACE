@@ -2705,3 +2705,87 @@ set role service_role;
 select 'cms_live50_old' as step, cms_live_upload('{"complete":false,"actions":[{"key":"50002","milk_setting_key":"778","animal_guid":null,"action_type":"SortCow","active":true,"sessions":[1]}]}'::jsonb)->'unmatched_reasons' as reasons;
 reset role;
 select 'assert' as step, '0050 CMS: unreadable milk setting keeps the animal, no removal, reasons by answer type' as what;
+
+-- ---------------------------------------------------------------------------------------------------------------------
+-- 0051. Targeted CMS state: only GVET's CMS animals are read, one animal's answer only touches that animal, a failed read
+-- keeps the old state, and an incomplete historical full scan blocks no claim.
+insert into animals (tag_no, animal_no, active, source, delpro_object_guid) values
+  ('LT0000CMS00020', 'C20', true, 'delpro', 'c0000000-0000-4000-8000-000000000020'),
+  ('LT0000CMS00021', 'C21', true, 'delpro', 'c0000000-0000-4000-8000-000000000021'),
+  ('LT0000CMS00022', 'C22', true, 'delpro', null);
+set role service_role;
+do $$ declare t jsonb; begin
+  t := cms_live_targets('{"limit":500,"due_minutes":60}'::jsonb);
+  -- C1: GVET-written record not read since -> refreshed; C10: its GVET record is already seen disabled in DelPro -> finished, not re-read
+  if not t @> jsonb_build_array(jsonb_build_object('orn', 'LT0000CMS00001', 'reason', 'gvet_written')) then raise exception 'GVET-written animal must be a target: %', t; end if;
+  if t @> jsonb_build_array(jsonb_build_object('orn', 'LT0000CMS00010')) then raise exception 'finished GVET record must not be re-read: %', t; end if;
+  -- an animal with nothing CMS-related is not read unless asked for / all_linked
+  if t @> jsonb_build_array(jsonb_build_object('orn', 'LT0000CMS00020')) then raise exception 'unrelated animal must not be a target'; end if;
+  if not cms_live_targets('{"limit":1000,"all_linked":true}'::jsonb) @> jsonb_build_array(jsonb_build_object('orn', 'LT0000CMS00020')) then raise exception 'all_linked must include linked animals'; end if;
+  if cms_live_targets('{"limit":1000,"all_linked":true}'::jsonb) @> jsonb_build_array(jsonb_build_object('orn', 'LT0000CMS00022')) then raise exception 'unlinked animals are never targets'; end if;
+  if jsonb_array_length(cms_live_targets('{"tags":["lt 0000 cms00021"]}'::jsonb)) <> 1 then raise exception 'tag lookup must normalize the ORN'; end if;
+end $$;
+reset role;
+-- staff ask for one animal; a viewer can't
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000b',false);
+select 'cms_request51' as step, cms_request_animal_refresh(array(select id from animals where tag_no in ('LT0000CMS00020', 'LT0000CMS00022')))->'requested' as requested;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000c',false);
+do $$ declare blocked boolean := false; begin
+  begin perform cms_request_animal_refresh(array(select id from animals where tag_no = 'LT0000CMS00020'));
+  exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: viewer requested a DelPro read'; end if;
+end $$;
+reset role;
+set role service_role;
+do $$ declare t jsonb; r jsonb; begin
+  t := cms_live_targets('{"limit":1}'::jsonb);
+  if t->0->>'orn' <> 'LT0000CMS00020' or t->0->>'reason' <> 'requested' then raise exception 'requested animal must come first: %', t; end if;
+  -- C20: DelPro has one SortCow; C21: read failed; a stale GUID is ignored
+  r := cms_live_upload_animals(jsonb_build_object('worker_id', 'w1', 'round', jsonb_build_object('targets', 3), 'results', jsonb_build_array(
+    jsonb_build_object('animal_id', (select id from animals where tag_no = 'LT0000CMS00020'), 'animal_guid', 'c0000000-0000-4000-8000-000000000020',
+      'ok', true, 'milk_setting_key', '920', 'actions', jsonb_build_array(
+        jsonb_build_object('key', '52001', 'milk_setting_key', '920', 'action_type', 'SortCow', 'active', true, 'start_at', '2026-01-01T00:00:00Z', 'sessions', '[1]'::jsonb),
+        jsonb_build_object('key', '52002', 'milk_setting_key', '920', 'action_type', 'DumpMilk', 'active', true, 'sessions', '[1]'::jsonb))),
+    jsonb_build_object('animal_id', (select id from animals where tag_no = 'LT0000CMS00021'), 'animal_guid', 'c0000000-0000-4000-8000-000000000021',
+      'ok', false, 'error', 'GETDATA_ERROR: System.NullReferenceException'),
+    jsonb_build_object('animal_id', (select id from animals where tag_no = 'LT0000CMS00020'), 'animal_guid', 'c0000000-0000-4000-8000-0000000000ee', 'ok', true))));
+  if r->>'ok' <> '1' or r->>'failed' <> '1' or r->>'mismatched' <> '1' or r->>'upserted' <> '1' then raise exception 'upload counts: %', r; end if;
+  if (select animal_id from cms_live_action_settings where action_key = '52001') <> (select id from animals where tag_no = 'LT0000CMS00020') then raise exception 'SortCow must map to its animal'; end if;
+  if exists (select 1 from cms_live_action_settings where action_key = '52002') then raise exception 'only SortCow is mirrored'; end if;
+  if (select ok from cms_animal_live_checks c join animals a on a.id = c.animal_id where a.tag_no = 'LT0000CMS00021') then raise exception 'failed read must be recorded as failed'; end if;
+  if nullif((select setting_value from system_settings where setting_key = 'cms_targeted_last_refresh'), '') is null then raise exception 'round must be stored'; end if;
+  -- the requested animal is satisfied
+  if cms_live_targets('{"limit":500,"due_minutes":60}'::jsonb) @> jsonb_build_array(jsonb_build_object('orn', 'LT0000CMS00020', 'reason', 'requested')) then raise exception 'request must be cleared by the read'; end if;
+  -- now C20 has a live SortCow -> operational, due later
+  if not cms_live_targets('{"limit":500,"checked_before":"infinity"}'::jsonb) @> jsonb_build_array(jsonb_build_object('orn', 'LT0000CMS00020', 'reason', 'delpro_active')) then raise exception 'animal with a live SortCow must stay a target'; end if;
+  -- C20 read again, record gone from DelPro: removed for C20 only
+  perform cms_live_upload_animals(jsonb_build_object('worker_id', 'w1', 'results', jsonb_build_array(
+    jsonb_build_object('animal_id', (select id from animals where tag_no = 'LT0000CMS00020'), 'animal_guid', 'c0000000-0000-4000-8000-000000000020', 'ok', true, 'actions', '[]'::jsonb))));
+  if (select removed_at from cms_live_action_settings where action_key = '52001') is null then raise exception 'complete per-animal read must remove the missing record'; end if;
+  if exists (select 1 from cms_live_action_settings where removed_at is not null and action_key in ('11981', '50001')) then raise exception 'other animals must be untouched'; end if;
+end $$;
+reset role;
+-- an incomplete historical scan on record (0050 block) never blocks an approved job
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000b',false);
+select set_config('t.cms51', cms_save_batch(jsonb_build_object('submit', true, 'items', jsonb_build_array(
+  jsonb_build_object('animal_id', (select id from animals where tag_no = 'LT0000CMS00021'), 'mode', 'period', 'start_local', '2099-12-03T08:00', 'end_local', '2099-12-05T08:00', 'sessions', '[1]'::jsonb))))->>'batch_id', false);
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000a',false);
+select cms_approve_jobs(array(select id from cms_separation_jobs where batch_id = current_setting('t.cms51')::uuid), true);
+reset role;
+set role service_role;
+do $$ declare r jsonb; begin
+  if ((select setting_value::jsonb from system_settings where setting_key = 'cms_live_last_refresh')->>'complete')::boolean then raise exception 'precondition: full scan incomplete'; end if;
+  r := cms_claim_next_job('{"worker_id":"w1"}');
+  if r is null or r#>>'{snapshot,orn}' <> 'LT0000CMS00021' then raise exception 'approved job must be claimable without a complete full scan: %', r; end if;
+  perform cms_report_job(jsonb_build_object('job_id', r->>'job_id', 'worker_id', 'w1', 'phase', 'result', 'outcome', 'error', 'error_message', 'test'));
+end $$;
+reset role;
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000b',false);
+do $$ begin
+  if not (cms_status() ? 'targeted_last_refresh') then raise exception 'cms_status must show the targeted refresh'; end if;
+end $$;
+reset role;
+select 'assert' as step, '0051 CMS: targeted per-animal state, requests, per-animal removal, failed read kept, no full-scan gate' as what;

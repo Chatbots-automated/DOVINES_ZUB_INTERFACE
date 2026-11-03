@@ -10,7 +10,7 @@ import { Input, Label } from "@/components/ui/input";
 import { Dialog, DialogBody, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 import { cmsPost } from "@/lib/cms/client";
-import { activationChecks, fullyActive } from "@/lib/cms/activation";
+import { PER_JOB_CHECK_NOTE, activationChecks, fullyActive } from "@/lib/cms/activation";
 import { formatVilnius } from "@/lib/cms/separation";
 import type { CmsStatus } from "@/lib/supabase/types";
 
@@ -87,6 +87,7 @@ export function CmsActivationPanel({ status, isAdmin, canWrite, compact }: { sta
           </li>
         ))}
       </ul>
+      <p className="px-4 pb-3 text-[12px] text-text-muted">{PER_JOB_CHECK_NOTE}</p>
       <div className="flex flex-wrap items-center gap-2 border-t border-border bg-surface-secondary px-4 py-2 text-[12px] text-text-secondary">
         <CircleSlash className="size-4 shrink-0" />
         <span className="mr-auto">{STOP_NOTE} Ūkio kompiuteryje: <code className="font-mono">scripts\gvet-worker.ps1 -Action cms-off</code></span>

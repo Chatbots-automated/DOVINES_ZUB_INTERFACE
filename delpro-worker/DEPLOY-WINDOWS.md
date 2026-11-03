@@ -453,7 +453,8 @@ Starts automatically when this account logs on to Windows. Starting **without** 
 account (e.g. SYSTEM, "Run whether user is logged on or not") — not set up by this script; test it separately before relying on it.
 A second copy started by hand exits by itself (`logs\worker.lock`).
 
-**Verify the complete CMS read** (read-only; writes nothing anywhere; exit code 0 only when the scan is complete):
+**Verify the complete CMS read** (read-only; writes nothing anywhere; exit code 0 only when the scan is complete).
+*Since 0051 this is an optional diagnostic only — not an activation condition and not needed for sending; see §14.*
 
 ```powershell
 Set-Location C:\GVET\delpro-worker
@@ -464,7 +465,7 @@ Expected: `"complete":true`, `received` = number of SortCow records, `matched` =
 `unmatched_reasons` explaining the rest (`animal_not_in_gvet` = DelPro milk settings of animals GVET doesn't have — culled/sold
 animals DelPro keeps; `milk_setting_without_animal`; `animal_inactive_in_gvet`). An incomplete scan exits 2 and removes nothing in GVET.
 
-**Activation** (GVET → CMS atskyrimai → *Laukia perdavimo / istorija* → *Aktyvavimas*). "Visiškai aktyvu" appears only when all hold:
+**Activation** (*superseded by §14 since 0051 — no complete CMS read needed*) (GVET → CMS atskyrimai → *Laukia perdavimo / istorija* → *Aktyvavimas*). "Visiškai aktyvu" appears only when all hold:
 CMS worker installed · GVET API · Gateway · complete CMS read (< 26 h) · automatic worker (task) running · `CMS_OUTBOUND_MODE=gateway` ·
 GVET CMS sending switched on · a mode verified (*Nurodytam laikotarpiui* after job 443b4846… — admin presses *Leisti*) · physical
 destination confirmed by the farm operator (*Patvirtinti fizinę vietą*, with a note where the test cow went).
@@ -512,6 +513,73 @@ npm.cmd run cms:milk-diagnose
 
    Bisects the failing `top` between 1000 and 2000, reads the record at that position (and neighbours) by Key and its Animal, and
    saves `discovery\cms-milk-diagnose-*.json` with a one-line conclusion (record-specific vs bulk size).
+
+## 14. Targeted CMS + reliable automatic start (0051, worker 0.4.0)
+
+What changes: no full DelPro scan any more (not in the loop, not an activation check). Each approved job re-reads only its own cow
+right before writing (identity, its one milk setting, its existing SortCow records); "Aktyvūs atskyrimai" is fed by the same per-cow
+read for GVET's CMS cows only, hourly or on *Atnaujinti iš DelPro*. The task now runs a hidden supervisor that restarts the worker
+after any exit (the 0.3.0 task ended with `3221225786` = `0xC000013A`: its visible console was closed / got Ctrl+C, and Task
+Scheduler does not restart a program that exits). Treatments, catalog, reports, `.env` and the CreateData of SortCow are unchanged.
+
+1. Developer: apply `supabase/migrations/0051_cms_targeted_refresh.sql` (after a backup) **before** the worker upgrade.
+2. Farm PC, PowerShell **as Administrator**, logged in as the farm account. Run the script **from the new package** (the installed
+   0.3.0 script would keep the old task action):
+
+```powershell
+$zip = "$env:USERPROFILE\Downloads\delpro-worker-0051.zip"
+Unblock-File $zip
+$tmp = "$env:TEMP\gvet-worker-0051"; Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
+Expand-Archive $zip $tmp
+powershell -ExecutionPolicy Bypass -File "$tmp\delpro-worker\scripts\gvet-worker.ps1" -Action upgrade -Source "$tmp\delpro-worker" -Dir C:\GVET\delpro-worker
+```
+
+   It backs up the code, keeps `.env` / `treatment-model.json` / `logs\`, adds only missing keys (`CMS_BATCH_LIMIT=10`,
+   `CMS_CONCURRENCY=2`, `CMS_REFRESH_BATCH=50`, `CMS_REFRESH_POLL_SEC=30`), **reuses the existing `GVET-DelPro-Worker` task** (same
+   trigger and user; only its action becomes the hidden supervisor) and starts it. If it says *A worker is still running*, add
+   `-StopRunning`; if *Could not update the task action*, run `-Action install` (re-registers our task only).
+
+3. **Automatic start verification**:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File C:\GVET\delpro-worker\scripts\gvet-worker.ps1 -Action status
+```
+
+   Expect `[OK] Startup: task starts at Windows logon`, `[OK] Startup: task runs the supervisor`, `[OK] Supervisor running`,
+   one `[OK] Process PID …, by task`, `[OK] lock: PID … (this worker)`, `[OK] GVET last heartbeat … (< 300 s ago)`, and Gateway
+   reachable. To prove the restart: `Stop-Process -Id <node PID>`; within ~20 s `-Action status` shows a new PID and
+   `logs\supervisor.log` has `worker exited with code … - restarting`. After a Windows sign-out / sign-in the same status must be green.
+
+4. **Targeted live status check** (read-only towards DelPro; prints each cow's SortCow records with status, uploads to GVET):
+
+```powershell
+Set-Location C:\GVET\delpro-worker
+npm.cmd run cms:refresh -- --tag LT000007300337      # one cow (repeat --tag for more)
+npm.cmd run cms:refresh                              # GVET's whole CMS set now
+```
+
+   Each line: `LT… (DelPro Nr. …, AnimalMilkSetting …): <key> effective|scheduled|inactive|ended … s[1,2]` or `NENUSKAITYTA — <reason>`.
+   Exit 2 if any cow could not be read. The test record you disabled by hand must show `inactive`.
+
+5. **CMS activation** (GVET → CMS atskyrimai → *Aktyvavimas*, 7 checks: worker running by the task · Gateway · GVET API ·
+   `CMS_OUTBOUND_MODE=gateway` · GVET switch on · mode verified · physical destination + behaviour confirmed by the operator).
+   The physical check stays required: the test record appeared in DelPro, but where the cow physically went is not confirmed yet.
+   After the operator confirmed it (admin: *Patvirtinti fizinę vietą*, with a note):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File C:\GVET\delpro-worker\scripts\gvet-worker.ps1 -Action cms-on   # type GATEWAY
+```
+
+   then an admin presses *Įjungti CMS siuntimą* in GVET. Sort Once and a chosen sort area stay blocked.
+
+6. **Emergency stop** (stops NEW CMS writes only; treatments keep running; separations already in DelPro are NOT cancelled —
+   disable those in DelPro): GVET *Avarinis stabdymas* (any staff member, immediate — the worker gets no more jobs), and/or on the PC:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File C:\GVET\delpro-worker\scripts\gvet-worker.ps1 -Action cms-off
+```
+
+Optional, diagnostic only: `npm.cmd run cms:live` (whole DelPro, slow, may be incomplete — blocks nothing).
 
 ## Not enabled by this guide
 

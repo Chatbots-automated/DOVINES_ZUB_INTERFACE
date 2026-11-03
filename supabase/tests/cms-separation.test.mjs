@@ -99,19 +99,54 @@ test("schedule text, duration helper and items", () => {
 const actText = fs.readFileSync(path.join(root, "src/lib/cms/activation.ts"), "utf8");
 const act = await import("data:text/javascript;base64," + Buffer.from(ts.transpileModule(actText, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText).toString("base64"));
 
-test("activation: 'fully active' only when every check passes", () => {
+test("activation: 'fully active' only when every operational check passes; the historical full scan is not one (0051)", () => {
   const now = Date.parse("2026-11-03T12:00:00Z");
   const good = {
-    verified_modes: ["period"], live_last_refresh: { finished_at: "2026-11-03T11:00:00Z", complete: true }, worker_cms_mode: "gateway",
+    verified_modes: ["period"], worker_cms_mode: "gateway",
     worker_seen_at: "2026-11-03 11:59:00+00", outbound_enabled: true, destination_verified: { note: "Patalpa 1", by_name: "Admin" },
-    worker: { has_cms: true, started_by: "task", gateway_ok_at: "2026-11-03T11:55:00Z", version: "0.2.0" },
+    worker: { has_cms: true, started_by: "task", gateway_ok_at: "2026-11-03T11:55:00Z", version: "0.4.0" },
   };
-  assert.equal(act.fullyActive(act.activationChecks(good, now)), true);
+  const checks = act.activationChecks(good, now);
+  assert.equal(act.fullyActive(checks), true);
+  assert.deepEqual(checks.map((c) => c.id), ["worker", "gateway", "gvet", "local", "gvet_switch", "mode", "destination"]);
+  // a broken / incomplete / never-run full DelPro scan changes nothing
+  for (const live of [null, { finished_at: "2026-11-01T00:00:00Z", complete: false }]) {
+    assert.equal(act.fullyActive(act.activationChecks({ ...good, live_last_refresh: live }, now)), true);
+  }
   for (const [k, v] of [["outbound_enabled", false], ["destination_verified", null], ["worker_cms_mode", "off"], ["verified_modes", []],
-    ["live_last_refresh", { finished_at: "2026-11-03T11:00:00Z", complete: false }], ["worker_seen_at", "2026-11-03 10:00:00+00"]]) {
+    ["worker_seen_at", "2026-11-03 10:00:00+00"]]) {
     assert.equal(act.fullyActive(act.activationChecks({ ...good, [k]: v }, now)), false, k);
   }
   assert.equal(act.fullyActive(act.activationChecks({ ...good, worker: { ...good.worker, started_by: "manual" } }, now)), false);
   assert.equal(act.fullyActive(act.activationChecks({ ...good, worker: { ...good.worker, has_cms: false } }, now)), false);
+  assert.equal(act.fullyActive(act.activationChecks({ ...good, worker: { ...good.worker, gateway_ok_at: "2026-11-03T10:00:00Z" } }, now)), false, "gateway");
   assert.equal(act.fullyActive(act.activationChecks(null, now)), false);
+  assert.match(act.PER_JOB_CHECK_NOTE, /kiekvieną/);
+});
+
+const liveText = fs.readFileSync(path.join(root, "src/lib/cms/live-status.ts"), "utf8");
+const live = await import("data:text/javascript;base64," + Buffer.from(ts.transpileModule(liveText, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText).toString("base64"));
+
+test("live status (0051): same rule as the worker — Active, dates and sessions; unreadable = unknown", () => {
+  const now = Date.parse("2026-11-03T12:00:00Z");
+  const a = (x) => live.cmsActionStatus({ active: true, start_at: "2026-11-01T00:00:00Z", end_at: null, sessions: [1], ...x }, now);
+  assert.equal(a({}), "effective");
+  assert.equal(a({ start_at: "2026-11-04T00:00:00Z" }), "scheduled");
+  assert.equal(a({ end_at: "2026-11-02T00:00:00Z" }), "ended");
+  assert.equal(a({ active: false }), "inactive");
+  assert.equal(a({ sessions: [] }), "no_sessions");
+  assert.equal(a({ active: null }), "unknown");
+  assert.equal(a({ end_at: "rytoj" }), "unknown");
+  // the worker's rule (delpro-worker/src/cms-separation.js actionStatus) must give the same answers
+  const worker = fs.readFileSync(path.join(root, "delpro-worker/src/cms-separation.js"), "utf8");
+  for (const s of ["effective", "scheduled", "no_sessions", "ended", "inactive", "unknown"]) assert.match(worker, new RegExp(`return "${s}"`));
+});
+
+test("live freshness (0051): pending request, never read, failed read, stale vs fresh", () => {
+  const now = Date.parse("2026-11-03T12:00:00Z");
+  assert.equal(live.cmsFreshness(null, now), "never");
+  assert.equal(live.cmsFreshness({ checked_at: "2026-11-03T11:30:00Z", ok: true, requested_at: null }, now), "fresh");
+  assert.equal(live.cmsFreshness({ checked_at: "2026-11-03T08:00:00Z", ok: true, requested_at: null }, now), "stale");
+  assert.equal(live.cmsFreshness({ checked_at: "2026-11-03T11:30:00Z", ok: false, requested_at: null }, now), "failed");
+  assert.equal(live.cmsFreshness({ checked_at: "2026-11-03T11:30:00Z", ok: true, requested_at: "2026-11-03T11:45:00Z" }, now), "pending");
 });

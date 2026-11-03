@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { execFileSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -12,7 +13,7 @@ import { checkCatalogJob } from "./catalog-write-check.js";
 import { TreatmentWriteError, liveChecks, treatmentProblems, writeTreatment as writeGatewayTreatment } from "./treatment-gateway.js";
 import { loadTreatmentModel, validateModel } from "./treatment-model.js";
 import { GatewayError } from "./gateway.js";
-import { diagnoseMilkSettings, pingGateway, prepareJob, runCmsLive, runCmsOutbound, snapshotProblems } from "./cms-separation.js";
+import { diagnoseMilkSettings, pingGateway, prepareJob, runCmsLive, runCmsOutbound, runCmsTargetedRefresh, snapshotProblems } from "./cms-separation.js";
 import { log } from "./log.js";
 
 // Dovinės ŽŪB DelPro worker (Priedas §3-§4). Runs on the farm PC next to
@@ -23,6 +24,8 @@ import { log } from "./log.js";
 //            DelPro -> read back -> delpro_report_job_result
 //   catalog  (every CATALOG_INTERVAL_MIN, or when an admin presses
 //            "Sinchronizuoti dabar"): Gateway GetData -> delpro_catalog_* (read-only)
+//   cms      (every CMS_POLL_INTERVAL_SEC): claim approved CMS jobs -> per-animal check -> SortCow write -> read back;
+//            every CMS_REFRESH_POLL_SEC: DelPro state of GVET's CMS animals only (targeted, 0051) -> GVET
 //
 // Every step is independent and failure-tolerant: a DelPro or network
 // outage is logged and retried on the next tick, never crashes the loop.
@@ -30,7 +33,7 @@ import { log } from "./log.js";
 const MAX_JOBS_PER_TICK = 20;
 const state = {
   lastInboundOk: null, lastCatalogOk: null, lastError: null,
-  lastCmsLiveOk: null, lastCmsLive: null, gatewayOkAt: null, gatewayError: null,
+  lastCmsLiveOk: null, lastCmsLive: null, lastCmsRefresh: null, gatewayOkAt: null, gatewayError: null,
   // --service is passed only by the scheduled task (scripts/gvet-worker.ps1): "automatic worker running" in GVET
   startedBy: process.argv.includes("--service") ? "task" : "manual",
   startedAt: new Date().toISOString(),
@@ -63,6 +66,11 @@ async function heartbeat() {
     cms_default_sort_area_key: config.cmsDefaultSortAreaKey || null,
     cms_last_live_ok: state.lastCmsLiveOk,
     cms_last_live: state.lastCmsLive,
+    // 0051: targeted refresh (its presence tells GVET this worker no longer needs the full scan)
+    cms_refresh_interval_min: config.cmsRefreshIntervalMin,
+    cms_last_refresh: state.lastCmsRefresh,
+    cms_batch_limit: config.cmsBatchLimit,
+    cms_concurrency: config.cmsConcurrency,
     gateway_ok_at: state.gatewayOkAt,
     gateway_error: state.gatewayError,
     started_by: state.startedBy,
@@ -298,28 +306,45 @@ export async function runOutbound() {
 // made only with CMS_OUTBOUND_MODE=gateway, and GVET still decides which job (if any) may be written.
 // ---------------------------------------------------------------------------
 
+// Gateway reads (CMS state, ping) work whenever this PC talks to the Gateway at all — for the catalog or for CMS.
+const gatewayReadable = () => config.catalogSource === "gateway" || config.cmsOutboundMode === "gateway";
+
 export async function runCms() {
   if (config.cmsOutboundMode !== "gateway") return 0;
   return runCmsOutbound(createGatewayClient({ allowWrites: true }));
 }
 
-let cmsLiveAt = 0;
-export async function runCmsLiveIfDue({ force = false } = {}) {
-  if (config.catalogSource !== "gateway") return null;
-  const due = config.cmsLiveIntervalMin > 0 && Date.now() - cmsLiveAt >= config.cmsLiveIntervalMin * 60_000;
-  if (!force && !due && !(await gvet.cmsLiveRequested())) return null;
-  cmsLiveAt = Date.now();
-  // the background loop reuses Key -> Animal answers for 24 h; a forced run (`npm run cms:live`) reads every key again
-  const res = await runCmsLive(createGatewayClient(), { useCache: !force });
+/** OPTIONAL diagnostic: the old full DelPro scan (`npm run cms:live`). Never run by the loop, never a condition for sending. */
+export async function runCmsFullScan() {
+  const res = await runCmsLive(createGatewayClient(), { useCache: false });
   state.lastCmsLive = { at: new Date().toISOString(), complete: !!res?.complete, received: res?.received ?? null };
   if (res?.complete) state.lastCmsLiveOk = state.lastCmsLive.at;
+  return res;
+}
+
+let cmsRefreshAt = 0;
+/** Targeted DelPro -> GVET state (GVET's CMS animals only). Due every CMS_REFRESH_POLL_SEC; "Atnaujinti iš DelPro" forces a full operational round. */
+export async function runCmsRefreshIfDue({ force = false } = {}) {
+  if (!gatewayReadable()) return null;
+  if (!force && Date.now() - cmsRefreshAt < config.cmsRefreshPollSec * 1000) return null;
+  cmsRefreshAt = Date.now();
+  const requested = force || (await gvet.cmsLiveRequested());
+  const res = await runCmsTargetedRefresh(createGatewayClient(), { force: requested });
+  if (res.targets || requested) {
+    state.lastCmsRefresh = { at: new Date().toISOString(), targets: res.targets, ok: res.ok, failed: res.failed };
+    // a read that worked is evidence the Gateway answers
+    if (res.ok) {
+      state.gatewayOkAt = state.lastCmsRefresh.at;
+      state.gatewayError = null;
+    }
+  }
   return res;
 }
 
 // Read-only Gateway reachability for the activation checks (every 10 min).
 let gatewayPingAt = 0;
 export async function pingGatewayIfDue() {
-  if (config.catalogSource !== "gateway" || Date.now() - gatewayPingAt < 600_000) return;
+  if (!gatewayReadable() || Date.now() - gatewayPingAt < 600_000) return;
   gatewayPingAt = Date.now();
   try {
     await pingGateway(createGatewayClient());
@@ -330,54 +355,91 @@ export async function pingGatewayIfDue() {
   }
 }
 
+const LOCK_STALE_MS = 120_000;
+
+/** Is `pid` a running node.exe / node process? Windows reuses PIDs quickly, so "some process has this PID" is not enough. */
+export function isNodeProcess(pid, { platform = process.platform, exec = null } = {}) {
+  if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) return false;
+  try {
+    process.kill(pid, 0);
+  } catch (err) {
+    if (err.code !== "EPERM") return false; // ESRCH = no such process
+  }
+  if (platform !== "win32") return true;
+  try {
+    const run = exec ?? ((cmd, args) => execFileSync(cmd, args, { encoding: "utf8", windowsHide: true, timeout: 10_000 }));
+    const out = run("tasklist.exe", ["/FI", `PID eq ${pid}`, "/FO", "CSV", "/NH"]);
+    return /^"node(\.exe)?"/im.test(String(out).trim());
+  } catch {
+    return true; // can't tell -> assume it is (never run beside a possibly real worker)
+  }
+}
+
 /**
- * One continuous worker per folder: logs\worker.lock holds the PID. A second `npm start` / task instance exits instead of
- * running beside the first (two loops would claim jobs side by side). A lock left by a dead process is taken over.
+ * One continuous worker per folder: logs\worker.lock holds {pid, started_at, host} and is touched every 30 s. A second
+ * `npm start` / task instance exits (code 3) instead of running beside the first. The lock is taken over only when it is
+ * stale — not touched for 2 min, or its PID is not a running node process (crash, power cut, closed console, PID reused by
+ * another program). Nothing is ever killed here.
  */
-function acquireSingleInstanceLock() {
-  const dir = path.join(ROOT, "logs");
+export function acquireSingleInstanceLock({ dir = path.join(ROOT, "logs"), now = Date.now, alive = isNodeProcess } = {}) {
   fs.mkdirSync(dir, { recursive: true });
   const file = path.join(dir, "worker.lock");
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+  const mine = JSON.stringify({ pid: process.pid, started_at: new Date(now()).toISOString(), host: os.hostname() });
+  for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
-      fs.writeFileSync(file, String(process.pid), { flag: "wx" });
+      fs.writeFileSync(file, mine, { flag: "wx" });
       const release = () => {
         try {
-          if (fs.readFileSync(file, "utf8").trim() === String(process.pid)) fs.unlinkSync(file);
+          if (readLockPid(file) === process.pid) fs.unlinkSync(file);
         } catch {
           /* already gone */
         }
       };
       process.on("exit", release);
-      setInterval(() => {
+      const touch = setInterval(() => {
         try {
-          const now = new Date();
-          fs.utimesSync(file, now, now);
+          const t = new Date();
+          fs.utimesSync(file, t, t);
         } catch {
           /* ignore */
         }
-      }, 30_000).unref();
-      for (const sig of ["SIGINT", "SIGTERM", "SIGBREAK"]) process.on(sig, () => process.exit(0));
-      return true;
+      }, 30_000);
+      touch.unref();
+      return { ok: true, file, release };
     } catch (err) {
       if (err.code !== "EEXIST") throw err;
-      const pid = Number(fs.readFileSync(file, "utf8").trim());
-      let alive = false;
+      let pid = null;
+      let ageMs = Infinity;
       try {
-        alive = Number.isInteger(pid) && pid > 0 && pid !== process.pid && process.kill(pid, 0);
+        pid = readLockPid(file);
+        ageMs = now() - fs.statSync(file).mtimeMs;
       } catch {
-        alive = false;
+        continue; // removed meanwhile -> try again
       }
-      // a live PID with a lock the worker kept touching = really running; an old lock (PID reused by Windows) is stale
-      const fresh = Date.now() - fs.statSync(file).mtimeMs < 120_000;
-      if (alive && fresh) {
-        log.error(`Darbininkas jau veikia (PID ${pid}, ${file}) — antras nepaleidžiamas.`);
-        return false;
+      if (ageMs < LOCK_STALE_MS && alive(pid)) {
+        log.error(`Darbininkas jau veikia (PID ${pid}, užraktas atnaujintas prieš ${Math.round(ageMs / 1000)} s, ${file}) — antras nepaleidžiamas.`);
+        return { ok: false, file, pid };
       }
-      fs.unlinkSync(file);
+      log.warn(`Senas užraktas (PID ${pid ?? "?"}, ${Number.isFinite(ageMs) ? `${Math.round(ageMs / 1000)} s` : "?"}) — perimamas.`);
+      try {
+        fs.unlinkSync(file);
+      } catch {
+        /* someone else took it over */
+      }
     }
   }
-  return false;
+  return { ok: false, file, pid: null };
+}
+
+function readLockPid(file) {
+  const text = fs.readFileSync(file, "utf8").trim();
+  if (/^\d+$/.test(text)) return Number(text); // 0.3.0 lock: just the PID
+  try {
+    const pid = Number(JSON.parse(text).pid);
+    return Number.isInteger(pid) ? pid : null;
+  } catch {
+    return null;
+  }
 }
 
 function cmsJobArg(flag) {
@@ -477,6 +539,27 @@ export async function runCmsInspect() {
   log.info(`Failai: ${dir}`);
 }
 
+/**
+ * `npm run cms:refresh` — read-only towards DelPro. The operational set now (`-- --all-linked`: every DelPro-linked GVET animal;
+ * `-- --tag LT000007300337 [--tag …]`: exactly those). Prints each animal's SortCow records with their effective status and
+ * uploads the result to GVET ("Aktyvūs atskyrimai").
+ */
+export async function runCmsRefresh(argv = process.argv) {
+  const tags = argv.flatMap((a, i) => (a === "--tag" && argv[i + 1] ? [argv[i + 1]] : []));
+  const res = await runCmsTargetedRefresh(createGatewayClient(), { force: true, allLinked: argv.includes("--all-linked"), tags: tags.length ? tags : null });
+  for (const r of res.results) {
+    if (!r.ok) {
+      log.error(`  ${r.orn ?? r.animal_id}: NENUSKAITYTA — ${r.error}`);
+      continue;
+    }
+    const acts = r.actions.map((a) => `${a.key} ${a.status} ${a.start_at ?? "?"}→${a.end_at ?? "be pabaigos"} s[${a.sessions.join(",")}]`);
+    log.info(`  ${r.orn ?? r.animal_id} (DelPro Nr. ${r.delpro_number ?? "—"}, AnimalMilkSetting ${r.milk_setting_key ?? "nėra"}): ${acts.join("; ") || "SortCow nėra"}`);
+  }
+  if (tags.length && res.results.length < tags.length) log.warn(`Rasta ${res.results.length} iš ${tags.length}: kiti GVET neturi DelPro ObjectGuid arba ORN nerastas.`);
+  log.info(`Tikslinis nuskaitymas: ${JSON.stringify({ ...res, results: undefined })}`);
+  return { ...res, tags };
+}
+
 async function safely(name, fn) {
   try {
     return await fn();
@@ -506,13 +589,19 @@ async function main() {
     return;
   }
   if (process.argv.includes("--cms-live")) {
-    // nonzero unless the whole scan completed (nothing is ever removed in GVET from an incomplete one)
-    const res = await runCmsLiveIfDue({ force: true });
-    if (!res) throw new Error("CMS būsena nenuskaityta: reikia CATALOG_SOURCE=gateway.");
+    // OPTIONAL diagnostic of the whole DelPro database; nonzero unless it completed. Sending never depends on it.
+    if (!gatewayReadable()) throw new Error("CMS būsena nenuskaityta: reikia CATALOG_SOURCE=gateway arba CMS_OUTBOUND_MODE=gateway.");
+    const res = await runCmsFullScan();
     if (!res.complete) {
-      log.error(`CMS būsena NEPILNA: ${(res.errors ?? []).join(" ") || "žr. aukščiau"}`);
+      log.warn(`Pilnas DelPro nuskaitymas NEPILNAS (tai tik diagnostika — siuntimo neblokuoja): ${(res.errors ?? []).join(" ") || "žr. aukščiau"}`);
       process.exitCode = 2;
     }
+    return;
+  }
+  if (process.argv.includes("--cms-refresh")) {
+    if (!gatewayReadable()) throw new Error("Reikia CATALOG_SOURCE=gateway arba CMS_OUTBOUND_MODE=gateway.");
+    const res = await runCmsRefresh();
+    if (res.failed || (res.tags?.length && res.results.length < res.tags.length)) process.exitCode = 2;
     return;
   }
   if (process.argv.includes("--cms-inspect")) {
@@ -531,7 +620,8 @@ async function main() {
   if (dryRun && !process.argv.includes("--catalog")) throw new Error("--dry-run veikia tik su --catalog (npm run catalog:dry-run).");
   log.info(
     `DelPro darbininkas v${config.version} (${config.workerId}), šaltinis=${config.source}, outbound=${config.outboundMode}, ` +
-      `katalogas=${config.catalogSource}, katalogo rašymas=${config.catalogWriteEnabled ? "ĮJUNGTAS" : "išjungtas"}, CMS=${config.cmsOutboundMode}`,
+      `katalogas=${config.catalogSource}, katalogo rašymas=${config.catalogWriteEnabled ? "ĮJUNGTAS" : "išjungtas"}, CMS=${config.cmsOutboundMode}` +
+      ` (po ${config.cmsBatchLimit}, lygiagrečiai ${config.cmsConcurrency})`,
   );
 
   if (dryRun) {
@@ -554,10 +644,21 @@ async function main() {
     return;
   }
 
-  if (!acquireSingleInstanceLock()) {
+  if (!acquireSingleInstanceLock().ok) {
     process.exitCode = 3;
     return;
   }
+  for (const sig of ["SIGINT", "SIGTERM", "SIGBREAK"]) process.on(sig, () => process.exit(0));
+  // A bug in one tick must not take the treatment queue down silently: log it; an uncaught exception exits non-zero
+  // so the supervisor (scripts\gvet-worker.ps1 -Action run) starts a clean process.
+  process.on("unhandledRejection", (err) => {
+    state.lastError = `${new Date().toISOString()} unhandledRejection: ${err?.message ?? err}`;
+    log.error("unhandledRejection:", err?.stack ?? err);
+  });
+  process.on("uncaughtException", (err) => {
+    log.error("uncaughtException:", err?.stack ?? err);
+    process.exit(1);
+  });
   let inboundBusy = false;
   let outboundBusy = false;
   let catalogBusy = false;
@@ -565,8 +666,9 @@ async function main() {
   const cmsTick = async () => {
     if (cmsBusy) return;
     cmsBusy = true;
+    // sending first; the targeted state read and the ping can fail without affecting it (or treatments, a separate tick)
     await safely("cms", runCms);
-    await safely("cms live", () => runCmsLiveIfDue());
+    await safely("cms refresh", () => runCmsRefreshIfDue());
     await safely("gateway ping", pingGatewayIfDue);
     cmsBusy = false;
   };

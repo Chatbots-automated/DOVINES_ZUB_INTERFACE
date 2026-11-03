@@ -46,4 +46,7 @@ export const gvet = {
   cmsGetJob: (body) => rpc("cms_get_job", body),
   cmsLiveRequested: () => rpc("cms_live_requested", {}),
   cmsLiveUpload: (body) => rpc("cms_live_upload", body),
+  // 0051: targeted per-animal state
+  cmsLiveTargets: (body) => rpc("cms_live_targets", body),
+  cmsLiveUploadAnimals: (body) => rpc("cms_live_upload_animals", body),
 };

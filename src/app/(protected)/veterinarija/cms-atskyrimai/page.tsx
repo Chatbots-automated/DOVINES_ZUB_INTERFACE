@@ -9,7 +9,7 @@ import { CmsActivationPanel } from "@/components/cms/activation-panel";
 import { CMS_OPEN_STATUSES } from "@/lib/cms/status";
 import { emptySettings, toVilniusLocal, type CmsDraftRow, type CmsSettings } from "@/lib/cms/separation";
 import { cn } from "@/lib/utils";
-import type { CmsLiveActionSettingRow, CmsMode, CmsSeparationJobView } from "@/lib/supabase/types";
+import type { CmsAnimalLiveCheckRow, CmsLiveActionSettingRow, CmsMode, CmsSeparationJobView } from "@/lib/supabase/types";
 
 // CMS atskyrimai (0048, farm's request — billed separately, not in Priedas Nr. 1).
 const TABS = [
@@ -141,7 +141,8 @@ export default async function CmsAtskyrimaiPage({ searchParams }: { searchParams
       />
     );
   } else {
-    // only SortCow rows tied to a GVET animal (the rest are explained by reason counts); paged past PostgREST's 1000-row cap
+    // 0051: GVET's own animals only — SortCow rows the worker read per animal (or the optional full scan) tied to a GVET animal,
+    // plus GVET-written records not read back yet. Every row carries when its animal was last read from DelPro.
     const live: CmsLiveActionSettingRow[] = [];
     for (let from = 0; from < 10000; from += 1000) {
       const { data } = await supabase
@@ -156,33 +157,79 @@ export default async function CmsAtskyrimaiPage({ searchParams }: { searchParams
       live.push(...(data ?? []));
       if ((data ?? []).length < 1000) break;
     }
-    const animalIds = [...new Set(live.map((l) => l.animal_id).filter((x): x is string => !!x))];
+    const liveKeys = new Set(live.map((l) => l.action_key));
+    const written = await supabase
+      .from("cms_separation_jobs")
+      .select("id, animal_id, action_key, start_at, end_at, sessions, milk_setting_key, verified_at")
+      .eq("status", "success")
+      .not("action_key", "is", null)
+      .order("verified_at", { ascending: false })
+      .limit(500);
+    const unread = (written.data ?? []).filter((j) => j.action_key && !liveKeys.has(j.action_key));
+    const animalIds = [...new Set([...live.map((l) => l.animal_id), ...unread.map((j) => j.animal_id)].filter((x): x is string => !!x))];
     const keys = live.map((l) => l.action_key);
     const animals = new Map<string, { tag_no: string; animal_no: string | null }>();
+    const checks = new Map<string, CmsAnimalLiveCheckRow>();
     const gvet = new Map<string, string>();
     for (let i = 0; i < Math.max(animalIds.length, keys.length); i += 200) {
-      const [a, g] = await Promise.all([
-        animalIds.length > i ? supabase.from("animals").select("id, tag_no, animal_no").in("id", animalIds.slice(i, i + 200)) : null,
+      const ids = animalIds.slice(i, i + 200);
+      const [a, c, g] = await Promise.all([
+        ids.length ? supabase.from("animals").select("id, tag_no, animal_no").in("id", ids) : null,
+        ids.length ? supabase.from("cms_animal_live_checks").select("*").in("animal_id", ids) : null,
         keys.length > i ? supabase.from("cms_separation_jobs").select("id, action_key").in("action_key", keys.slice(i, i + 200)).eq("status", "success") : null,
       ]);
       for (const x of a?.data ?? []) animals.set(x.id, { tag_no: x.tag_no, animal_no: x.animal_no });
+      for (const x of c?.data ?? []) checks.set(x.animal_id, x);
       for (const x of g?.data ?? []) if (x.action_key) gvet.set(x.action_key, x.id);
     }
-    const rows: CmsActiveRow[] = live.map((l) => ({
-      action_key: l.action_key,
-      milk_setting_key: l.milk_setting_key,
-      active: l.active,
-      start_at: l.start_at,
-      end_at: l.end_at,
-      sessions: l.sessions ?? [],
-      last_updated_at: l.last_updated_at,
-      seen_at: l.seen_at,
-      tag_no: l.animal_id ? (animals.get(l.animal_id)?.tag_no ?? null) : null,
-      animal_no: l.animal_id ? (animals.get(l.animal_id)?.animal_no ?? null) : null,
-      gvet_job_id: gvet.get(l.action_key) ?? null,
-    }));
+    const check = (id: string | null) => {
+      const c = id ? checks.get(id) : undefined;
+      return { checked_at: c?.checked_at ?? null, check_ok: c?.ok ?? null, check_error: c?.error ?? null, requested_at: c?.requested_at ?? null };
+    };
+    const rows: CmsActiveRow[] = [
+      ...live.map((l) => ({
+        animal_id: l.animal_id,
+        action_key: l.action_key,
+        milk_setting_key: l.milk_setting_key,
+        active: l.active,
+        start_at: l.start_at,
+        end_at: l.end_at,
+        sessions: l.sessions ?? [],
+        last_updated_at: l.last_updated_at,
+        seen_at: l.seen_at,
+        tag_no: l.animal_id ? (animals.get(l.animal_id)?.tag_no ?? null) : null,
+        animal_no: l.animal_id ? (animals.get(l.animal_id)?.animal_no ?? null) : null,
+        gvet_job_id: gvet.get(l.action_key) ?? null,
+        unread: false,
+        ...check(l.animal_id),
+      })),
+      ...unread.map((j) => ({
+        animal_id: j.animal_id,
+        action_key: j.action_key!,
+        milk_setting_key: j.milk_setting_key,
+        active: true,
+        start_at: j.start_at,
+        end_at: j.end_at,
+        sessions: j.sessions ?? [],
+        last_updated_at: null,
+        seen_at: j.verified_at ?? "",
+        tag_no: animals.get(j.animal_id)?.tag_no ?? null,
+        animal_no: animals.get(j.animal_id)?.animal_no ?? null,
+        gvet_job_id: j.id,
+        unread: true,
+        ...check(j.animal_id),
+      })),
+    ];
     body = (
-      <CmsActiveSeparations rows={rows} sortAreas={sortAreas} refresh={status?.live_last_refresh ?? null} requestedAt={status?.live_requested_at ?? null} canRequest={canWrite} />
+      <CmsActiveSeparations
+        rows={rows}
+        sortAreas={sortAreas}
+        targeted={status?.targeted_last_refresh ?? null}
+        fullScan={status?.live_last_refresh ?? null}
+        requestedAt={status?.live_requested_at ?? null}
+        pendingAnimals={status?.pending_animal_requests ?? 0}
+        canRequest={canWrite}
+      />
     );
   }
 

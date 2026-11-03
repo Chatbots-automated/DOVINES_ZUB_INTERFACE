@@ -2,16 +2,19 @@
 
 import * as React from "react";
 import { useRouter } from "next/navigation";
-import { Loader2, RefreshCw, Split } from "lucide-react";
+import { Loader2, RefreshCw, Search, Split } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
+import { Input } from "@/components/ui/input";
 import { cmsPost } from "@/lib/cms/client";
 import { formatVilnius } from "@/lib/cms/separation";
-import type { CmsLiveRefreshInfo, CmsSortAreaRow } from "@/lib/supabase/types";
+import { CMS_ACTION_STATUS_LABEL, CMS_STALE_AFTER_MIN, cmsActionStatus, cmsFreshness, type CmsActionStatus } from "@/lib/cms/live-status";
+import type { CmsLiveRefreshInfo, CmsSortAreaRow, CmsTargetedRefreshInfo } from "@/lib/supabase/types";
 
 export type CmsActiveRow = {
+  animal_id: string | null;
   action_key: string;
   milk_setting_key: string | null;
   active: boolean | null;
@@ -24,146 +27,239 @@ export type CmsActiveRow = {
   animal_no: string | null;
   /** set when this DelPro record was written (and verified) by a GVET job */
   gvet_job_id: string | null;
+  /** GVET wrote it, but the animal has not been read from DelPro since — values are what GVET sent, not DelPro's */
+  unread: boolean;
+  // the animal's last targeted DelPro read (0051)
+  checked_at: string | null;
+  check_ok: boolean | null;
+  check_error: string | null;
+  requested_at: string | null;
 };
 
-export type CmsLiveRefresh = CmsLiveRefreshInfo | null;
+const PAGE = 50;
+const STATUS_TONE: Record<CmsActionStatus, "warning" | "info" | "neutral" | "danger"> = {
+  effective: "warning",
+  scheduled: "info",
+  no_sessions: "neutral",
+  ended: "neutral",
+  inactive: "neutral",
+  unknown: "danger",
+};
 
-/** DelPro's own SortCow settings as last read by the farm PC (Animal → AnimalMilkSetting → AnimalActionSetting). */
+function Freshness({ r, now }: { r: CmsActiveRow; now: number }) {
+  const f = cmsFreshness({ checked_at: r.checked_at, ok: r.check_ok, requested_at: r.requested_at }, now);
+  if (f === "pending") return <Badge tone="info">Laukiama nuskaitymo…</Badge>;
+  if (f === "never") return <span className="text-text-muted">{r.unread ? "dar nenuskaityta (rodoma, ką GVET išsiuntė)" : "dar netikrinta šiam gyvuliui"}</span>;
+  if (f === "failed") {
+    return (
+      <span className="text-danger" title={r.check_error ?? undefined}>
+        nepavyko {formatVilnius(r.checked_at)} — rodoma ankstesnė būsena
+      </span>
+    );
+  }
+  return <span className={f === "stale" ? "text-warning" : "text-text-secondary"}>{formatVilnius(r.checked_at)}{f === "stale" ? " (sena)" : ""}</span>;
+}
+
+/** GVET's CMS animals: GVET-written separations + DelPro's own ones on GVET animals, as last read per animal. Never the whole DelPro herd. */
 export function CmsActiveSeparations({
   rows,
   sortAreas,
-  refresh,
+  targeted,
+  fullScan,
   requestedAt,
+  pendingAnimals,
   canRequest,
 }: {
   rows: CmsActiveRow[];
   sortAreas: CmsSortAreaRow[];
-  refresh: CmsLiveRefresh;
+  targeted: CmsTargetedRefreshInfo | null;
+  fullScan: CmsLiveRefreshInfo | null;
   requestedAt: string | null;
+  pendingAnimals: number;
   canRequest: boolean;
 }) {
   const router = useRouter();
-  const [busy, setBusy] = React.useState(false);
+  const [busy, setBusy] = React.useState<string | null>(null);
   const [message, setMessage] = React.useState<{ ok: boolean; text: string } | null>(null);
-  const pending = !!requestedAt && (!refresh?.finished_at || requestedAt > refresh.finished_at);
-  const [now] = React.useState(() => new Date().toISOString());
-  const [show, setShow] = React.useState<"effective" | "matched">("effective");
-  const effective = (r: CmsActiveRow) => !!r.active && (!r.end_at || r.end_at > now) && r.sessions.length > 0;
-  const shown = rows.filter((r) => show === "matched" || effective(r));
-  const reasons = refresh?.unmatched_reasons;
+  const [now] = React.useState(() => Date.now());
+  const [show, setShow] = React.useState<"current" | "all">("current");
+  const [q, setQ] = React.useState("");
+  const [page, setPage] = React.useState(0);
+  const [selected, setSelected] = React.useState<Set<string>>(new Set());
+  const [orn, setOrn] = React.useState("");
 
-  async function request() {
-    setBusy(true);
-    const res = await cmsPost<{ message: string }>("request_live");
-    setBusy(false);
+  const lastRound = [targeted?.finished_at, fullScan?.finished_at].filter(Boolean).sort().at(-1) ?? null;
+  const pending = (!!requestedAt && (!lastRound || Date.parse(requestedAt) > Date.parse(lastRound))) || pendingAnimals > 0;
+  const status = (r: CmsActiveRow) => cmsActionStatus(r, now);
+  const current = (r: CmsActiveRow) => ["effective", "scheduled", "no_sessions", "unknown"].includes(status(r));
+  const needle = q.trim().toUpperCase();
+  const filtered = rows.filter((r) => (show === "all" || current(r)) && (!needle || `${r.tag_no ?? ""} ${r.animal_no ?? ""} ${r.action_key}`.toUpperCase().includes(needle)));
+  const pages = Math.max(1, Math.ceil(filtered.length / PAGE));
+  const shown = filtered.slice(Math.min(page, pages - 1) * PAGE, Math.min(page, pages - 1) * PAGE + PAGE);
+  const animalsOf = (list: CmsActiveRow[]) => [...new Set(list.map((r) => r.animal_id).filter((x): x is string => !!x))];
+
+  async function run(key: string, op: string, payload: Record<string, unknown> = {}) {
+    setBusy(key);
+    const res = await cmsPost<{ message: string }>(op, payload);
+    setBusy(null);
     setMessage(res.ok ? { ok: true, text: res.data.message } : { ok: false, text: res.error });
-    if (res.ok) router.refresh();
+    if (res.ok) {
+      setSelected(new Set());
+      router.refresh();
+    }
   }
+
+  const toggle = (id: string | null) => {
+    if (!id) return;
+    setSelected((s) => {
+      const n = new Set(s);
+      if (n.has(id)) n.delete(id);
+      else n.add(id);
+      return n;
+    });
+  };
 
   return (
     <div className="space-y-4">
       <Card className="flex flex-wrap items-center gap-3 px-4 py-3 text-[13px]">
         <span className="text-text-secondary">
-          Nuskaityta iš DelPro: <b className="text-text-primary">{refresh?.finished_at ? formatVilnius(refresh.finished_at) : "dar niekada"}</b>
-          {refresh?.complete === false && <Badge tone="warning" className="ml-2">Nepilnas nuskaitymas</Badge>}
-          {refresh?.received != null && (
+          Paskutinis nuskaitymas iš DelPro: <b className="text-text-primary">{targeted?.finished_at ? formatVilnius(targeted.finished_at) : "dar niekada"}</b>
+          {targeted?.finished_at && (
             <span className="ml-2 text-text-muted">
-              · SortCow įrašų {refresh.received}, susieta su GVET {refresh.matched ?? "?"}, galioja {refresh.effective_active ?? "?"}
+              · gyvulių {targeted.round?.targets ?? (targeted.ok ?? 0) + (targeted.failed ?? 0)}, nepavyko {targeted.failed ?? 0}
             </span>
           )}
         </span>
         {pending && <Badge tone="info">Laukiama ūkio kompiuterio…</Badge>}
-        <Button type="button" size="sm" variant="outline" className="ml-auto" disabled={!canRequest || busy} onClick={request}>
-          {busy ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Atnaujinti iš DelPro
+        <Button type="button" size="sm" variant="outline" className="ml-auto" disabled={!canRequest || !!busy} onClick={() => run("all", "request_live")}>
+          {busy === "all" ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Atnaujinti iš DelPro
         </Button>
+        <p className="w-full text-[12px] text-text-muted">
+          Skaitomi tik GVET atskyrimų gyvuliai (partijose, laukiantys, GVET įrašyti, turintys galiojantį DelPro atskyrimą) — kiekvienas atskirai, ne visa DelPro
+          banda. Automatiškai kas valandą; būsena senesnė nei {CMS_STALE_AFTER_MIN / 60} val. pažymima. Rodoma paskutinė nuskaityta būsena, ne tiesioginė.
+        </p>
+        <form
+          className="flex w-full flex-wrap items-center gap-2"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (orn.trim()) void run("orn", "request_animals", { tags: [orn.trim()] }).then(() => setOrn(""));
+          }}
+        >
+          <Input value={orn} onChange={(e) => setOrn(e.target.value)} placeholder="ORN, pvz. LT000007300337" className="h-8 w-56" maxLength={30} aria-label="Gyvulio ORN" />
+          <Button type="submit" size="sm" variant="ghost" disabled={!canRequest || !!busy || !orn.trim()}>
+            {busy === "orn" ? <Loader2 className="size-4 animate-spin" /> : <Search className="size-4" />} Patikrinti gyvulį DelPro
+          </Button>
+        </form>
         {message && <p className={message.ok ? "w-full text-success" : "w-full text-danger"}>{message.text}</p>}
-        {(refresh?.errors ?? []).length > 0 && <p className="w-full text-[12px] text-danger">{refresh!.errors!.join(" ")}</p>}
-        {reasons && (refresh?.unmatched_animals ?? 0) > 0 && (
-          <p className="w-full text-[12px] text-text-muted">
-            Be GVET gyvulio {refresh!.unmatched_animals}:{" "}
-            {(
-              [
-                ["animal_not_in_gvet", "DelPro gyvulio nėra GVET (dažniausiai išbrokuoti / parduoti)"],
-                ["animal_inactive_in_gvet", "gyvulys GVET neaktyvus"],
-                ["milk_setting_without_animal", "melžimo nustatymas be gyvulio"],
-                ["milk_setting_absent", "melžimo nustatymo DelPro nėra"],
-                ["animal_reference_invalid", "netinkama gyvulio nuoroda"],
-                ["milk_setting_unresolved", "gyvulio nepavyko nuskaityti (paliktas ankstesnis)"],
-              ] as const
-            )
-              .filter(([k]) => (reasons[k] ?? 0) > 0)
-              .map(([k, label]) => `${label} ${reasons[k]}`)
-              .join(", ")}
-            .
-          </p>
-        )}
-        {refresh?.stats?.milk_setting_keys != null && (
-          <p className="w-full text-[12px] text-text-muted">
-            Melžimo nustatymų DelPro {refresh.stats.milk_setting_keys}, gyvulys nustatytas {refresh.stats.milk_settings_resolved ?? 0}, nenuskaityta{" "}
-            {refresh.stats.milk_settings_unresolved ?? 0}; Gateway skaitymo klaidų {refresh.stats.gateway_read_errors ?? 0}.
-            {(refresh.unresolved ?? []).length > 0 && ` Nenuskaityti raktai: ${refresh.unresolved!.slice(0, 10).map((u) => u.key).join(", ")}${refresh.unresolved!.length > 10 ? "…" : ""}.`}
-          </p>
-        )}
-        {(refresh?.warnings ?? []).length > 0 && <p className="w-full text-[12px] text-warning">{refresh!.warnings!.join(" ")}</p>}
-        <div className="flex w-full flex-wrap gap-1">
+      </Card>
+
+      <Card className="overflow-hidden">
+        <div className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-2 text-[13px]">
           {(
             [
-              ["effective", `Galiojantys (${rows.filter(effective).length})`],
-              ["matched", `Visi GVET gyvulių įrašai (${rows.length})`],
+              ["current", `Galiojantys ir būsimi (${rows.filter(current).length})`],
+              ["all", `Visi (${rows.length})`],
             ] as const
           ).map(([k, label]) => (
             <button
               key={k}
               type="button"
-              onClick={() => setShow(k)}
+              onClick={() => {
+                setShow(k);
+                setPage(0);
+              }}
               className={show === k ? "rounded-control bg-ink px-2.5 py-1 text-text-on-ink" : "rounded-control px-2.5 py-1 text-text-secondary hover:bg-surface-secondary"}
             >
               {label}
             </button>
           ))}
+          <Input
+            value={q}
+            onChange={(e) => {
+              setQ(e.target.value);
+              setPage(0);
+            }}
+            placeholder="Ieškoti ORN / Nr. / rakto"
+            className="h-8 w-48"
+            aria-label="Paieška"
+          />
+          <span className="ml-auto flex flex-wrap gap-2">
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={!canRequest || !!busy || selected.size === 0}
+              onClick={() => run("sel", "request_animals", { animal_ids: [...selected] })}
+            >
+              {busy === "sel" ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Atnaujinti pažymėtus ({selected.size})
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={!canRequest || !!busy || shown.length === 0}
+              onClick={() => run("page", "request_animals", { animal_ids: animalsOf(shown) })}
+            >
+              {busy === "page" ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Atnaujinti šį puslapį
+            </Button>
+          </span>
         </div>
-      </Card>
-
-      <Card className="overflow-hidden">
         {shown.length === 0 ? (
-          <EmptyState icon={Split} title="Aktyvių atskyrimų nerasta" description="Rodoma tai, ką ūkio kompiuteris paskutinį kartą nuskaitė iš DelPro." className="py-10" />
+          <EmptyState icon={Split} title="Atskyrimų nerasta" description="Rodoma tai, ką ūkio kompiuteris paskutinį kartą nuskaitė iš DelPro GVET gyvuliams." className="py-10" />
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-[13px]">
               <thead className="bg-surface-secondary text-left text-[12px] text-text-muted">
                 <tr>
-                  <th className="px-4 py-2 font-medium">ORN</th>
+                  <th className="w-8 px-4 py-2" aria-label="Pažymėti" />
+                  <th className="px-2 py-2 font-medium">ORN</th>
                   <th className="px-2 py-2 font-medium">DelPro Nr.</th>
                   <th className="px-2 py-2 font-medium">Raktas</th>
-                  <th className="px-2 py-2 font-medium">Aktyvus</th>
+                  <th className="px-2 py-2 font-medium">Būsena</th>
                   <th className="px-2 py-2 font-medium">Pradžia → pabaiga</th>
                   <th className="px-2 py-2 font-medium">Sesijos</th>
-                  <th className="px-2 py-2 font-medium">Atnaujinta DelPro</th>
+                  <th className="px-2 py-2 font-medium">Keista DelPro</th>
+                  <th className="px-2 py-2 font-medium">Nuskaityta</th>
                   <th className="px-2 py-2 font-medium">Šaltinis</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-border">
                 {shown.map((r) => {
-                  const live = r.active && (!r.end_at || r.end_at > now);
+                  const st = status(r);
                   return (
                     <tr key={r.action_key}>
-                      <td className="px-4 py-1.5 font-medium text-text-primary">{r.tag_no ?? <span className="text-text-muted">Nežinoma</span>}</td>
+                      <td className="px-4 py-1.5">
+                        <input type="checkbox" aria-label={`Pažymėti ${r.tag_no ?? r.action_key}`} disabled={!r.animal_id} checked={!!r.animal_id && selected.has(r.animal_id)} onChange={() => toggle(r.animal_id)} />
+                      </td>
+                      <td className="px-2 py-1.5 font-medium text-text-primary">{r.tag_no ?? <span className="text-text-muted">Nežinoma</span>}</td>
                       <td className="px-2 py-1.5 text-text-secondary">{r.animal_no ?? "—"}</td>
                       <td className="px-2 py-1.5 font-mono text-[12px]">{r.action_key}</td>
-                      <td className="px-2 py-1.5">
-                        {r.active == null ? "Nežinoma" : live ? <Badge tone="warning">Taip</Badge> : <Badge tone="neutral">{r.active ? "Baigėsi" : "Ne"}</Badge>}
-                      </td>
+                      <td className="px-2 py-1.5">{r.unread ? <Badge tone="neutral">Nenuskaityta</Badge> : <Badge tone={STATUS_TONE[st]}>{CMS_ACTION_STATUS_LABEL[st]}</Badge>}</td>
                       <td className="px-2 py-1.5">
                         {formatVilnius(r.start_at)} → {r.end_at ? formatVilnius(r.end_at) : "be pabaigos"}
                       </td>
                       <td className="px-2 py-1.5">{r.sessions.join(", ") || "—"}</td>
                       <td className="px-2 py-1.5 text-text-secondary">{formatVilnius(r.last_updated_at)}</td>
-                      <td className="px-2 py-1.5">{r.gvet_job_id ? <Badge tone="accent">GVET</Badge> : <span className="text-text-muted">DelPro (nežinoma)</span>}</td>
+                      <td className="px-2 py-1.5 text-[12px]">
+                        <Freshness r={r} now={now} />
+                      </td>
+                      <td className="px-2 py-1.5">{r.gvet_job_id ? <Badge tone="accent">GVET</Badge> : <span className="text-text-muted">DelPro</span>}</td>
                     </tr>
                   );
                 })}
               </tbody>
             </table>
+          </div>
+        )}
+        {pages > 1 && (
+          <div className="flex items-center justify-end gap-2 border-t border-border px-4 py-2 text-[12px] text-text-secondary">
+            <Button type="button" size="sm" variant="ghost" disabled={page === 0} onClick={() => setPage((p) => p - 1)}>
+              Ankstesnis
+            </Button>
+            {Math.min(page, pages - 1) + 1} / {pages}
+            <Button type="button" size="sm" variant="ghost" disabled={page >= pages - 1} onClick={() => setPage((p) => p + 1)}>
+              Kitas
+            </Button>
           </div>
         )}
       </Card>
@@ -176,6 +272,11 @@ export function CmsActiveSeparations({
           <p>{sortAreas.map((a) => `${a.area_name ?? "—"} (Nr. ${a.area_number ?? "?"}, raktas ${a.area_key})`).join(" · ")}</p>
         )}
         <p className="mt-1 text-text-muted">Į kurią vietą DelPro nukreipia SortCow atskyrimą, per Gateway nenustatyta — tai matosi tik DelPro / CMS nustatymuose.</p>
+        {fullScan?.finished_at && (
+          <p className="mt-1 text-text-muted">
+            Pilnas istorinis DelPro nuskaitymas (tik diagnostika, siuntimui nereikalingas): {formatVilnius(fullScan.finished_at)}, {fullScan.complete ? "pilnas" : "nepilnas"}.
+          </p>
+        )}
       </Card>
     </div>
   );

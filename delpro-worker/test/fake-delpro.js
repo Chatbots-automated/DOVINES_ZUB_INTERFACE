@@ -16,11 +16,16 @@ export function fakeDelpro({ onCreate, timeoutAfterCreate = 0, hideFromBulk = nu
   const calls = [];
   let seq = 1000;
   let timeouts = timeoutAfterCreate;
+  let fail = failGetData;
   const rows = (name) => (db[name] ??= {});
 
   return {
     db,
     calls,
+    /** swap the GetData failure rule on a long-lived double (null = answer everything) */
+    setFailGetData(fn) {
+      fail = fn;
+    },
     async getDataXml(req) {
       calls.push(["GetData", req]);
       const name = req.match(/<object name="(\w+)"/)[1];
@@ -31,7 +36,7 @@ export function fakeDelpro({ onCreate, timeoutAfterCreate = 0, hideFromBulk = nu
       if (top > 0) found = found.slice(0, top);
       if (hideFromBulk && !/<where>/.test(req)) found = found.filter((r) => !hideFromBulk(name, r, props));
       const where = Object.fromEntries([...req.matchAll(/<equal name="(\w+)">([^<]*)<\/equal>/g)].map(([, k, v]) => [k, unescape(v)]));
-      if (failGetData?.({ name, props, where, top, rows: found })) {
+      if (fail?.({ name, props, where, top, rows: found })) {
         return '<Error type="GetData" error="System.NullReferenceException">Object reference not set to an instance of an object.</Error>';
       }
       const objs = found

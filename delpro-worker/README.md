@@ -134,6 +134,19 @@ reaches `top`. complete = key list + SortCow read complete and every SortCow row
 fail (reported). Rows whose milk setting failed go as `actions_unresolved` — GVET keeps their animal. `npm run cms:milk-diagnose`
 (read-only) finds whether one record breaks the bulk read. The background loop reuses Key → Animal answers for 24 h; `cms:live` reads all.
 
+0051 (worker 0.4.0) — **targeted, no full-herd scan**. Sending never needed the full scan; it is gone from the loop and from the
+activation checklist (`npm run cms:live` / `cms:full-scan` stay as an optional diagnostic). Each claimed job reads only its own
+animal right before writing: `Animal` by `ObjectGuid` (identity: ORN, or the short `Number` when DelPro has no ORN — never one
+against the other) → `AnimalMilkSetting` filtered by `Animal` (top 10, exactly one) → `AnimalActionSetting` filtered by
+`AnimalMilkSetting` (top 20; reaching it, or a row without Key/type, fails closed) → SortCow status from Active + dates + sessions
+(`effective` / `scheduled` / `no_sessions` / `unknown` block the write; `inactive` / `ended` don't). Jobs are claimed and processed
+`CMS_CONCURRENCY` at a time, at most `CMS_BATCH_LIMIT` per tick; one cow's failure never stops another. The CreateData / read-back
+code is unchanged. "Aktyvūs atskyrimai" is fed by the same per-animal read for GVET's CMS animals only (`cms_live_targets` →
+`cms_live_upload_animals`), hourly (`CMS_LIVE_INTERVAL_MIN`) or on "Atnaujinti iš DelPro"; `npm run cms:refresh [-- --tag LT… |
+--all-linked]` does it by hand and prints each animal's records. The Windows task now runs a hidden supervisor
+(`scripts\gvet-worker.ps1 -Action run` → `scripts\run-worker.cmd`) that restarts node after any exit; the lock is taken over when
+stale (2 min) or when its PID is not a running node.exe — nothing is ever killed by the lock.
+
 ## Treatment write-back
 
 Preferred order (see ../AGENTS.md): DelPro's own import function → UI automation → direct SQL. The shipped

@@ -6,15 +6,22 @@ import { log } from "./log.js";
 // GVET CMS atskyrimai -> DelPro (0048). One approved GVET job = one DelPro AnimalActionSetting (ActionType SortCow)
 // on the animal's AnimalMilkSetting:
 //   Animal (ObjectGuid) -> AnimalMilkSetting (Key, Animal) -> AnimalActionSetting (AnimalMilkSetting = Key).
-// READS are verified on the farm (DelPro 10.9). The CreateData payload below is the PROPOSED shape — not yet
-// verified: nothing is written unless CMS_OUTBOUND_MODE=gateway AND GVET hands the job out (single supervised
-// job, or a mode an admin marked verified after such a test). No SortArea / Sort Once property is ever sent.
-// A write that may have reached DelPro but was not read back and compared goes to "Reikia peržiūros" in GVET.
+// Reads and the CreateData shape are verified on the farm (DelPro 10.9, 2026-11: job 443b4846…, period mode). Nothing is
+// written unless CMS_OUTBOUND_MODE=gateway AND GVET hands the job out (master switch, admin approval, single supervised job or
+// a verified mode + confirmed destination). No SortArea / Sort Once property is ever sent. A write that may have reached DelPro
+// but was not read back and compared goes to "Reikia peržiūros" in GVET.
+//
+// 0051 (worker 0.4.0): everything is TARGETED — one animal at a time, a handful of small reads. The full-herd scan
+// (readLiveState, `npm run cms:live`) is an optional diagnostic and never gates sending.
 
 export const ACTION_OBJECT = "AnimalActionSetting";
 export const SESSION_PROPS = Array.from({ length: 10 }, (_, i) => `IsValidForSession${i + 1}`);
 export const ACTION_READ_PROPS = ["Key", "AnimalMilkSetting", "ActionType", "Active", "StartDate", "EndDate", ...SESSION_PROPS, "LastUpdatedTime"];
 const SENDABLE_MODES = ["period", "ongoing"];
+// Per-animal reads. An animal has one milk setting; its action settings are a handful (4 types). Reaching either limit means
+// the answer may be cut off -> fail closed (never "no conflict" from a possibly truncated list).
+export const MILK_TOP = 10;
+export const ACTIONS_TOP = 20;
 
 export class CmsError extends Error {
   /** @param {string} code @param {string} message @param {{ retryable?: boolean, details?: object }} [opts] */
@@ -94,12 +101,18 @@ export function compareActionSetting(record, s, milkSettingKey) {
   return diffs;
 }
 
+/** Active as DelPro sent it: true / false, or null when missing or not a boolean (= unknown, never "inactive"). */
+function boolOrNull(v) {
+  const t = String(v ?? "").trim().toLowerCase();
+  return t === "true" ? true : t === "false" ? false : null;
+}
+
 export function actionSummary(o) {
   return {
     key: val(o, "Key"),
     milk_setting_key: val(o, "AnimalMilkSetting"),
     action_type: val(o, "ActionType"),
-    active: val(o, "Active") == null ? null : bool(val(o, "Active")),
+    active: boolOrNull(val(o, "Active")),
     start_at: val(o, "StartDate") || null,
     end_at: val(o, "EndDate") || null,
     sessions: SESSION_PROPS.map((p, i) => (bool(val(o, p)) ? i + 1 : null)).filter(Boolean),
@@ -107,12 +120,42 @@ export function actionSummary(o) {
   };
 }
 
-/** Active SortCow = Active true and no end, or an end still ahead. */
-export function activeSortCows(actions, now = new Date()) {
-  return actions.map(actionSummary).filter((a) => a.action_type === "SortCow" && a.active && (!a.end_at || ts(a.end_at) > now.getTime()));
+/**
+ * What a SortCow record means right now (same rule GVET uses for "galioja": Active, not ended, ≥ 1 session):
+ *   effective  = Active, started, not ended, at least one session selected
+ *   scheduled  = Active, starts later
+ *   no_sessions= Active, not ended, but no session selected
+ *   ended      = EndDate passed
+ *   inactive   = Active=false (e.g. disabled by hand in DelPro)
+ *   unknown    = Active missing / not a boolean, or a date that can't be read
+ */
+export function actionStatus(a, now = new Date()) {
+  const t = now.getTime();
+  if (a.active === null || a.active === undefined) return "unknown";
+  if ((a.start_at && Number.isNaN(ts(a.start_at))) || (a.end_at && Number.isNaN(ts(a.end_at)))) return "unknown";
+  if (a.active === false) return "inactive";
+  if (a.end_at && ts(a.end_at) <= t) return "ended";
+  if (a.sessions.length === 0) return "no_sessions";
+  if (a.start_at && ts(a.start_at) > t) return "scheduled";
+  return "effective";
 }
 
-/** The animal must exist in DelPro under this GUID (and carry the same ORN when DelPro returns one). */
+/** Statuses that stop a new GVET write for the same animal: anything that is or may become active, or that can't be read. */
+export const CONFLICTING = new Set(["effective", "scheduled", "no_sessions", "unknown"]);
+
+/** SortCow records that conflict with a new instruction (with their status). Inactive / ended ones don't. */
+export function activeSortCows(actions, now = new Date()) {
+  return actions
+    .map(actionSummary)
+    .filter((a) => a.action_type === "SortCow")
+    .map((a) => ({ ...a, status: actionStatus(a, now) }))
+    .filter((a) => CONFLICTING.has(a.status));
+}
+
+/**
+ * The animal must exist in DelPro under exactly this GUID, and be the same animal: its OfficialRegNumber equals GVET's ORN, or —
+ * when DelPro returns no ORN — its short Number equals GVET's DelPro number. An ORN is never compared with a Number.
+ */
 export async function verifyAnimal(client, s, ornProperty = config.gateway.animalOrnProperty) {
   let rows;
   try {
@@ -122,26 +165,47 @@ export async function verifyAnimal(client, s, ornProperty = config.gateway.anima
     rows = await get(client, "Animal", ["ObjectGuid", "Number"], [{ name: "ObjectGuid", value: s.animal_guid }], 2);
   }
   rows = rows.filter((o) => String(val(o, "ObjectGuid") ?? "").toLowerCase() === String(s.animal_guid).toLowerCase());
-  if (rows.length !== 1) throw new CmsError("animal_not_found", `DelPro neturi gyvulio ${s.animal_guid}.`);
+  if (rows.length === 0) throw new CmsError("animal_not_found", `DelPro neturi gyvulio ${s.animal_guid}.`);
+  if (rows.length > 1) throw new CmsError("animal_ambiguous", `DelPro grąžino ${rows.length} gyvulius su ObjectGuid ${s.animal_guid}.`);
   const orn = ornProperty ? val(rows[0], ornProperty) : null;
-  if (orn && s.orn && ornNorm(orn) !== ornNorm(s.orn)) {
-    throw new CmsError("animal_orn_mismatch", `DelPro gyvulio ORN ${orn} ≠ GVET ${s.orn}.`);
+  const number = val(rows[0], "Number");
+  if (orn && s.orn) {
+    if (ornNorm(orn) !== ornNorm(s.orn)) throw new CmsError("animal_orn_mismatch", `DelPro gyvulio ORN ${orn} ≠ GVET ${s.orn}.`);
+  } else if (number && s.animal_no) {
+    if (String(number).trim() !== String(s.animal_no).trim()) {
+      throw new CmsError("animal_number_mismatch", `DelPro gyvulio Nr. ${number} ≠ GVET ${s.animal_no} (ORN DelPro negrąžino).`);
+    }
+  } else {
+    throw new CmsError("animal_identity_unverified", `Gyvulio ${s.animal_guid} tapatybės nepavyko patvirtinti (DelPro negrąžino nei ORN, nei sutampančio Nr.).`);
   }
-  return { number: val(rows[0], "Number"), orn };
+  return { number, orn };
 }
 
-/** Exactly one AnimalMilkSetting per animal, or nothing is written. */
-export async function findMilkSetting(client, animalGuid) {
-  const rows = (await get(client, "AnimalMilkSetting", ["Key", "Animal"], [{ name: "Animal", value: animalGuid }], 5))
-    .filter((o) => String(val(o, "Animal") ?? "").toLowerCase() === String(animalGuid).toLowerCase());
-  if (rows.length === 0) throw new CmsError("milk_setting_missing", "DelPro neturi šio gyvulio melžimo nustatymų (AnimalMilkSetting).");
+/** Exactly one AnimalMilkSetting per animal, or nothing is written. `optional`: none -> null (a read-only "no settings" answer). */
+export async function findMilkSetting(client, animalGuid, { optional = false } = {}) {
+  const raw = await get(client, "AnimalMilkSetting", ["Key", "Animal"], [{ name: "Animal", value: animalGuid }], MILK_TOP);
+  if (raw.length >= MILK_TOP) throw new CmsError("milk_setting_ambiguous", `DelPro grąžino ${raw.length} AnimalMilkSetting įrašus (riba ${MILK_TOP}) — nesiunčiama.`);
+  const rows = raw.filter((o) => String(val(o, "Animal") ?? "").toLowerCase() === String(animalGuid).toLowerCase());
+  if (rows.length === 0) {
+    if (optional) return null;
+    throw new CmsError("milk_setting_missing", "DelPro neturi šio gyvulio melžimo nustatymų (AnimalMilkSetting).");
+  }
   if (rows.length > 1) throw new CmsError("milk_setting_ambiguous", `DelPro grąžino ${rows.length} AnimalMilkSetting įrašus — nesiunčiama.`);
-  return val(rows[0], "Key");
+  const key = val(rows[0], "Key");
+  if (!key) throw new CmsError("milk_setting_unreadable", "AnimalMilkSetting be rakto — nesiunčiama.");
+  return key;
 }
 
+/** Every action setting of one milk setting. Truncated or unreadable -> CmsError (fail closed). */
 export async function readActions(client, milkSettingKey) {
-  return (await get(client, ACTION_OBJECT, ACTION_READ_PROPS, [{ name: "AnimalMilkSetting", value: String(milkSettingKey) }], 100))
-    .filter((o) => String(val(o, "AnimalMilkSetting") ?? "") === String(milkSettingKey));
+  const raw = await get(client, ACTION_OBJECT, ACTION_READ_PROPS, [{ name: "AnimalMilkSetting", value: String(milkSettingKey) }], ACTIONS_TOP);
+  if (raw.length >= ACTIONS_TOP) {
+    throw new CmsError("actions_truncated", `DelPro grąžino ${raw.length} veiksmų įrašus (riba ${ACTIONS_TOP}) — gali būti ne visi; nesiunčiama.`);
+  }
+  const rows = raw.filter((o) => String(val(o, "AnimalMilkSetting") ?? "") === String(milkSettingKey));
+  const broken = rows.filter((o) => !val(o, "Key") || !val(o, "ActionType"));
+  if (broken.length) throw new CmsError("actions_unreadable", `${broken.length} DelPro veiksmų įrašai be rakto ar tipo — būsena nežinoma; nesiunčiama.`);
+  return rows;
 }
 
 async function readByKey(client, key) {
@@ -183,7 +247,7 @@ export async function processJob(client, job, { workerId = config.workerId, repo
     }
 
     if (prep.active.length) {
-      throw new CmsError("existing_active_sortcow", `DelPro jau turi aktyvų SortCow (${prep.active.map((a) => a.key).join(", ")}) — nekeičiama.`,
+      throw new CmsError("existing_active_sortcow", `DelPro jau turi aktyvų SortCow (${prep.active.map((a) => `${a.key} ${a.status}`).join(", ")}) — nekeičiama.`,
         { details: { active: prep.active } });
     }
 
@@ -212,18 +276,96 @@ export async function processJob(client, job, { workerId = config.workerId, repo
   }
 }
 
-/** CMS_OUTBOUND_MODE=gateway: routine jobs (modes an admin verified). A single supervised job only via cms:write-one. */
-export async function runCmsOutbound(client, { max = 20, jobId = null } = {}) {
+/**
+ * CMS_OUTBOUND_MODE=gateway: claims what GVET releases (routine: verified modes; or one supervised job via cms:write-one) and
+ * processes each job on its own — its own animal lookup and conflict check, no herd read first. At most `concurrency` jobs are
+ * claimed and in flight at once (claims are leased, so none is held while others wait), at most `max` per call. One failed cow
+ * never stops the others; GVET never hands the same job (or a second open job for the same animal) out twice.
+ */
+export async function runCmsOutbound(client, { max = config.cmsBatchLimit, concurrency = config.cmsConcurrency, jobId = null, handle = processJob } = {}) {
   let n = 0;
+  const lanes = jobId ? 1 : Math.max(1, concurrency);
   while (n < max) {
-    const job = await gvet.cmsClaimJob({ worker_id: config.workerId, ...(jobId ? { job_id: jobId } : {}) });
-    if (!job) break;
-    n += 1;
-    const res = await processJob(client, job);
-    log.info(`GVET → DelPro CMS: ${job.snapshot?.orn} → ${res?.status ?? "?"}`);
-    if (jobId) break;
+    const batch = [];
+    while (batch.length < lanes && n + batch.length < max) {
+      const job = await gvet.cmsClaimJob({ worker_id: config.workerId, ...(jobId ? { job_id: jobId } : {}) });
+      if (!job) break;
+      batch.push(job);
+    }
+    if (!batch.length) break;
+    n += batch.length;
+    await Promise.all(batch.map(async (job) => {
+      try {
+        const res = await handle(client, job);
+        log.info(`GVET → DelPro CMS: ${job.snapshot?.orn} → ${res?.status ?? "?"}`);
+      } catch (err) {
+        // only the report itself can throw here; GVET's lease turns the job into review / retry, nothing is re-sent blindly
+        log.error(`GVET → DelPro CMS ${job.snapshot?.orn} (${job.job_id}): ${err.message}`);
+      }
+    }));
+    if (jobId || batch.length < lanes) break;
   }
   return n;
+}
+
+/**
+ * One GVET animal's DelPro separation state, read-only: Animal (GUID + identity) -> its milk setting (none = no separations)
+ * -> every action setting under it -> SortCow only. ok=false with the error when any step can't be answered completely.
+ */
+export async function readAnimalState(client, target, now = new Date()) {
+  const base = { animal_id: target.animal_id, animal_guid: target.animal_guid };
+  try {
+    const animal = await verifyAnimal(client, { animal_guid: target.animal_guid, orn: target.orn, animal_no: target.animal_no });
+    const milkKey = await findMilkSetting(client, target.animal_guid, { optional: true });
+    const rows = milkKey ? await readActions(client, milkKey) : [];
+    const actions = rows.map(actionSummary).filter((a) => a.action_type === "SortCow").map((a) => ({ ...a, status: actionStatus(a, now) }));
+    return { ...base, ok: true, milk_setting_key: milkKey, delpro_number: animal.number, actions };
+  } catch (err) {
+    return { ...base, ok: false, error: `${err.code ? `${err.code}: ` : ""}${errText(err)}` };
+  }
+}
+
+/**
+ * Targeted DelPro -> GVET refresh: only the animals GVET names (cms_live_targets: batches / open jobs, GVET-written records,
+ * animals with a live SortCow, and whatever someone asked for). `force` = the whole operational set now (paged: every animal not
+ * read since this round started), otherwise one batch of what is due. `tags` = exactly those animals.
+ * A failed animal is reported as such; GVET keeps (and shows as stale) what it had for it.
+ */
+export async function runCmsTargetedRefresh(client, {
+  limit = config.cmsRefreshBatch,
+  dueMinutes = config.cmsRefreshIntervalMin,
+  force = false,
+  allLinked = false,
+  tags = null,
+  concurrency = config.cmsConcurrency,
+  maxRounds = 40,
+} = {}) {
+  const startedAt = new Date().toISOString();
+  // interval 0 = only on request: nothing is ever "due" by age
+  const due = dueMinutes > 0 ? dueMinutes : 10_000_000;
+  const totals = { targets: 0, ok: 0, failed: 0, mismatched: 0, upserted: 0, removed: 0 };
+  const all = [];
+  for (let round = 1; round <= maxRounds; round += 1) {
+    const body = tags?.length ? { tags } : { limit, due_minutes: due, all_linked: allLinked, ...(force ? { checked_before: startedAt } : {}) };
+    const list = (await gvet.cmsLiveTargets(body)) ?? [];
+    const final = tags?.length || !force || list.length < limit;
+    if (!list.length && !(force && round === 1)) break;
+    const results = await pool(list, Math.max(1, concurrency), (t) => readAnimalState(client, t));
+    for (const r of results) {
+      if (!r.ok) log.warn(`CMS būsena ${list.find((t) => t.animal_id === r.animal_id)?.orn ?? r.animal_id}: ${r.error}`);
+    }
+    totals.targets += list.length;
+    for (let i = 0; i < Math.max(results.length, 1); i += 50) {
+      const lastChunk = final && i + 50 >= results.length;
+      const meta = { started_at: startedAt, targets: totals.targets, force, all_linked: allLinked };
+      const res = await gvet.cmsLiveUploadAnimals({ worker_id: config.workerId, results: results.slice(i, i + 50), ...(lastChunk ? { round: meta } : {}) });
+      for (const k of ["ok", "failed", "mismatched", "upserted", "removed"]) totals[k] += res?.[k] ?? 0;
+    }
+    all.push(...results.map((r) => ({ ...r, orn: list.find((t) => t.animal_id === r.animal_id)?.orn ?? null })));
+    if (final) break;
+  }
+  if (totals.targets) log.info(`DelPro CMS būsena (tikslinė) → GVET: ${JSON.stringify(totals)}`);
+  return { ...totals, results: all };
 }
 
 const GUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -290,7 +432,8 @@ function animalRef(animal) {
 const UNRESOLVED = new Set(["error", "ambiguous"]);
 
 /**
- * DelPro's own SortCow settings + sort areas (read-only).
+ * OPTIONAL DIAGNOSTIC (`npm run cms:live`) — never part of the worker loop and never a condition for sending (0051).
+ * DelPro's own SortCow settings + sort areas (read-only), for the whole DelPro database.
  *
  * Farm facts (DelPro 10.9, 2026-11):
  *   GetData AnimalMilkSetting [Key]            top 5000 -> 3478 rows, fine;

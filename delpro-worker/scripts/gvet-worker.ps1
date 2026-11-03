@@ -6,6 +6,8 @@
     ... -Action stop | start | restart | logs [-Follow]
     ... -Action upgrade -Source <extracted package>\delpro-worker   (or -Zip <package.zip>)
     ... -Action cms-off                            (emergency: CMS_OUTBOUND_MODE=off + restart; treatments untouched)
+    ... -Action cms-on                             (CMS_OUTBOUND_MODE=gateway + restart; asks to type GATEWAY)
+    ... -Action run                                (what the scheduled task runs: the supervisor loop, hidden window)
 
   Rules: never deletes or replaces a scheduled task it did not create, never starts a second worker, never prints secrets,
   never changes OUTBOUND_MODE (treatments). .env, treatment-model.json and logs are preserved by upgrade.
@@ -14,10 +16,16 @@
   (created elevated / as SYSTEM by the first install) but was not visible to a non-elevated PowerShell, and Register-ScheduledTask
   without -Force refuses to overwrite it. This script requires Administrator for install/upgrade so it can see every task, and only
   replaces the task when it is recognisably ours.
+
+  Why the worker stopped with task result 3221225786 (0xC000013A, STATUS_CONTROL_C_EXIT) and stayed down (0.3.0): the task ran
+  cmd.exe -> node in a VISIBLE console of the logged-on user; closing that window (or a Ctrl+C / logoff signal) ended it, and Task
+  Scheduler's "restart on failure" only retries a task that fails to START, never a program that exits. Since 0.4.0 the task runs
+  this script with -Action run in a hidden window: a supervisor loop that restarts node after any exit (backoff 10 s .. 5 min),
+  waits while another worker holds logs\worker.lock (exit code 3), and logs every start/exit to logs\supervisor.log.
 #>
 [CmdletBinding()]
 param(
-  [ValidateSet('status', 'install', 'start', 'stop', 'restart', 'logs', 'upgrade', 'cms-off')]
+  [ValidateSet('status', 'install', 'start', 'stop', 'restart', 'logs', 'upgrade', 'cms-off', 'cms-on', 'run')]
   [string]$Action = 'status',
   [string]$Dir = 'C:\GVET\delpro-worker',
   [string]$Zip,
@@ -75,9 +83,33 @@ function Get-OurTasks {
 
 function Test-IsOurTask($task) {
   if ($task.Description -like "*managed by scripts\gvet-worker.ps1*") { return $true }
-  $a = ($task.Actions | ForEach-Object { "$($_.Execute) $($_.Arguments) $($_.WorkingDirectory)" }) -join ' '
+  $a = Get-TaskActionText $task
   # the earlier hand-made task from DEPLOY-WINDOWS.md section 7: node src\index.js in a delpro-worker folder
-  return ($a -match 'delpro-worker' -and $a -match 'index\.js')
+  return (($a -match 'delpro-worker' -and $a -match 'index\.js') -or ($a -match 'gvet-worker\.ps1' -and $a -match '-Action run'))
+}
+
+function Get-TaskActionText($task) {
+  return ($task.Actions | ForEach-Object { "$($_.Execute) $($_.Arguments) $($_.WorkingDirectory)" }) -join ' '
+}
+
+# 0.4.0: the task runs the supervisor (this script, -Action run) in a hidden window
+function New-WorkerTaskAction {
+  $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+  $script = Join-Path $Dir 'scripts\gvet-worker.ps1'
+  $arg = "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$script`" -Action run -Dir `"$Dir`""
+  return New-ScheduledTaskAction -Execute $ps -Argument $arg -WorkingDirectory $Dir
+}
+
+function New-WorkerTaskSettings {
+  # restart-on-failure only covers a failed launch; the supervisor loop restarts node itself
+  return New-ScheduledTaskSettingsSet -StartWhenAvailable -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) `
+    -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+}
+
+function Get-SupervisorProcesses {
+  return @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue | Where-Object {
+      $_.ProcessId -ne $PID -and $_.CommandLine -match 'gvet-worker\.ps1' -and $_.CommandLine -match '-Action\s+run'
+    })
 }
 
 function Get-HiddenTaskHint {
@@ -115,6 +147,11 @@ function Stop-Worker {
       if ($t.State -eq 'Running') { Say "Stopping task $($t.TaskPath)$($t.TaskName)"; Stop-ScheduledTask -TaskName $t.TaskName -TaskPath $t.TaskPath }
     }
   }
+  # the supervisor first (it would restart node), then node
+  foreach ($s in @(Get-SupervisorProcesses)) {
+    Say "Stopping supervisor PID $($s.ProcessId)"
+    Stop-Process -Id $s.ProcessId -Force -ErrorAction SilentlyContinue
+  }
   Start-Sleep -Seconds 3
   # the task runs cmd.exe -> node.exe; stopping the task may leave node running, so stop our node too
   $lock = Get-LockInfo
@@ -133,6 +170,8 @@ function Stop-Worker {
 function Start-Worker {
   $running = @(Get-WorkerProcesses)
   if ($running.Count -gt 0) { Warn "A worker is already running (PID $($running[0].ProcessId)) - not starting another."; return }
+  $sup = @(Get-SupervisorProcesses)
+  if ($sup.Count -gt 0) { Warn "The supervisor is already running (PID $($sup[0].ProcessId)); it starts the worker itself."; return }
   $t = @(Get-OurTasks) | Where-Object { Test-IsOurTask $_ } | Select-Object -First 1
   if (-not $t) { Stop-Script "Task $TaskName not found. Run -Action install (as Administrator)." }
   Start-ScheduledTask -TaskName $t.TaskName -TaskPath $t.TaskPath
@@ -179,8 +218,15 @@ function Show-Status {
     $i = Get-ScheduledTaskInfo -TaskName $t.TaskName -TaskPath $t.TaskPath
     $trig = ($t.Triggers | ForEach-Object { $_.CimClass.CimClassName -replace 'MSFT_Task', '' }) -join ','
     $line = "Task $($t.TaskPath)$($t.TaskName): $($t.State), user $($t.Principal.UserId), trigger $trig, last run $($i.LastRunTime) result $($i.LastTaskResult)"
-    if (Test-IsOurTask $t) { Ok $line } else { Warn "$line  (NOT created by this script - left untouched)" }
+    if (Test-IsOurTask $t) { Ok $line } else { Warn "$line  (NOT created by this script - left untouched)"; continue }
+    if ($trig -match 'LogonTrigger') { Ok 'Startup: task starts at Windows logon' } else { Bad 'Startup: task has no logon trigger - run -Action install' }
+    if ((Get-TaskActionText $t) -match 'gvet-worker\.ps1' -and (Get-TaskActionText $t) -match '-Action run') { Ok 'Startup: task runs the supervisor (restarts the worker after any exit)' }
+    else { Warn 'Startup: task runs node directly (0.3.0 style, not restarted after an exit) - run -Action upgrade or -Action install' }
+    if ($i.LastTaskResult -eq 3221225786) { Warn 'Last result 0xC000013A: the worker console was closed / got Ctrl+C (fixed by the hidden supervisor)' }
   }
+  $sups = @(Get-SupervisorProcesses)
+  if ($sups.Count -gt 0) { Ok "Supervisor running (PID $($sups[0].ProcessId))" } elseif ($tasks.Count -gt 0) { Warn 'Supervisor not running' }
+  if ($sups.Count -gt 1) { Bad "$($sups.Count) supervisors running" }
   foreach ($s in @(Get-WorkerServices)) { Warn "Windows service $($s.Name) [$($s.State)] $($s.PathName)" }
 
   $procs = @(Get-WorkerProcesses)
@@ -192,21 +238,35 @@ function Show-Status {
     Ok "Process PID $($p.ProcessId), started $($p.CreationDate), by $by"
   }
   $lock = Get-LockInfo
-  if ($lock) { Say "  lock: PID $($lock.Pid), refreshed $($lock.AgeSec) s ago" }
+  if ($lock) {
+    $lockAlive = @($procs | Where-Object { $_.ProcessId -eq $lock.Pid }).Count -gt 0
+    if ($lockAlive) { Ok "lock: PID $($lock.Pid) (this worker), refreshed $($lock.AgeSec) s ago" }
+    elseif ($lock.AgeSec -gt 120) { Say "  lock: PID $($lock.Pid), $($lock.AgeSec) s old - stale, the next start takes it over" }
+    else { Warn "lock: PID $($lock.Pid) is not a running worker; it becomes stale in $(120 - $lock.AgeSec) s (or at once if that PID is not node.exe)" }
+  }
+  $sl = Join-Path $Dir 'logs\supervisor.log'
+  if (Test-Path $sl) { Say "== last lines of $sl"; Get-Content $sl -Tail 5 }
 
   if ($e['SUPABASE_URL'] -and $e['SUPABASE_SERVICE_ROLE_KEY']) {
     $h = @{ apikey = $e['SUPABASE_SERVICE_ROLE_KEY']; Authorization = "Bearer $($e['SUPABASE_SERVICE_ROLE_KEY'])" }
     $base = $e['SUPABASE_URL'].TrimEnd('/')
     if (Test-Url 'GVET API' "$base/rest/v1/system_settings?select=setting_key&limit=1" $h) {
       try {
-        $rows = Invoke-RestMethod -Uri "$base/rest/v1/system_settings?setting_key=in.(delpro_worker_last_seen_at,cms_live_last_refresh,cms_outbound_enabled)&select=setting_key,setting_value" -Headers $h -TimeoutSec 15
+        $rows = Invoke-RestMethod -Uri "$base/rest/v1/system_settings?setting_key=in.(delpro_worker_last_seen_at,cms_live_last_refresh,cms_targeted_last_refresh,cms_outbound_enabled)&select=setting_key,setting_value" -Headers $h -TimeoutSec 15
         foreach ($r in $rows) {
-          if ($r.setting_key -eq 'delpro_worker_last_seen_at') { Say "  GVET last heartbeat: $($r.setting_value)" }
+          if ($r.setting_key -eq 'delpro_worker_last_seen_at' -and $r.setting_value) {
+            $age = [int]((Get-Date).ToUniversalTime() - ([datetime]::Parse($r.setting_value)).ToUniversalTime()).TotalSeconds
+            if ($age -lt 300) { Ok "GVET last heartbeat: $($r.setting_value) ($age s ago)" } else { Bad "GVET last heartbeat: $($r.setting_value) ($age s ago - worker not reporting)" }
+          }
           if ($r.setting_key -eq 'cms_outbound_enabled') { Say "  GVET CMS sending switch: $($r.setting_value)" }
+          if ($r.setting_key -eq 'cms_targeted_last_refresh' -and $r.setting_value) {
+            $l = $r.setting_value | ConvertFrom-Json
+            $msg = "CMS state read (targeted) $($l.finished_at): animals ok=$($l.ok) failed=$($l.failed)"
+            if ($l.failed -gt 0) { Warn $msg } else { Ok $msg }
+          }
           if ($r.setting_key -eq 'cms_live_last_refresh' -and $r.setting_value) {
             $l = $r.setting_value | ConvertFrom-Json
-            $msg = "CMS live read $($l.finished_at): complete=$($l.complete), SortCow=$($l.received), matched=$($l.matched), unmatched=$($l.unmatched_animals)"
-            if ($l.complete) { Ok $msg } else { Warn $msg }
+            Say "  (optional diagnostic) full DelPro scan $($l.finished_at): complete=$($l.complete) - not needed for sending"
           }
         }
       } catch { Warn "Could not read GVET status: $($_.Exception.Message)" }
@@ -254,16 +314,14 @@ function Install-Worker {
 
   if (-not $User) { $User = [Security.Principal.WindowsIdentity]::GetCurrent().Name }
   New-Item -ItemType Directory -Force (Join-Path $Dir 'logs') | Out-Null
-  $arg = "/d /s /c `"`"$node`" src\index.js --service >> logs\worker.log 2>&1`""
-  $action = New-ScheduledTaskAction -Execute $env:ComSpec -Argument $arg -WorkingDirectory $Dir
+  $action = New-WorkerTaskAction
   $trigger = New-ScheduledTaskTrigger -AtLogOn -User $User
   $principal = New-ScheduledTaskPrincipal -UserId $User -LogonType Interactive -RunLevel Limited
-  $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) `
-    -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+  $settings = New-WorkerTaskSettings
   # -Force only replaces OUR task (checked above); a foreign one stopped the script already
   Register-ScheduledTask -TaskName $TaskName -TaskPath '\' -Action $action -Trigger $trigger -Principal $principal -Settings $settings `
     -Description "$Marker; dir=$Dir" -Force | Out-Null
-  Ok "Task $TaskName registered: at logon of $User, working directory $Dir (node loads $Dir\.env itself)"
+  Ok "Task $TaskName registered: at logon of $User, hidden supervisor in $Dir (node loads $Dir\.env itself)"
   Start-Worker
   Show-Status
 }
@@ -306,6 +364,7 @@ function Upgrade-Worker {
     CMS_OUTBOUND_MODE = 'off'; CMS_POLL_INTERVAL_SEC = '5'; CMS_DEFAULT_SORT_AREA_KEY = '1'; CMS_LIVE_INTERVAL_MIN = '60'
     CMS_LIVE_MAX_ROWS = '20000'; DELPRO_GATEWAY_ANIMAL_ORN_PROPERTY = 'OfficialRegNumber'
     CMS_LIVE_MILK_BULK_TOP = '1000'; CMS_LIVE_CONCURRENCY = '3'; CMS_LIVE_READ_ATTEMPTS = '2'
+    CMS_BATCH_LIMIT = '10'; CMS_CONCURRENCY = '2'; CMS_REFRESH_BATCH = '50'; CMS_REFRESH_POLL_SEC = '30'
   }
   foreach ($k in $defaults.Keys) { if (Set-DotEnvValue $envFile $k $defaults[$k] -OnlyIfMissing) { Say "  .env: added $k=$($defaults[$k])" } }
 
@@ -315,8 +374,17 @@ function Upgrade-Worker {
     & node.exe --check src\index.js; if ($LASTEXITCODE -ne 0) { Stop-Script "src\index.js does not parse - restore from $backup" }
   } finally { Pop-Location }
   Ok 'Code updated (.env values unchanged, treatment-model.json and logs kept)'
-  # the existing task is kept exactly as it is (not re-registered) and started again
-  if ($hadTask) { Start-Worker; Show-Status } else { Warn 'No task yet - run -Action install' }
+  if ($hadTask) {
+    # the existing task is reused: only its action (-> hidden supervisor) and settings change; trigger, user and name stay
+    $t = @(Get-OurTasks) | Where-Object { Test-IsOurTask $_ } | Select-Object -First 1
+    try {
+      Set-ScheduledTask -TaskName $t.TaskName -TaskPath $t.TaskPath -Action (New-WorkerTaskAction) -Settings (New-WorkerTaskSettings) | Out-Null
+      Ok "Task $($t.TaskPath)$($t.TaskName) now runs the supervisor (same trigger and user)"
+    } catch {
+      Warn "Could not update the task action ($($_.Exception.Message)) - run -Action install to re-register it."
+    }
+    Start-Worker; Show-Status
+  } else { Warn 'No task yet - run -Action install' }
 }
 
 function Set-CmsOff {
@@ -326,6 +394,58 @@ function Set-CmsOff {
   Ok 'CMS_OUTBOUND_MODE=off (OUTBOUND_MODE for treatments not changed)'
   Warn 'Separations already created in DelPro are NOT cancelled - disable them in DelPro.'
   if (@(Get-WorkerProcesses).Count -gt 0) { Stop-Worker; Start-Worker }
+}
+
+function Set-CmsOn {
+  $envFile = Join-Path $Dir '.env'
+  if (-not (Test-Path $envFile)) { Stop-Script "$envFile missing" }
+  Say 'This lets the worker WRITE approved CMS separations (SortCow) to DelPro. GVET still decides which jobs: its CMS switch,'
+  Say 'admin approval, verified mode and the physical destination confirmation. Treatments (OUTBOUND_MODE) are not changed.'
+  $answer = Read-Host 'Type GATEWAY to enable'
+  if ($answer -cne 'GATEWAY') { Stop-Script 'Not confirmed - nothing changed.' }
+  [void](Set-DotEnvValue $envFile 'CMS_OUTBOUND_MODE' 'gateway')
+  Ok 'CMS_OUTBOUND_MODE=gateway'
+  Stop-Worker; Start-Worker; Show-Status
+}
+
+function Write-Sup([string]$m) {
+  try { Add-Content -Path (Join-Path $Dir 'logs\supervisor.log') -Value "$((Get-Date).ToString('s')) $m" -Encoding UTF8 } catch { }
+}
+
+function Invoke-Rotate([string]$path) {
+  try {
+    if ((Test-Path $path) -and (Get-Item $path).Length -gt 20MB) { Move-Item $path "$path.1" -Force }
+  } catch { }
+}
+
+# The scheduled task's action (hidden window): keeps ONE worker running. node's own lock decides who runs (exit code 3 = another
+# worker holds it -> wait); any other exit -> restart with backoff. Never kills anything.
+function Invoke-Supervisor {
+  Set-Location $Dir
+  New-Item -ItemType Directory -Force (Join-Path $Dir 'logs') | Out-Null
+  $node = (Get-Command node.exe -ErrorAction SilentlyContinue).Source
+  if (-not $node) { Write-Sup 'node.exe not found in PATH - waiting 5 min'; Start-Sleep -Seconds 300; exit 1 }
+  $others = @(Get-SupervisorProcesses)
+  if ($others.Count -gt 0) { Write-Sup "another supervisor runs (PID $($others[0].ProcessId)) - exiting"; exit 0 }
+  Write-Sup "supervisor started (PID $PID, $node)"
+  $delay = 10
+  while ($true) {
+    Invoke-Rotate (Join-Path $Dir 'logs\worker.log')
+    $started = Get-Date
+    $ErrorActionPreference = 'Continue'
+    & (Join-Path $Dir 'scripts\run-worker.cmd') $node
+    $code = $LASTEXITCODE
+    $ErrorActionPreference = 'Stop'
+    $ran = [int]((Get-Date) - $started).TotalSeconds
+    if ($code -eq 3) {
+      Write-Sup 'another worker holds logs\worker.lock - checking again in 60 s'
+      Start-Sleep -Seconds 60
+      continue
+    }
+    if ($ran -gt 600) { $delay = 10 } else { $delay = [Math]::Min($delay * 2, 300) }
+    Write-Sup "worker exited with code $code after $ran s - restarting in $delay s"
+    Start-Sleep -Seconds $delay
+  }
 }
 
 switch ($Action) {
@@ -340,4 +460,6 @@ switch ($Action) {
   }
   'upgrade' { Upgrade-Worker }
   'cms-off' { Set-CmsOff }
+  'cms-on' { Set-CmsOn }
+  'run' { Invoke-Supervisor }
 }

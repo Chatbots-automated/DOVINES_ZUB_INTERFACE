@@ -135,6 +135,17 @@ export async function POST(request: NextRequest) {
         });
       case "request_live":
         return supabase.rpc("cms_request_live_refresh", {});
+      // 0051: "Atnaujinti iš DelPro" for chosen animals (a row, the displayed page) — by id or by ORN
+      case "request_animals": {
+        let animalIds = ids(body.animal_ids).slice(0, 500);
+        const tags = ids(body.tags).map((t) => t.trim().toUpperCase()).filter(Boolean).slice(0, 50);
+        if (tags.length) {
+          const found = await supabase.from("animals").select("id").in("tag_no", tags);
+          if (found.error) return found;
+          animalIds = [...animalIds, ...(found.data ?? []).map((a) => a.id)];
+        }
+        return supabase.rpc("cms_request_animal_refresh", { p_animal_ids: animalIds });
+      }
       default:
         return null;
     }
@@ -143,6 +154,15 @@ export async function POST(request: NextRequest) {
   try {
     const res = await call();
     if (!res) return fail("Nežinomas veiksmas.");
+    // 0051: a saved batch's cows get a fresh DelPro read (best effort — the worker re-checks each cow before writing anyway)
+    if (body.op === "save" && !res.error) {
+      const batchId = (res.data as { batch_id?: string } | null)?.batch_id;
+      if (batchId) {
+        const jobs = await supabase.from("cms_separation_jobs").select("animal_id").eq("batch_id", batchId);
+        const animalIds = (jobs.data ?? []).map((j) => j.animal_id);
+        if (animalIds.length) await supabase.rpc("cms_request_animal_refresh", { p_animal_ids: animalIds.slice(0, 500) });
+      }
+    }
     if (res.error) {
       let details: unknown = undefined;
       try {

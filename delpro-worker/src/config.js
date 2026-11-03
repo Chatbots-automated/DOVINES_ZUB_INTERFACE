@@ -73,9 +73,16 @@ export const config = {
   cmsPollIntervalSec: Number(env("CMS_POLL_INTERVAL_SEC", "5")),
   // Known DelPro SortArea. Reported in the heartbeat only — NOT sent with an AnimalActionSetting and NOT proven to route the cow.
   cmsDefaultSortAreaKey: env("CMS_DEFAULT_SORT_AREA_KEY", ""),
-  // DelPro SortCow state -> GVET "Aktyvūs atskyrimai" (read-only; also on "Atnaujinti" in GVET). 0 = only on request.
-  cmsLiveIntervalMin: Number(env("CMS_LIVE_INTERVAL_MIN", "60")),
-  // `top` for the CMS live read (one GetData per object, no verified paging). A read returning this many rows is incomplete.
+  // 0051: jobs claimed per CMS tick (at most) and how many are processed at once — kept small so DelPro is never flooded.
+  cmsBatchLimit: Number(env("CMS_BATCH_LIMIT", "10")),
+  cmsConcurrency: Number(env("CMS_CONCURRENCY", "2")),
+  // Targeted DelPro SortCow state -> GVET "Aktyvūs atskyrimai": only GVET's CMS animals, each re-read when older than
+  // CMS_LIVE_INTERVAL_MIN (0 = only on request), at most CMS_REFRESH_BATCH animals per round, rounds every CMS_REFRESH_POLL_SEC
+  // (requests from "Atnaujinti iš DelPro" are picked up on the next round). The full-herd scan is `npm run cms:live` only.
+  cmsRefreshIntervalMin: Number(env("CMS_LIVE_INTERVAL_MIN", "60")),
+  cmsRefreshBatch: Number(env("CMS_REFRESH_BATCH", "50")),
+  cmsRefreshPollSec: Number(env("CMS_REFRESH_POLL_SEC", "30")),
+  // Diagnostic full scan (`npm run cms:live`) only:
   cmsLiveMaxRows: Number(env("CMS_LIVE_MAX_ROWS", "20000")),
   // AnimalMilkSetting [Key, Animal]: one bulk read of at most this many rows (top 2000 -> NullReferenceException on the
   // farm, 1000 fine); every other key is read by Key, CMS_LIVE_CONCURRENCY at a time, each read tried CMS_LIVE_READ_ATTEMPTS times.
@@ -100,6 +107,11 @@ export function requireConfig() {
   if (config.cmsOutboundMode === "gateway" && !config.gateway.user) missing.push("DELPRO_GATEWAY_USER");
   if (!(config.cmsPollIntervalSec >= 1)) missing.push("CMS_POLL_INTERVAL_SEC");
   if (!(config.cmsLiveMaxRows > 0)) missing.push("CMS_LIVE_MAX_ROWS");
+  if (!(config.cmsBatchLimit >= 1 && config.cmsBatchLimit <= 50)) missing.push("CMS_BATCH_LIMIT (1-50)");
+  if (!(config.cmsConcurrency >= 1 && config.cmsConcurrency <= 4)) missing.push("CMS_CONCURRENCY (1-4)");
+  if (!(config.cmsRefreshIntervalMin >= 0)) missing.push("CMS_LIVE_INTERVAL_MIN");
+  if (!(config.cmsRefreshBatch >= 1 && config.cmsRefreshBatch <= 200)) missing.push("CMS_REFRESH_BATCH (1-200)");
+  if (!(config.cmsRefreshPollSec >= 5)) missing.push("CMS_REFRESH_POLL_SEC (>= 5)");
   if (!(config.cmsLiveMilkBulkTop >= 0 && config.cmsLiveMilkBulkTop <= 1000)) missing.push("CMS_LIVE_MILK_BULK_TOP (0-1000)");
   if (!(config.cmsLiveConcurrency >= 1 && config.cmsLiveConcurrency <= 8)) missing.push("CMS_LIVE_CONCURRENCY (1-8)");
   if (!(config.cmsLiveReadAttempts >= 1 && config.cmsLiveReadAttempts <= 5)) missing.push("CMS_LIVE_READ_ATTEMPTS (1-5)");

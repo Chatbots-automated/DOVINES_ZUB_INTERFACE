@@ -264,6 +264,15 @@ not look for Žibartoniai's 0013–0021 VIC/UNIFORM history here.
   Milk-setting answers: resolved / no_animal / invalid / absent (classified, scan stays complete) vs error / ambiguous (row goes to
   `actions_unresolved`, scan incomplete when a SortCow uses it). `cms_live_upload` keeps the existing animal for unresolved rows and
   never removes while any exist. Diagnostic: `npm run cms:milk-diagnose` (read-only bisect).
+- **CMS targeted** (0051, worker 0.4.0): the full-herd scan (`cms_live_upload`, `npm run cms:live`) is an optional diagnostic — never in
+  the worker loop, never an activation check, never a claim condition. Each job re-reads ONLY its animal before writing (GUID + ORN/Number,
+  `AnimalMilkSetting` by `Animal` top 10, `AnimalActionSetting` by milk setting top 20, fail closed); status = `actionStatus()` in
+  `cms-separation.js`, mirrored by `src/lib/cms/live-status.ts` (keep in sync). "Aktyvūs atskyrimai" = per-animal reads of GVET's CMS
+  animals only: `cms_live_targets(jsonb)` picks them (requests, batches/open jobs, GVET-written until DelPro shows them finished, live
+  SortCow), `cms_live_upload_animals(jsonb)` stores one animal's complete answer (removes only that animal's missing rows; a failed read
+  keeps the old rows and marks `cms_animal_live_checks.ok=false`). Staff request reads with `cms_request_animal_refresh(uuid[])`; saving a
+  batch requests its cows. Activation = 7 operational checks (`src/lib/cms/activation.ts`). Windows: the task runs the hidden supervisor
+  `scripts\gvet-worker.ps1 -Action run` (restarts node; exit 3 = lock held → wait); the lock is stale after 2 min or when its PID isn't node.exe.
 - **DelPro write path** — preferred order: DelPro's own import function → UI automation → direct SQL insert into DelPro's
   database. Direct SQL bypasses DelPro's own logic and may affect DeLaval support: only with the farm's written OK.
   All DelPro-specific SQL lives in `delpro-worker/queries/*.sql`; files marked `TODO(discovery)` are placeholders and

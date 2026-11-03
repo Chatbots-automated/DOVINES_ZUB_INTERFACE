@@ -707,6 +707,8 @@ export interface Database {
       cms_separation_events: { Row: Row<CmsSeparationEventRow>; Insert: Insertable<CmsSeparationEventRow, never>; Update: Updatable<CmsSeparationEventRow>; Relationships: [] };
       cms_live_action_settings: { Row: Row<CmsLiveActionSettingRow>; Insert: Insertable<CmsLiveActionSettingRow, never>; Update: Updatable<CmsLiveActionSettingRow>; Relationships: [] };
       cms_sort_areas: { Row: Row<CmsSortAreaRow>; Insert: Insertable<CmsSortAreaRow, never>; Update: Updatable<CmsSortAreaRow>; Relationships: [] };
+      // 0051 — per-animal targeted DelPro reads (written by cms_request_animal_refresh / the worker)
+      cms_animal_live_checks: { Row: Row<CmsAnimalLiveCheckRow>; Insert: Insertable<CmsAnimalLiveCheckRow, never>; Update: Updatable<CmsAnimalLiveCheckRow>; Relationships: [] };
       // 0042 — DelPro daily Excel reports (read-only for the app; written by delpro_report_ingest)
       delpro_report_upload_tokens: {
         Row: Row<DelproReportTokenRow>;
@@ -1208,6 +1210,7 @@ export interface Database {
       cms_release_single_job: { Args: { p_job_id: string | null }; Returns: { ok: boolean } };
       cms_set_mode_verified: { Args: { p_mode: CmsMode; p_verified: boolean; p_confirm?: boolean }; Returns: { ok: boolean; verified_modes: CmsMode[] } };
       cms_request_live_refresh: { Args: Record<string, never>; Returns: { ok: boolean; message: string } };
+      cms_request_animal_refresh: { Args: { p_animal_ids: string[] }; Returns: { ok: boolean; requested: number; not_linked: number; message: string } };
       cms_status: { Args: Record<string, never>; Returns: CmsStatus };
       cms_set_outbound_enabled: { Args: { p_enabled: boolean; p_confirm?: boolean }; Returns: { ok: boolean; enabled: boolean; message: string } };
       cms_set_destination_verified: { Args: { p_verified: boolean; p_confirm?: boolean; p_note?: string | null }; Returns: { ok: boolean } };
@@ -1571,6 +1574,27 @@ export type CmsLiveActionSettingRow = {
   removed_at: string | null;
 };
 
+export type CmsAnimalLiveCheckRow = {
+  animal_id: string;
+  requested_at: string | null;
+  checked_at: string | null;
+  ok: boolean | null;
+  error: string | null;
+  milk_setting_key: string | null;
+  sortcow_count: number | null;
+  worker_id: string | null;
+};
+
+export type CmsTargetedRefreshInfo = {
+  finished_at?: string;
+  ok?: number;
+  failed?: number;
+  mismatched?: number;
+  upserted?: number;
+  removed?: number;
+  round?: { started_at?: string; targets?: number; force?: boolean; all_linked?: boolean };
+};
+
 export type CmsSortAreaRow = { area_key: string; area_number: string | null; area_name: string | null; seen_at: string };
 
 export type CmsLiveRefreshInfo = {
@@ -1617,8 +1641,13 @@ export type CmsStatus = {
     cms_last_live: { at: string; complete: boolean; received: number | null } | null;
     outbound_mode: string | null;
     last_error: string | null;
+    // 0051: the worker reads per animal (no full scan needed)
+    cms_targeted?: boolean;
   } | null;
   any_success: boolean;
+  // 0051
+  targeted_last_refresh?: CmsTargetedRefreshInfo | null;
+  pending_animal_requests?: number;
 };
 
 export type CmsCheckResult = {
