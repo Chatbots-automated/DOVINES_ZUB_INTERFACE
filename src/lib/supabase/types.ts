@@ -1580,10 +1580,21 @@ export type CmsLiveRefreshInfo = {
   effective_active?: number;
   complete?: boolean;
   unmatched_animals?: number;
-  unmatched_reasons?: { milk_setting_without_animal?: number; animal_not_in_gvet?: number; animal_inactive_in_gvet?: number };
+  unmatched_reasons?: {
+    milk_setting_without_animal?: number;
+    animal_not_in_gvet?: number;
+    animal_inactive_in_gvet?: number;
+    // 0050
+    milk_setting_absent?: number;
+    animal_reference_invalid?: number;
+    milk_setting_unresolved?: number;
+  };
   removed?: number;
   errors?: string[];
   stats?: Record<string, number>;
+  // 0050: notes that did not make the scan incomplete; the first milk-setting keys the Gateway could not answer
+  warnings?: string[];
+  unresolved?: { key: string; status: string; error: string | null; used_by_sortcow: boolean }[];
 };
 
 export type CmsStatus = {

@@ -30,7 +30,7 @@ const XML_NAME = /^[A-Za-z_][A-Za-z0-9_.-]*$/;
 
 export class GatewayError extends Error {
   /**
-   * @param {string} code  stable machine code (SOAP_FAULT, TIMEOUT, UNREACHABLE, HTTP_500, BAD_RESPONSE, WRITE_REJECTED, WRITES_DISABLED)
+   * @param {string} code  stable machine code (SOAP_FAULT, TIMEOUT, UNREACHABLE, HTTP_500, BAD_RESPONSE, GETDATA_ERROR, WRITE_REJECTED, WRITES_DISABLED)
    * @param {{ retryable?: boolean, outcomeUnknown?: boolean, details?: object }} [opts]
    *   outcomeUnknown — a write may have been applied (e.g. timeout after sending): verify by reading back, never blindly resend.
    */
@@ -142,6 +142,12 @@ export function parseDdmData(xml) {
   if (!("ddmData" in doc)) {
     if (doc.Response) {
       throw new GatewayError("GATEWAY_ERROR", `Gateway atsakė status=${doc.Response["@_status"] ?? "?"}`, { details: { snippet: String(xml).slice(0, 500) } });
+    }
+    // DelPro's own failure inside GetData: <Error type="GetData" error="System.NullReferenceException">Object reference ...</Error>
+    if (doc.Error) {
+      const e = doc.Error;
+      const kind = (typeof e === "object" && (e["@_error"] || e["@_type"])) || "Error";
+      throw new GatewayError("GETDATA_ERROR", `Gateway GetData klaida: ${kind}${textOf(e) ? ` — ${textOf(e)}` : ""}`, { details: { snippet: String(xml).slice(0, 500) } });
     }
     throw new GatewayError("BAD_RESPONSE", "Gateway rezultatas nėra ddmData", { details: { snippet: String(xml).slice(0, 300) } });
   }

@@ -77,6 +77,11 @@ export const config = {
   cmsLiveIntervalMin: Number(env("CMS_LIVE_INTERVAL_MIN", "60")),
   // `top` for the CMS live read (one GetData per object, no verified paging). A read returning this many rows is incomplete.
   cmsLiveMaxRows: Number(env("CMS_LIVE_MAX_ROWS", "20000")),
+  // AnimalMilkSetting [Key, Animal]: one bulk read of at most this many rows (top 2000 -> NullReferenceException on the
+  // farm, 1000 fine); every other key is read by Key, CMS_LIVE_CONCURRENCY at a time, each read tried CMS_LIVE_READ_ATTEMPTS times.
+  cmsLiveMilkBulkTop: Number(env("CMS_LIVE_MILK_BULK_TOP", "1000")),
+  cmsLiveConcurrency: Number(env("CMS_LIVE_CONCURRENCY", "3")),
+  cmsLiveReadAttempts: Number(env("CMS_LIVE_READ_ATTEMPTS", "2")),
 };
 
 export function requireConfig() {
@@ -95,6 +100,9 @@ export function requireConfig() {
   if (config.cmsOutboundMode === "gateway" && !config.gateway.user) missing.push("DELPRO_GATEWAY_USER");
   if (!(config.cmsPollIntervalSec >= 1)) missing.push("CMS_POLL_INTERVAL_SEC");
   if (!(config.cmsLiveMaxRows > 0)) missing.push("CMS_LIVE_MAX_ROWS");
+  if (!(config.cmsLiveMilkBulkTop >= 0 && config.cmsLiveMilkBulkTop <= 1000)) missing.push("CMS_LIVE_MILK_BULK_TOP (0-1000)");
+  if (!(config.cmsLiveConcurrency >= 1 && config.cmsLiveConcurrency <= 8)) missing.push("CMS_LIVE_CONCURRENCY (1-8)");
+  if (!(config.cmsLiveReadAttempts >= 1 && config.cmsLiveReadAttempts <= 5)) missing.push("CMS_LIVE_READ_ATTEMPTS (1-5)");
   if (missing.length) throw new Error(`Trūksta / neteisinga konfigūracija: ${missing.join(", ")}`);
 }
 

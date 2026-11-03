@@ -12,7 +12,7 @@ import { checkCatalogJob } from "./catalog-write-check.js";
 import { TreatmentWriteError, liveChecks, treatmentProblems, writeTreatment as writeGatewayTreatment } from "./treatment-gateway.js";
 import { loadTreatmentModel, validateModel } from "./treatment-model.js";
 import { GatewayError } from "./gateway.js";
-import { pingGateway, prepareJob, runCmsLive, runCmsOutbound, snapshotProblems } from "./cms-separation.js";
+import { diagnoseMilkSettings, pingGateway, prepareJob, runCmsLive, runCmsOutbound, snapshotProblems } from "./cms-separation.js";
 import { log } from "./log.js";
 
 // Dovinės ŽŪB DelPro worker (Priedas §3-§4). Runs on the farm PC next to
@@ -309,7 +309,8 @@ export async function runCmsLiveIfDue({ force = false } = {}) {
   const due = config.cmsLiveIntervalMin > 0 && Date.now() - cmsLiveAt >= config.cmsLiveIntervalMin * 60_000;
   if (!force && !due && !(await gvet.cmsLiveRequested())) return null;
   cmsLiveAt = Date.now();
-  const res = await runCmsLive(createGatewayClient());
+  // the background loop reuses Key -> Animal answers for 24 h; a forced run (`npm run cms:live`) reads every key again
+  const res = await runCmsLive(createGatewayClient(), { useCache: !force });
   state.lastCmsLive = { at: new Date().toISOString(), complete: !!res?.complete, received: res?.received ?? null };
   if (res?.complete) state.lastCmsLiveOk = state.lastCmsLive.at;
   return res;
@@ -438,6 +439,18 @@ export async function runCmsWriteOne(jobId) {
   return after;
 }
 
+/** `npm run cms:milk-diagnose`: read-only — which AnimalMilkSetting record (if any) breaks the [Key, Animal] bulk read. */
+export async function runCmsMilkDiagnose() {
+  const report = await diagnoseMilkSettings(createGatewayClient());
+  const dir = path.join(ROOT, "discovery");
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, `cms-milk-diagnose-${new Date().toISOString().replace(/[:.]/g, "-")}.json`);
+  fs.writeFileSync(file, JSON.stringify(report, null, 2));
+  log.info(JSON.stringify(report, null, 2));
+  log.info(`Išsaugota: ${file}`);
+  return report;
+}
+
 /** `npm run cms:inspect`: saves GetMetadata answers + a few raw rows of the CMS objects to discovery/ (read-only). */
 export async function runCmsInspect() {
   const gw = createGatewayClient();
@@ -504,6 +517,10 @@ async function main() {
   }
   if (process.argv.includes("--cms-inspect")) {
     await runCmsInspect();
+    return;
+  }
+  if (process.argv.includes("--cms-milk-diagnose")) {
+    await runCmsMilkDiagnose();
     return;
   }
   if (process.argv.includes("--write-one")) {

@@ -305,6 +305,7 @@ function Upgrade-Worker {
   $defaults = [ordered]@{
     CMS_OUTBOUND_MODE = 'off'; CMS_POLL_INTERVAL_SEC = '5'; CMS_DEFAULT_SORT_AREA_KEY = '1'; CMS_LIVE_INTERVAL_MIN = '60'
     CMS_LIVE_MAX_ROWS = '20000'; DELPRO_GATEWAY_ANIMAL_ORN_PROPERTY = 'OfficialRegNumber'
+    CMS_LIVE_MILK_BULK_TOP = '1000'; CMS_LIVE_CONCURRENCY = '3'; CMS_LIVE_READ_ATTEMPTS = '2'
   }
   foreach ($k in $defaults.Keys) { if (Set-DotEnvValue $envFile $k $defaults[$k] -OnlyIfMissing) { Say "  .env: added $k=$($defaults[$k])" } }
 
@@ -314,7 +315,8 @@ function Upgrade-Worker {
     & node.exe --check src\index.js; if ($LASTEXITCODE -ne 0) { Stop-Script "src\index.js does not parse - restore from $backup" }
   } finally { Pop-Location }
   Ok 'Code updated (.env values unchanged, treatment-model.json and logs kept)'
-  if ($hadTask) { Install-Worker } else { Warn 'No task yet - run -Action install' }
+  # the existing task is kept exactly as it is (not re-registered) and started again
+  if ($hadTask) { Start-Worker; Show-Status } else { Warn 'No task yet - run -Action install' }
 }
 
 function Set-CmsOff {

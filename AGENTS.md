@@ -258,6 +258,12 @@ not look for Žibartoniai's 0013–0021 VIC/UNIFORM history here.
   `cms_live_upload` counts why rows have no GVET animal; the view shows each job's DelPro record (`delpro_active` …) — a record disabled in
   DelPro is never re-created (finished jobs are never handed out again). Activation checklist = `src/lib/cms/activation.ts` (heartbeat
   `started_by=task` comes from `--service`, passed only by `scripts/gvet-worker.ps1`).
+- **CMS live read** (0050, worker 0.3.0): never ask `AnimalMilkSetting [Key, Animal]` for more than 1000 rows (DelPro 10.9 →
+  `System.NullReferenceException`, parsed as `GETDATA_ERROR`). Keys first (`[Key]`), then ≤1000 in bulk validated by Key, the rest by
+  `Key` with bounded concurrency + read retries; SortCow via the `ActionType` filter, per-milk-setting fallback when it fails / hits `top`.
+  Milk-setting answers: resolved / no_animal / invalid / absent (classified, scan stays complete) vs error / ambiguous (row goes to
+  `actions_unresolved`, scan incomplete when a SortCow uses it). `cms_live_upload` keeps the existing animal for unresolved rows and
+  never removes while any exist. Diagnostic: `npm run cms:milk-diagnose` (read-only bisect).
 - **DelPro write path** — preferred order: DelPro's own import function → UI automation → direct SQL insert into DelPro's
   database. Direct SQL bypasses DelPro's own logic and may affect DeLaval support: only with the farm's written OK.
   All DelPro-specific SQL lives in `delpro-worker/queries/*.sql`; files marked `TODO(discovery)` are placeholders and

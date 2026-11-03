@@ -226,90 +226,359 @@ export async function runCmsOutbound(client, { max = 20, jobId = null } = {}) {
   return n;
 }
 
+const GUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const errText = (err) => String(err?.message ?? err).slice(0, 300);
+
+/** Runs fn over items with at most `limit` in flight; results keep the input order. */
+async function pool(items, limit, fn) {
+  const out = new Array(items.length);
+  let next = 0;
+  const lane = async () => {
+    while (next < items.length) {
+      const i = next++;
+      out[i] = await fn(items[i], i);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, lane));
+  return out;
+}
+
+/** A read retried a limited number of times with backoff (reads only — never used for writes). */
+async function readWithRetry(fn, attempts, backoffMs) {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (attempt >= attempts) throw err;
+      await sleep(backoffMs * attempt);
+    }
+  }
+}
+
+/**
+ * One AnimalMilkSetting by Key -> { status, animal_guid?, error? }.
+ *   resolved   = found, Animal is an ObjectGuid
+ *   no_animal  = found, Animal empty               (a valid answer — the row just has no animal)
+ *   invalid    = found, Animal is not a GUID
+ *   absent     = DelPro has no record with this Key
+ *   ambiguous  = several records came back for the Key
+ *   error      = the read failed (after retries), e.g. System.NullReferenceException on this record
+ */
+export async function resolveMilkSetting(client, key, { attempts = 2, backoffMs = 500 } = {}) {
+  try {
+    const rows = await readWithRetry(
+      async () => (await get(client, "AnimalMilkSetting", ["Key", "Animal"], [{ name: "Key", value: String(key) }], 2)).filter((o) => String(val(o, "Key")) === String(key)),
+      attempts,
+      backoffMs,
+    );
+    if (rows.length === 0) return { status: "absent" };
+    if (rows.length > 1) return { status: "ambiguous", error: `${rows.length} įrašai su tuo pačiu Key` };
+    return animalRef(val(rows[0], "Animal"));
+  } catch (err) {
+    return { status: "error", error: errText(err) };
+  }
+}
+
+function animalRef(animal) {
+  if (!animal) return { status: "no_animal" };
+  if (!GUID_RE.test(String(animal).trim())) return { status: "invalid", error: `Animal="${String(animal).slice(0, 60)}"` };
+  return { status: "resolved", animal_guid: String(animal).trim() };
+}
+
+/** Statuses after which the SortCow row's animal is unknown — a scan with such a row is never complete. */
+const UNRESOLVED = new Set(["error", "ambiguous"]);
+
 /**
  * DelPro's own SortCow settings + sort areas (read-only).
  *
- * Farm facts (2026-11, DelPro 10.9): GetData AnimalActionSetting <equal ActionType=SortCow> returned 3466 rows in ONE call —
- * more than the 1000 rows the Gateway returned for DrugParameters, so that cap is not universal. There is no verified Gateway
- * paging. So each object is read in ONE call with a large `top` (CMS_LIVE_MAX_ROWS) and a read is complete only when it returned
- * fewer rows than asked for and not exactly the known cap. All AnimalMilkSetting records (Key, Animal) are read the same way and
- * joined here (the earlier per-key lookups stopped at 500 and left 2966 SortCow rows without an animal). A milk-setting key the
- * bulk read did not return is fetched by Key: found -> the bulk read was truncated (incomplete); confirmed absent -> reported.
+ * Farm facts (DelPro 10.9, 2026-11):
+ *   GetData AnimalMilkSetting [Key]            top 5000 -> 3478 rows, fine;
+ *   GetData AnimalMilkSetting [Key, Animal]    top 1000 -> fine, top 2000 -> <Error ... System.NullReferenceException>;
+ *   GetData AnimalActionSetting (all 4 types)  top 5000 -> exactly 5000 rows (truncated);
+ *   GetData AnimalActionSetting ActionType=SortCow -> 3466 rows in one call.
+ * There is no verified Gateway paging. So:
+ *   1. all milk-setting keys (Key only, one read; complete only below `top` and below the known 1000 cap);
+ *   2. Key -> Animal from one small bulk read (<= CMS_LIVE_MILK_BULK_TOP, every returned Key validated), the rest by Key,
+ *      a few at a time, each read retried; a record that fails is recorded with its error, the others go on;
+ *   3. SortCow only (ActionType filter, each row's type checked); if that read fails or may be truncated, per milk setting
+ *      (the verified AnimalMilkSetting filter) instead.
+ * complete=true only if 1 and 3 are complete and every SortCow row's milk setting was answered (found / no animal / absent).
+ * A milk-setting key no SortCow row uses can fail without making the scan incomplete — it is reported.
  */
-export async function readLiveState(client, { maxRows = config.cmsLiveMaxRows, rowCap = config.catalogGatewayRowCap, maxRefLookups = 300 } = {}) {
+export async function readLiveState(client, {
+  maxRows = config.cmsLiveMaxRows,
+  rowCap = config.catalogGatewayRowCap,
+  bulkTop = config.cmsLiveMilkBulkTop,
+  concurrency = config.cmsLiveConcurrency,
+  attempts = config.cmsLiveReadAttempts,
+  backoffMs = 500,
+  cache = null, // Map key -> { animal_guid, status, at } from earlier scans of this process (continuous mode only)
+  cacheMaxAgeMs = 24 * 3600_000,
+  now = Date.now(),
+} = {}) {
   const errors = [];
+  const warnings = [];
   const capped = (n) => n >= maxRows || (rowCap > 0 && n === rowCap);
-
-  const raw = await get(client, ACTION_OBJECT, ACTION_READ_PROPS, [{ name: "ActionType", value: "SortCow" }], maxRows);
-  const actions = raw.map(actionSummary).filter((a) => a.key && a.action_type === "SortCow");
-  const otherTypes = raw.length - actions.length;
-  let complete = !capped(raw.length);
-  if (!complete) errors.push(`AnimalActionSetting: grąžinta ${raw.length} (top ${maxRows}) — gali būti ne visi.`);
-
-  const milkRaw = await get(client, "AnimalMilkSetting", ["Key", "Animal"], [], maxRows);
-  if (capped(milkRaw.length)) {
+  let complete = true;
+  const incomplete = (msg) => {
     complete = false;
-    errors.push(`AnimalMilkSetting: grąžinta ${milkRaw.length} (top ${maxRows}) — gali būti ne visi.`);
+    errors.push(msg);
+  };
+  const opts = { attempts, backoffMs };
+
+  // 1. every AnimalMilkSetting key
+  let keyList = [];
+  let keysComplete = false;
+  try {
+    const rows = await readWithRetry(() => get(client, "AnimalMilkSetting", ["Key"], [], maxRows), attempts, backoffMs);
+    keyList = rows.map((o) => val(o, "Key")).filter(Boolean).map(String);
+    keysComplete = !capped(rows.length);
+    if (!keysComplete) incomplete(`AnimalMilkSetting raktų: grąžinta ${rows.length} (top ${maxRows}) — gali būti ne visi.`);
+  } catch (err) {
+    incomplete(`AnimalMilkSetting raktų sąrašas nenuskaitytas: ${errText(err)}`);
   }
-  const guidByKey = new Map(milkRaw.map((o) => [String(val(o, "Key")), val(o, "Animal") || null]).filter(([k]) => k));
-  const perAnimal = new Map();
-  for (const g of guidByKey.values()) if (g) perAnimal.set(g.toLowerCase(), (perAnimal.get(g.toLowerCase()) ?? 0) + 1);
+  const keys = [...new Set(keyList)];
+  if (keys.length !== keyList.length) warnings.push(`AnimalMilkSetting: ${keyList.length - keys.length} pasikartojantys raktai.`);
+  const keySet = new Set(keys);
 
-  const missing = [...new Set(actions.map((a) => a.milk_setting_key).filter((k) => k && !guidByKey.has(String(k))))];
-  let refsFound = 0;
-  const refsAbsent = [];
-  if (missing.length > maxRefLookups) {
-    complete = false;
-    errors.push(`${missing.length} SortCow įrašų nurodo melžimo nustatymus, kurių nėra bendrame sąraše — per daug patikrinti po vieną.`);
-  } else {
-    for (const key of missing) {
-      try {
-        const [ms] = (await get(client, "AnimalMilkSetting", ["Key", "Animal"], [{ name: "Key", value: key }], 2)).filter((o) => String(val(o, "Key")) === String(key));
-        if (ms) {
-          refsFound += 1;
-          guidByKey.set(String(key), val(ms, "Animal") || null);
-        } else refsAbsent.push(key);
-      } catch (err) {
-        complete = false;
-        errors.push(`AnimalMilkSetting ${key}: ${err.message}`);
+  // 2a. Key -> Animal, small bulk read (validated by Key, never by position)
+  const refs = new Map(); // key -> { status, animal_guid?, error?, via }
+  let fromCache = 0;
+  if (cache) {
+    for (const k of keys) {
+      const c = cache.get(k);
+      if (c && now - c.at < cacheMaxAgeMs && !UNRESOLVED.has(c.status)) {
+        refs.set(k, { ...c, via: "cache" });
+        fromCache += 1;
       }
     }
-    if (refsFound > 0) {
-      complete = false;
-      errors.push(`Bendras AnimalMilkSetting sąrašas buvo nepilnas (${refsFound} rasta tik pagal raktą).`);
+  }
+  let bulkReturned = 0;
+  let bulkError = null;
+  if (bulkTop > 0 && refs.size < keys.length) {
+    try {
+      const rows = await readWithRetry(() => get(client, "AnimalMilkSetting", ["Key", "Animal"], [], bulkTop), attempts, backoffMs);
+      bulkReturned = rows.length;
+      const seen = new Map();
+      for (const o of rows) {
+        const k = val(o, "Key");
+        if (!k) continue;
+        const a = val(o, "Animal");
+        seen.set(String(k), seen.has(String(k)) && seen.get(String(k)) !== a ? Symbol.for("conflict") : a);
+      }
+      for (const [k, a] of seen) {
+        if (!keySet.has(k)) {
+          // the key list did not have it: that list was not the whole table
+          if (keysComplete) incomplete(`AnimalMilkSetting ${k} grąžintas su Animal, bet jo nebuvo raktų sąraše.`);
+          keySet.add(k);
+          keys.push(k);
+        }
+        if (a === Symbol.for("conflict")) continue; // resolved by Key below
+        if (!refs.has(k)) refs.set(k, { ...animalRef(a), via: "bulk" });
+      }
+    } catch (err) {
+      bulkError = errText(err);
+      warnings.push(`AnimalMilkSetting [Key, Animal] top ${bulkTop}: ${bulkError} — visi raktai skaitomi po vieną.`);
     }
   }
+
+  // 3. SortCow only
+  let actionsRaw = null;
+  let otherTypes = 0;
+  let sortcowRead = "bulk";
+  let sortcowReturned = 0;
+  try {
+    actionsRaw = await readWithRetry(() => get(client, ACTION_OBJECT, ACTION_READ_PROPS, [{ name: "ActionType", value: "SortCow" }], maxRows), attempts, backoffMs);
+    sortcowReturned = actionsRaw.length;
+    if (capped(actionsRaw.length)) {
+      warnings.push(`AnimalActionSetting SortCow: grąžinta ${actionsRaw.length} (top ${maxRows}) — gali būti ne visi; skaitoma pagal melžimo nustatymą.`);
+      actionsRaw = null;
+    }
+  } catch (err) {
+    warnings.push(`AnimalActionSetting SortCow: ${errText(err)} — skaitoma pagal melžimo nustatymą.`);
+    actionsRaw = null;
+  }
+  let perKeyActionFailures = 0;
+  if (actionsRaw === null) {
+    // fallback: one read per milk setting (the filter verified by the writer), every type, SortCow kept
+    sortcowRead = "per_milk_setting";
+    if (!keysComplete) incomplete("SortCow sąrašas negali būti pilnas: nepilnas melžimo nustatymų raktų sąrašas.");
+    actionsRaw = [];
+    const perKeyTop = 100;
+    const results = await pool(keys, concurrency, async (k) => {
+      try {
+        const rows = await readWithRetry(() => get(client, ACTION_OBJECT, ACTION_READ_PROPS, [{ name: "AnimalMilkSetting", value: k }], perKeyTop), attempts, backoffMs);
+        if (rows.length >= perKeyTop) return { key: k, error: `grąžinta ${rows.length} (top ${perKeyTop})` };
+        return { key: k, rows: rows.filter((o) => String(val(o, "AnimalMilkSetting") ?? "") === k) };
+      } catch (err) {
+        return { key: k, error: errText(err) };
+      }
+    });
+    for (const r of results) {
+      if (r.error) {
+        perKeyActionFailures += 1;
+        if (perKeyActionFailures <= 20) errors.push(`AnimalActionSetting (AnimalMilkSetting ${r.key}): ${r.error}`);
+      } else actionsRaw.push(...r.rows);
+    }
+    if (perKeyActionFailures > 0) incomplete(`SortCow nenuskaityti ${perKeyActionFailures} melžimo nustatymams.`);
+    sortcowReturned = actionsRaw.length;
+  }
+  const actions = actionsRaw.map(actionSummary).filter((a) => a.key && a.action_type === "SortCow");
+  otherTypes = actionsRaw.length - actions.length;
+  const byKey = new Map();
+  for (const a of actions) byKey.set(a.key, a); // the same action twice (fallback overlap) counts once
+
+  // 2b. every key not answered yet — by Key, a few at a time; SortCow references outside the key list as well
+  const referenced = new Set([...byKey.values()].map((a) => a.milk_setting_key).filter(Boolean).map(String));
+  const outsideList = [...referenced].filter((k) => !keySet.has(k));
+  const todo = [...keys, ...outsideList].filter((k) => !refs.has(k));
+  const looked = await pool(todo, concurrency, async (k) => [k, await resolveMilkSetting(client, k, opts)]);
+  for (const [k, r] of looked) refs.set(k, { ...r, via: "key" });
+  const foundOutside = outsideList.filter((k) => refs.get(k)?.status !== "absent" && refs.get(k)?.status !== "error");
+  if (foundOutside.length) incomplete(`AnimalMilkSetting raktų sąrašas buvo nepilnas (${foundOutside.length} rasta tik pagal raktą).`);
+
+  if (cache) for (const [k, r] of refs) if (r.via !== "cache" && !UNRESOLVED.has(r.status)) cache.set(k, { status: r.status, animal_guid: r.animal_guid ?? null, error: r.error ?? null, at: now });
+
+  const failures = [...refs].filter(([, r]) => r.status === "error" || r.status === "ambiguous");
+  const failedReferenced = failures.filter(([k]) => referenced.has(k));
+  if (failedReferenced.length) incomplete(`${failedReferenced.length} SortCow įrašų melžimo nustatymo gyvulys nenuskaitytas (žr. unresolved).`);
+
+  const out = [];
+  const unresolvedActions = [];
+  for (const a of byKey.values()) {
+    const r = refs.get(String(a.milk_setting_key)) ?? { status: a.milk_setting_key ? "error" : "no_animal", error: "nenuskaityta" };
+    const row = { ...a, animal_guid: r.status === "resolved" ? r.animal_guid : null, animal_ref: r.status };
+    (UNRESOLVED.has(r.status) ? unresolvedActions : out).push(row);
+  }
+
+  const count = (s, only) => [...refs].filter(([k, r]) => r.status === s && (!only || only.has(k))).length;
+  const perAnimal = new Map();
+  for (const r of refs.values()) if (r.animal_guid) perAnimal.set(r.animal_guid.toLowerCase(), (perAnimal.get(r.animal_guid.toLowerCase()) ?? 0) + 1);
 
   let sortAreas = [];
   try {
     sortAreas = (await get(client, "SortArea", ["Key", "SortAreaNumber", "SortAreaName"], [], 200))
       .map((o) => ({ key: val(o, "Key"), number: val(o, "SortAreaNumber"), name: val(o, "SortAreaName") })).filter((a) => a.key);
   } catch (err) {
-    errors.push(`SortArea: ${err.message}`);
+    warnings.push(`SortArea: ${errText(err)}`);
   }
 
   return {
     complete,
     errors,
+    warnings,
     stats: {
-      sortcow_returned: raw.length,
+      milk_setting_keys: keys.length,
+      milk_settings_resolved: count("resolved"),
+      milk_settings_without_animal: count("no_animal"),
+      milk_settings_invalid_animal: count("invalid"),
+      milk_settings_absent: count("absent"),
+      milk_settings_unresolved: failures.length,
+      milk_settings_unresolved_used_by_sortcow: failedReferenced.length,
+      milk_settings_from_bulk: [...refs.values()].filter((r) => r.via === "bulk").length,
+      milk_settings_from_cache: fromCache,
+      milk_settings_read_by_key: todo.length,
+      milk_settings_found_outside_key_list: foundOutside.length,
+      milk_bulk_top: bulkTop,
+      milk_bulk_returned: bulkReturned,
+      milk_bulk_failed: bulkError ? 1 : 0,
+      sortcow_actions: byKey.size,
+      sortcow_returned: sortcowReturned,
+      sortcow_read_per_milk_setting: sortcowRead === "bulk" ? 0 : 1,
+      sortcow_read_failures: perKeyActionFailures,
       other_action_types_dropped: otherTypes,
-      milk_settings_returned: milkRaw.length,
-      milk_settings_found_by_key: refsFound,
-      milk_settings_absent: refsAbsent.length,
+      sortcow_with_animal: out.filter((a) => a.animal_guid).length,
       animals_with_several_milk_settings: [...perAnimal.values()].filter((n) => n > 1).length,
+      gateway_read_errors: failures.filter(([, r]) => r.status === "error").length + perKeyActionFailures,
       top: maxRows,
     },
-    actions: actions.map((a) => ({ ...a, animal_guid: guidByKey.get(String(a.milk_setting_key)) ?? null })),
+    // first 50 unresolved keys with their Gateway error (all are counted in stats)
+    unresolved: failures.slice(0, 50).map(([k, r]) => ({ key: k, status: r.status, error: r.error ?? null, used_by_sortcow: referenced.has(k) })),
+    actions: out,
+    // SortCow rows whose animal could not be read: GVET keeps the animal it already had for them (0050)
+    actions_unresolved: unresolvedActions,
     sort_areas: sortAreas,
   };
 }
 
-export async function runCmsLive(client) {
-  const state = await readLiveState(client);
+const milkCache = new Map();
+
+/** @param {{ useCache?: boolean }} [opts] continuous mode reuses Key -> Animal answers for 24 h; `npm run cms:live` reads everything. */
+export async function runCmsLive(client, { useCache = false } = {}) {
+  const state = await readLiveState(client, { cache: useCache ? milkCache : null });
+  log.info(`DelPro CMS skaitymas: ${JSON.stringify({ complete: state.complete, ...state.stats })}`);
+  for (const u of state.unresolved) log.warn(`AnimalMilkSetting ${u.key}: ${u.status}${u.error ? ` — ${u.error}` : ""}${u.used_by_sortcow ? " (naudoja SortCow)" : ""}`);
   const res = await gvet.cmsLiveUpload({ worker_id: config.workerId, ...state });
   log.info(`DelPro CMS būsena → GVET: ${JSON.stringify(res)}`);
   return res;
+}
+
+/**
+ * `npm run cms:milk-diagnose` — read-only. Why does GetData AnimalMilkSetting [Key, Animal] fail between top `from` and `to`?
+ * Bisects the smallest failing `top`, checks the bulk order against the Key-only list, then reads the record at that
+ * position (and its neighbours) by Key and its Animal by ObjectGuid. Record-specific = that record fails alone too.
+ */
+export async function diagnoseMilkSettings(client, { from = 1000, to = 2000, maxRows = config.cmsLiveMaxRows } = {}) {
+  const bulk = async (top) => {
+    try {
+      return { ok: true, keys: (await get(client, "AnimalMilkSetting", ["Key", "Animal"], [], top)).map((o) => String(val(o, "Key"))) };
+    } catch (err) {
+      return { ok: false, error: errText(err) };
+    }
+  };
+  const keys = (await get(client, "AnimalMilkSetting", ["Key"], [], maxRows)).map((o) => String(val(o, "Key")));
+  const report = { milk_setting_keys: keys.length, from, to, steps: [] };
+  const lo0 = await bulk(from);
+  const hi0 = await bulk(to);
+  report.steps.push({ top: from, ok: lo0.ok, error: lo0.error ?? null }, { top: to, ok: hi0.ok, error: hi0.error ?? null });
+  if (!lo0.ok || hi0.ok) {
+    report.conclusion = !lo0.ok ? `Jau top ${from} nepavyksta — riba žemiau.` : `top ${to} šiuo metu pavyksta — klaida neatkartota.`;
+    return report;
+  }
+  let lo = from;
+  let hi = to;
+  let okKeys = lo0.keys;
+  while (hi - lo > 1) {
+    const mid = Math.floor((lo + hi) / 2);
+    const r = await bulk(mid);
+    report.steps.push({ top: mid, ok: r.ok, error: r.error ?? null });
+    if (r.ok) {
+      lo = mid;
+      okKeys = r.keys;
+    } else hi = mid;
+  }
+  report.last_ok_top = lo;
+  report.first_failing_top = hi;
+  report.order_matches_key_list = okKeys.every((k, i) => k === keys[i]);
+  const candidate = report.order_matches_key_list ? keys[hi - 1] : null;
+  report.candidate_key = candidate;
+  if (candidate) {
+    report.records = [];
+    for (const k of keys.slice(Math.max(0, hi - 3), hi + 2)) {
+      const r = await resolveMilkSetting(client, k, { attempts: 1 });
+      let animal = null;
+      if (r.status === "resolved") {
+        try {
+          const a = await get(client, "Animal", ["ObjectGuid", "Number"], [{ name: "ObjectGuid", value: r.animal_guid }], 2);
+          animal = a.length ? { found: true, number: val(a[0], "Number") } : { found: false };
+        } catch (err) {
+          animal = { error: errText(err) };
+        }
+      }
+      report.records.push({ key: k, position: keys.indexOf(k) + 1, ...r, animal });
+    }
+    const c = report.records.find((x) => x.key === candidate);
+    report.conclusion =
+      c?.status === "error"
+        ? `Įrašas ${candidate} klaidingas ir skaitomas atskirai — konkretaus įrašo problema.`
+        : c?.animal && c.animal.found === false
+          ? `Įrašo ${candidate} Animal nurodo gyvulį, kurio DelPro nebėra — tikėtina, kad būtent jis lūžta bendrame skaityme.`
+          : `Įrašas ${candidate} atskirai skaitomas gerai — tikėtina, kad tai bendro skaitymo dydžio problema.`;
+  } else {
+    report.conclusion = "Bendro skaitymo tvarka nesutampa su raktų sąrašu — konkretaus įrašo nustatyti negalima; visi raktai skaitomi po vieną.";
+  }
+  return report;
 }
 
 /** Cheap read-only Gateway check for the activation panel (one SortArea row). */

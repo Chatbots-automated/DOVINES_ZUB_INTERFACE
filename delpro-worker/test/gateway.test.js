@@ -351,3 +351,8 @@ test("Animal ids carry the ORN; a rejected ORN property falls back to Number onl
   assert.equal(f.ornError, "Unknown property OfficialRegNo");
   assert.deepEqual(f.animals, [{ object_guid: "f3d9f5df-f72f-4659-8d25-66a02cf583eb", number: "337", orn: null }]);
 });
+
+test("GetData answering <Error> (DelPro's own failure) is a clear GETDATA_ERROR, not 'nėra ddmData'", () => {
+  const xml = '<Error type="GetData" error="System.NullReferenceException">Object reference not set to an instance of an object.</Error>';
+  assert.throws(() => parseDdmData(xml), (err) => err.code === "GETDATA_ERROR" && /NullReferenceException — Object reference not set/.test(err.message));
+});

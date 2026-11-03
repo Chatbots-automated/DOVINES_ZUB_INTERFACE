@@ -2670,6 +2670,38 @@ do $$ begin
   if (select status from cms_separation_jobs where batch_id = current_setting('t.cms49')::uuid) <> 'success' then raise exception 'job must stay success (not re-queued)'; end if;
   if (select count(*) from cms_live_action_settings where removed_at is not null and action_key = '11981') > 0 then raise exception 'incomplete scan must not remove'; end if;
   if (select setting_value::jsonb->'unmatched_reasons' from system_settings where setting_key = 'cms_live_last_refresh')
-     <> '{"animal_inactive_in_gvet":1,"animal_not_in_gvet":1,"milk_setting_without_animal":1}'::jsonb then raise exception 'unmatched reasons wrong'; end if;
+     <> '{"animal_inactive_in_gvet":1,"animal_not_in_gvet":1,"milk_setting_without_animal":1,"milk_setting_absent":0,"animal_reference_invalid":0,"milk_setting_unresolved":0}'::jsonb
+     then raise exception 'unmatched reasons wrong'; end if;
 end $$;
 select 'assert' as step, '0049 CMS: emergency stop, admin enable, destination gate, single claim, disabled-in-DelPro visible, reasons, no removal on incomplete' as what;
+
+-- ---------------------------------------------------------------------------------------------------------------------
+-- 0050. CMS live read with unreadable milk settings: the row's DelPro state is updated, the animal GVET already had is
+-- KEPT, nothing is removed (even if the worker wrongly said complete), reasons per answer type.
+set role service_role;
+select 'cms_live50' as step, r->'complete' as complete, r->'removed' as removed, r->'unmatched_reasons' as reasons from (select cms_live_upload('{"complete":true,
+  "actions":[
+    {"key":"50001","milk_setting_key":"777","animal_guid":"c0000000-0000-4000-8000-000000000010","animal_ref":"resolved","action_type":"SortCow","active":false,"sessions":[1]},
+    {"key":"50005","milk_setting_key":"781","animal_guid":null,"animal_ref":"absent","action_type":"SortCow","active":true,"sessions":[1]},
+    {"key":"50006","milk_setting_key":"782","animal_guid":null,"animal_ref":"invalid","action_type":"SortCow","active":true,"sessions":[1]}],
+  "actions_unresolved":[
+    {"key":"50004","milk_setting_key":"780","animal_guid":null,"animal_ref":"error","action_type":"SortCow","active":false,"sessions":[2]}],
+  "warnings":["AnimalMilkSetting [Key, Animal] top 1000: NullReferenceException"],
+  "unresolved":[{"key":"780","status":"error","error":"System.NullReferenceException","used_by_sortcow":true}]}'::jsonb) as r) x;
+reset role;
+do $$ declare l record; v jsonb; begin
+  select * into l from cms_live_action_settings where action_key = '50004';
+  if l.animal_guid is distinct from 'c0000000-0000-4000-8000-000000000011'::uuid or l.animal_id is null then raise exception 'unresolved row must keep its animal'; end if;
+  if l.active is not false or l.sessions <> array[2]::smallint[] then raise exception 'unresolved row must still get its DelPro state'; end if;
+  if (select count(*) from cms_live_action_settings where removed_at is not null and action_key in ('50002', '50003', '11981')) > 0 then raise exception 'unresolved rows: nothing may be removed'; end if;
+  v := (select setting_value::jsonb from system_settings where setting_key = 'cms_live_last_refresh');
+  if (v->>'complete')::boolean then raise exception 'unresolved rows: never complete'; end if;
+  if v->'unmatched_reasons' <> '{"animal_inactive_in_gvet":0,"animal_not_in_gvet":0,"milk_setting_without_animal":0,"milk_setting_absent":1,"animal_reference_invalid":1,"milk_setting_unresolved":1}'::jsonb
+    then raise exception 'reasons wrong: %', v->'unmatched_reasons'; end if;
+  if jsonb_array_length(v->'unresolved') <> 1 or jsonb_array_length(v->'warnings') <> 1 then raise exception 'unresolved keys / warnings must be stored'; end if;
+end $$;
+-- an old (0.2.0) worker payload still works as in 0049
+set role service_role;
+select 'cms_live50_old' as step, cms_live_upload('{"complete":false,"actions":[{"key":"50002","milk_setting_key":"778","animal_guid":null,"action_type":"SortCow","active":true,"sessions":[1]}]}'::jsonb)->'unmatched_reasons' as reasons;
+reset role;
+select 'assert' as step, '0050 CMS: unreadable milk setting keeps the animal, no removal, reasons by answer type' as what;

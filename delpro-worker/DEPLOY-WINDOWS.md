@@ -473,6 +473,46 @@ Turn on `CMS_OUTBOUND_MODE=gateway` in `.env` only after the destination check; 
 **Emergency stop**: GVET *Avarinis stabdymas* (any staff member) or `-Action cms-off` on the PC. Either stops NEW CMS writes only.
 Neither — nor stopping the whole worker — cancels separations already created in DelPro: disable those in DelPro itself.
 
+## 13. CMS live read fix (0050, worker 0.3.0)
+
+DelPro 10.9 on this farm answers `GetData AnimalMilkSetting [Key, Animal]` with `System.NullReferenceException` above ~1000 rows
+(worker 0.2.0 then failed with *Gateway rezultatas nėra ddmData*). 0.3.0 reads the keys alone (`[Key]`), maps at most 1000 in one
+read and every other key by `Key` (3 at a time, each read tried twice), reads SortCow with the `ActionType` filter and falls back to
+one read per milk setting if that read fails or reaches `top`. Writes are unchanged.
+
+1. Developer: apply `supabase/migrations/0050_cms_live_unresolved.sql` (after a backup) **before** the worker upgrade. Nothing else
+   changes in the database; an unreadable milk setting then keeps the animal GVET already has for that SortCow row.
+2. Farm PC, PowerShell as Administrator (keeps `.env`, `treatment-model.json`, `logs\` and the existing task — it is only stopped
+   and started again):
+
+```powershell
+$zip = "$env:USERPROFILE\Downloads\delpro-worker-0050.zip"
+Unblock-File $zip
+$tmp = "$env:TEMP\gvet-worker-0050"; Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
+Expand-Archive $zip $tmp
+powershell -ExecutionPolicy Bypass -File "$tmp\delpro-worker\scripts\gvet-worker.ps1" -Action upgrade -Source "$tmp\delpro-worker" -Dir C:\GVET\delpro-worker
+```
+
+   If it says *A worker is still running*, add `-StopRunning`. If it says *No task yet*, run `-Action install` (§12).
+3. Verify (read-only; takes a minute or two — ~2500 single reads):
+
+```powershell
+Set-Location C:\GVET\delpro-worker
+npm.cmd run cms:live; "exit code: $LASTEXITCODE"
+```
+
+   The first log line `DelPro CMS skaitymas: {...}` has `milk_setting_keys` (≈3478), `milk_settings_resolved`,
+   `milk_settings_unresolved`, `sortcow_actions`, `gateway_read_errors`; then `"complete":true`, `matched`, `unmatched_reasons`, exit 0.
+   Exit 2 = incomplete: each unreadable key is logged as `WARN AnimalMilkSetting <key>: error — …`; GVET keeps the earlier state.
+4. Optional, read-only — which record (if any) breaks the big read:
+
+```powershell
+npm.cmd run cms:milk-diagnose
+```
+
+   Bisects the failing `top` between 1000 and 2000, reads the record at that position (and neighbours) by Key and its Animal, and
+   saves `discovery\cms-milk-diagnose-*.json` with a one-line conclusion (record-specific vs bulk size).
+
 ## Not enabled by this guide
 
 - **Catalog writes** need the farm's agreement, then `CATALOG_WRITE_ENABLED=true`, the GVET switch, and a validated test record

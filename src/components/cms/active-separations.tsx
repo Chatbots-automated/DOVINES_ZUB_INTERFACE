@@ -80,10 +80,31 @@ export function CmsActiveSeparations({
         {(refresh?.errors ?? []).length > 0 && <p className="w-full text-[12px] text-danger">{refresh!.errors!.join(" ")}</p>}
         {reasons && (refresh?.unmatched_animals ?? 0) > 0 && (
           <p className="w-full text-[12px] text-text-muted">
-            Be GVET gyvulio {refresh!.unmatched_animals}: gyvulys DelPro sąraše nerastas {reasons.animal_not_in_gvet ?? 0} (dažniausiai išbrokuoti / parduoti), melžimo
-            nustatymas be gyvulio {reasons.milk_setting_without_animal ?? 0}, gyvulys GVET neaktyvus {reasons.animal_inactive_in_gvet ?? 0}.
+            Be GVET gyvulio {refresh!.unmatched_animals}:{" "}
+            {(
+              [
+                ["animal_not_in_gvet", "DelPro gyvulio nėra GVET (dažniausiai išbrokuoti / parduoti)"],
+                ["animal_inactive_in_gvet", "gyvulys GVET neaktyvus"],
+                ["milk_setting_without_animal", "melžimo nustatymas be gyvulio"],
+                ["milk_setting_absent", "melžimo nustatymo DelPro nėra"],
+                ["animal_reference_invalid", "netinkama gyvulio nuoroda"],
+                ["milk_setting_unresolved", "gyvulio nepavyko nuskaityti (paliktas ankstesnis)"],
+              ] as const
+            )
+              .filter(([k]) => (reasons[k] ?? 0) > 0)
+              .map(([k, label]) => `${label} ${reasons[k]}`)
+              .join(", ")}
+            .
           </p>
         )}
+        {refresh?.stats?.milk_setting_keys != null && (
+          <p className="w-full text-[12px] text-text-muted">
+            Melžimo nustatymų DelPro {refresh.stats.milk_setting_keys}, gyvulys nustatytas {refresh.stats.milk_settings_resolved ?? 0}, nenuskaityta{" "}
+            {refresh.stats.milk_settings_unresolved ?? 0}; Gateway skaitymo klaidų {refresh.stats.gateway_read_errors ?? 0}.
+            {(refresh.unresolved ?? []).length > 0 && ` Nenuskaityti raktai: ${refresh.unresolved!.slice(0, 10).map((u) => u.key).join(", ")}${refresh.unresolved!.length > 10 ? "…" : ""}.`}
+          </p>
+        )}
+        {(refresh?.warnings ?? []).length > 0 && <p className="w-full text-[12px] text-warning">{refresh!.warnings!.join(" ")}</p>}
         <div className="flex w-full flex-wrap gap-1">
           {(
             [

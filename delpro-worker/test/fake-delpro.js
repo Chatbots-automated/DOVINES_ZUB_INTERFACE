@@ -9,7 +9,9 @@ const KEY = { Diagnosis: "Code", Drug: "Code", Treatment: "Code", DrugParameters
   AnimalMilkSetting: "Key", AnimalActionSetting: "Key", SortArea: "Key" };
 const unescape = (s) => s.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, "&");
 
-export function fakeDelpro({ onCreate, timeoutAfterCreate = 0, hideFromBulk = null } = {}) {
+// failGetData({ name, props, where, top, rows }) -> truthy = answer like DelPro 10.9 does when GetData breaks inside:
+// <Error type="GetData" error="System.NullReferenceException">…</Error> (seen on the farm for big AnimalMilkSetting reads).
+export function fakeDelpro({ onCreate, timeoutAfterCreate = 0, hideFromBulk = null, failGetData = null } = {}) {
   const db = {};
   const calls = [];
   let seq = 1000;
@@ -27,7 +29,11 @@ export function fakeDelpro({ onCreate, timeoutAfterCreate = 0, hideFromBulk = nu
       for (const [, k, v] of req.matchAll(/<equal name="(\w+)">([^<]*)<\/equal>/g)) found = found.filter((r) => String(r[k] ?? "") === unescape(v));
       const top = Number(req.match(/<object name="\w+" top="(\d+)"/)?.[1] ?? 0);
       if (top > 0) found = found.slice(0, top);
-      if (hideFromBulk && !/<where>/.test(req)) found = found.filter((r) => !hideFromBulk(name, r));
+      if (hideFromBulk && !/<where>/.test(req)) found = found.filter((r) => !hideFromBulk(name, r, props));
+      const where = Object.fromEntries([...req.matchAll(/<equal name="(\w+)">([^<]*)<\/equal>/g)].map(([, k, v]) => [k, unescape(v)]));
+      if (failGetData?.({ name, props, where, top, rows: found })) {
+        return '<Error type="GetData" error="System.NullReferenceException">Object reference not set to an instance of an object.</Error>';
+      }
       const objs = found
         .map((r) => `<object name="${name}">${props.map((p) => (r[p] == null || r[p] === "" ? `<property name="${p}" />` : `<property name="${p}">${escapeXml(r[p])}</property>`)).join("")}</object>`)
         .join("");

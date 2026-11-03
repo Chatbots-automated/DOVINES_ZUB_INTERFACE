@@ -127,6 +127,13 @@ GetData each (`CMS_LIVE_MAX_ROWS`, no paging exists) — complete only when neit
 milk setting was found only by key; exits 2 otherwise. Install / repair / status / upgrade: `scripts\gvet-worker.ps1` (§12).
 One continuous worker per folder (`logs\worker.lock`).
 
+0050 (worker 0.3.0): `GetData AnimalMilkSetting [Key, Animal]` breaks above ~1000 rows on the farm (`System.NullReferenceException`,
+shown as `GETDATA_ERROR`). The live read now takes the keys alone, maps ≤ `CMS_LIVE_MILK_BULK_TOP` (1000) in one read and the rest
+by Key (`CMS_LIVE_CONCURRENCY`, `CMS_LIVE_READ_ATTEMPTS`); SortCow by the `ActionType` filter, per milk setting if that read fails or
+reaches `top`. complete = key list + SortCow read complete and every SortCow row's milk setting answered; keys no SortCow uses may
+fail (reported). Rows whose milk setting failed go as `actions_unresolved` — GVET keeps their animal. `npm run cms:milk-diagnose`
+(read-only) finds whether one record breaks the bulk read. The background loop reuses Key → Animal answers for 24 h; `cms:live` reads all.
+
 ## Treatment write-back
 
 Preferred order (see ../AGENTS.md): DelPro's own import function → UI automation → direct SQL. The shipped
