@@ -149,7 +149,8 @@ export default async function VeterinarijaDashboardPage({ searchParams }: { sear
   const diseaseRows: BarRow[] = (topDiseases ?? []).map((d) => ({ key: d.name, label: d.name, sublabel: `${d.animals} gyv.`, value: Number(d.n), valueLabel: String(d.n) }));
   const groupRows: BarRow[] = (byGroup ?? []).map((g) => ({ key: g.animal_group, label: g.animal_group, sublabel: `${g.animals} gyv.`, value: Number(g.n), valueLabel: String(g.n) }));
   const amrRows: BarRow[] = (antimicrobial ?? []).map((a) => ({
-    key: a.product_name,
+    // the RPC groups by name + active substance + unit, so the name alone is not unique
+    key: `${a.product_name}|${a.active_substance ?? ""}|${a.unit}`,
     label: a.product_name,
     sublabel: [a.active_substance, `${a.uses} kartai`].filter(Boolean).join(" · "),
     value: Number(a.qty),
