@@ -714,6 +714,19 @@ export interface Database {
         Update: Updatable<TreatmentTemplateItemRow>;
         Relationships: [];
       };
+      // 0057 — biocidų planas (written by create_biocide_usage_plan / confirm / skip / cancel RPCs)
+      biocide_usage_plans: {
+        Row: Row<BiocideUsagePlanRow>;
+        Insert: Insertable<BiocideUsagePlanRow, never>;
+        Update: Updatable<BiocideUsagePlanRow>;
+        Relationships: [];
+      };
+      biocide_planned_usages: {
+        Row: Row<BiocidePlannedUsageRow>;
+        Insert: Insertable<BiocidePlannedUsageRow, never>;
+        Update: Updatable<BiocidePlannedUsageRow>;
+        Relationships: [];
+      };
       // 0056 — masinis gydymas header (written by create_mass_treatment)
       mass_treatments: {
         Row: Row<MassTreatmentRow>;
@@ -936,6 +949,17 @@ export interface Database {
     };
 
     Views: {
+      // 0057 — one row per planned biocide day with its plan + product
+      vw_biocide_planned_usages: {
+        Row: Row<
+          Pick<BiocidePlannedUsageRow, "id" | "plan_id" | "use_date" | "qty" | "status" | "confirmed_qty" | "biocide_usage_id" | "decided_at"> &
+            Pick<BiocideUsagePlanRow, "product_id" | "purpose" | "work_scope" | "used_by_name" | "start_date" | "end_date" | "qty_per_day" | "cancelled_at"> & {
+              product_name: string;
+              unit: string;
+            }
+        >;
+        Relationships: [];
+      };
       // 0056 — one row per masinis gydymas with its DelPro job status counts
       vw_mass_treatments: {
         Row: Row<
@@ -1287,6 +1311,10 @@ export interface Database {
       generate_pazymejimo_nr: { Args: { p_vet_code: string }; Returns: string };
       create_biocide_usage: { Args: { p_data: Record<string, unknown> }; Returns: string };
       create_visit: { Args: { p_data: Record<string, unknown> }; Returns: string };
+      create_biocide_usage_plan: { Args: { p_data: Record<string, unknown> }; Returns: string };
+      confirm_biocide_planned_usages: { Args: { p_data: Record<string, unknown> }; Returns: number };
+      skip_biocide_planned_usages: { Args: { p_ids: string[] }; Returns: number };
+      cancel_biocide_usage_plan: { Args: { p_plan_id: string }; Returns: number };
       create_mass_treatment: { Args: { p_data: Record<string, unknown> }; Returns: { id: string; count: number } };
       delpro_approve_mass_treatment: { Args: { p_mass_treatment_id: string }; Returns: { waiting: number; approved: number } };
       create_treatment_with_visits: { Args: { p_data: Record<string, unknown>; p_visit_id?: string }; Returns: string };
@@ -1756,6 +1784,37 @@ type TreatmentMedicineScheduleRow = {
   frequency_per_day: number;
   course_days: number;
   created_at: string;
+};
+
+export type BiocidePlannedStatus = "planned" | "confirmed" | "skipped" | "cancelled";
+
+export type BiocideUsagePlanRow = {
+  id: string;
+  product_id: string;
+  qty_per_day: number;
+  unit: string | null;
+  start_date: string;
+  end_date: string;
+  purpose: string | null;
+  work_scope: string | null;
+  used_by_name: string | null;
+  notes: string | null;
+  created_by: string | null;
+  created_at: string;
+  cancelled_at: string | null;
+  cancelled_by: string | null;
+};
+
+export type BiocidePlannedUsageRow = {
+  id: string;
+  plan_id: string;
+  use_date: string;
+  qty: number;
+  status: BiocidePlannedStatus;
+  biocide_usage_id: string | null;
+  confirmed_qty: number | null;
+  decided_by: string | null;
+  decided_at: string | null;
 };
 
 /** One medicine line of a masinis gydymas, per animal, as saved (0056). */

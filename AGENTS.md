@@ -7,7 +7,7 @@
   §4.6, Priedas §1.5/§6.3) — flag it, don't build it.
 - **Added at the farm's request (2026-10), NOT in Priedas Nr. 1 — billed separately per Sutartis §2.5/§4.6:** Sėklinimas
   (0017), Vizitai (0018), Nagos (0019), Sinchronizacijos protokolai (0025), the bulk vaccination picker/plan, the extended Biocidai tab, VIC login + daily
-  animal import (0013/0014), CMS atskyrimai (0048, 2026-11), Masinis gydymas (0056, 2026-11). Don't extend them without confirming scope.
+  animal import (0013/0014), CMS atskyrimai (0048, 2026-11), Masinis gydymas (0056, 2026-11), Biocidų planas (0057, 2026-11). Don't extend them without confirming scope.
 - **Not in scope** (built in sibling projects, deliberately removed here):
   gydymų savikaina, VIC sync beyond the animal import, UNIFORM. Animals come from DelPro, not VIC.
   The farm asked (2026-10) for an Integracija → VIC tab that only **stores** VIC logins (0013). Since 0024 there are two, one row each in
@@ -123,6 +123,12 @@ not look for Žibartoniai's 0013–0021 VIC/UNIFORM history here.
   only on `administer_course_dose`. Hoof-care materials stay on `usage_items.hoof_finding_id`. Deleting an exam cascades to its treatment
   (guard refuses when any of it is on a nurašymo aktas). The hoof dialog keeps animal/date/vet and offers "Išsaugoti ir pridėti kitą
   nagą" / "Baigti apžiūrą" per hoof.
+- **Biocidų planas** (0057, farm's request, billed with the extended Biocidai tab): `create_biocide_usage_plan` = product + qty per day +
+  period (≤ 3 months, start ≥ today−31) → one `biocide_planned_usages` row per day. **Planning writes nothing off.**
+  `confirm_biocide_planned_usages({items:[{id,qty?}]})` turns each chosen day (today or earlier only, oldest first) into an ordinary
+  `create_biocide_usage()` dated by the PLANNED day — a forgotten backlog lands in the journal on its own dates; all chosen days are one
+  transaction (stock shortfall = none saved). `skip_…` = "Nenaudota" (nothing written off), `cancel_biocide_usage_plan` closes open days
+  only. UI: `BiocidePlanPanel` on Biocidai (all due days pre-ticked, qty editable per day), `NewBiocidePlanDialog`.
 - Usage without an animal (needles, gloves, boluses, hoof bath) is recorded in `general_usage`, either as a quantity or
   as a counted remaining stock (usage = non-expired stock − remaining, as the Excel did).
 - `write_off_act_usage_items.usage_item_id` is UNIQUE: a usage row can be written off by only one non-cancelled act.

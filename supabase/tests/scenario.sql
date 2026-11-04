@@ -2944,3 +2944,70 @@ do $$ declare t uuid; v_codes text[]; v_meds integer; begin
 end $$;
 update system_settings set setting_value = 'ui_script' where setting_key = 'delpro_write_channel';
 select 'assert' as step, '0056 mass treatment: atomic, per-animal treatment + DelPro job, gated bulk release, several medicines via gateway' as what;
+
+-- 0057. Biocidų planas: planned days, nothing written off until confirmed; backlog confirmed at once, each on its own date
+insert into products (id, name, category, unit) values ('57000000-0000-0000-0000-0000000000b1', 'PLAN Dezinfektantas', 'biocide', 'l');
+insert into batches (product_id, lot, expiry_date, received_qty) values ('57000000-0000-0000-0000-0000000000b1', 'PB1', '2030-01-01', 55);
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000b',false);
+select set_config('t.bplan', create_biocide_usage_plan(jsonb_build_object('product_id', '57000000-0000-0000-0000-0000000000b1', 'qty_per_day', 10,
+  'start_date', (fn_vilnius_today() - 5)::text, 'end_date', (fn_vilnius_today() + 6)::text, 'purpose', 'Nagų vonelė'))::text, false);
+do $$ declare blocked boolean := false; begin
+  begin perform create_biocide_usage_plan(jsonb_build_object('product_id', '36000000-0000-0000-0000-0000000000a1', 'qty_per_day', 1,
+    'start_date', fn_vilnius_today()::text, 'end_date', fn_vilnius_today()::text));
+  exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: biocide plan for a medicine'; end if;
+end $$;
+do $$ declare blocked boolean := false; begin
+  begin perform create_biocide_usage_plan(jsonb_build_object('product_id', '57000000-0000-0000-0000-0000000000b1', 'qty_per_day', 1,
+    'start_date', fn_vilnius_today()::text, 'end_date', (fn_vilnius_today() + 120)::text));
+  exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: biocide plan longer than 3 months'; end if;
+end $$;
+do $$ begin
+  if (select count(*) from biocide_planned_usages where plan_id = current_setting('t.bplan')::uuid and status = 'planned') <> 12 then
+    raise exception 'one planned row per day expected';
+  end if;
+  if exists (select 1 from biocide_usage where product_id = '57000000-0000-0000-0000-0000000000b1') then
+    raise exception 'planning must not write anything off';
+  end if;
+end $$;
+-- future day: refused
+do $$ declare blocked boolean := false; begin
+  begin perform confirm_biocide_planned_usages(jsonb_build_object('items', (select jsonb_agg(jsonb_build_object('id', id)) from biocide_planned_usages
+    where plan_id = current_setting('t.bplan')::uuid and use_date = fn_vilnius_today() + 1)));
+  exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: confirming a future day'; end if;
+end $$;
+-- 6 overdue days need 60 l but there are 55: nothing is written off
+do $$ declare blocked boolean := false; begin
+  begin perform confirm_biocide_planned_usages(jsonb_build_object('items', (select jsonb_agg(jsonb_build_object('id', id)) from biocide_planned_usages
+    where plan_id = current_setting('t.bplan')::uuid and use_date <= fn_vilnius_today())));
+  exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: backlog beyond stock'; end if;
+  if exists (select 1 from biocide_usage where product_id = '57000000-0000-0000-0000-0000000000b1') then raise exception 'shortfall must save no day'; end if;
+end $$;
+-- one day was not used, today only 5 l: the rest (4 × 10 + 5 = 45 l) confirmed at once
+select skip_biocide_planned_usages(array[(select id from biocide_planned_usages where plan_id = current_setting('t.bplan')::uuid and use_date = fn_vilnius_today() - 3)]);
+select 'bplan_confirm' as step, confirm_biocide_planned_usages(jsonb_build_object('items', (
+  select jsonb_agg(jsonb_build_object('id', id, 'qty', case when use_date = fn_vilnius_today() then 5 end))
+  from biocide_planned_usages where plan_id = current_setting('t.bplan')::uuid and use_date <= fn_vilnius_today() and status = 'planned'))) as confirmed;
+do $$ declare blocked boolean := false; begin
+  begin perform confirm_biocide_planned_usages(jsonb_build_object('items', (select jsonb_agg(jsonb_build_object('id', id)) from biocide_planned_usages
+    where plan_id = current_setting('t.bplan')::uuid and use_date = fn_vilnius_today())));
+  exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: confirming a day twice'; end if;
+end $$;
+select 'bplan_cancel' as step, cancel_biocide_usage_plan(current_setting('t.bplan')::uuid) as cancelled;
+reset role;
+do $$ begin
+  if (select array_agg(use_date - fn_vilnius_today() order by use_date) from vw_biocide_journal where name = 'PLAN Dezinfektantas') <> array[-5, -4, -2, -1, 0] then
+    raise exception 'journal must have each confirmed day on its own date: %', (select array_agg(use_date order by use_date) from vw_biocide_journal where name = 'PLAN Dezinfektantas');
+  end if;
+  if (select sum(qty) from biocide_usage where product_id = '57000000-0000-0000-0000-0000000000b1') <> 45 then raise exception 'confirmed qty must be written off'; end if;
+  if (select qty_left from batches where lot = 'PB1') <> 10 then raise exception 'FEFO must consume the stock'; end if;
+  if (select count(*) from biocide_planned_usages where plan_id = current_setting('t.bplan')::uuid and status = 'cancelled') <> 6 then
+    raise exception 'cancel must close only the open days';
+  end if;
+end $$;
+select 'assert' as step, '0057 biocide plan: nothing until confirmed, backlog at once on own dates, atomic, skip, cancel' as what;
