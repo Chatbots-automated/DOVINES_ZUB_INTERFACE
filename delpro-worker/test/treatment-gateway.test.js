@@ -287,3 +287,42 @@ test("read-back mismatch, or a diagnosis event without verified medicine, is nev
   assert.equal(j.status, "verification_failed");
   assert.deepEqual(j.actual_result.medication.usages[0].diffs.map((d) => d.property), ["Dosage"]);
 });
+
+test("masinis gydymas (0056) with two medicines: each animal is an ordinary job, both medicine records written + read back", async () => {
+  seedDelpro();
+  delpro.db.Drug[120] = { Code: "120", Name: "Meloxidyl", DefaultParameters: "67212" };
+  delpro.db.DrugParameters[67212] = { Key: "67212", UOM: "ml", DumpMilkDays: "0", MeatWithholdDays: "5" };
+  fs.writeFileSync(modelFile, JSON.stringify(MODEL));
+  await db.exec(`
+    insert into products (id, name, category, unit, withdrawal_days_milk, withdrawal_days_meat) values
+      ('43000000-0000-0000-0000-0000000000a3', 'Meloxidyl', 'medicines', 'ml', 0, 5)
+      on conflict do nothing;
+    insert into batches (product_id, lot, expiry_date, received_qty) values ('43000000-0000-0000-0000-0000000000a3', 'B3', '2030-01-01', 1000);
+  `);
+  await db.exec("set role service_role");
+  const run = (await db.query(`select delpro_catalog_begin_run('{"worker_id":"t"}'::jsonb)->>'run_id' as id`)).rows[0].id;
+  await db.query(`select delpro_catalog_upload($1::jsonb)`, [JSON.stringify({ run_id: run, object_type: "DrugParameters", records: [{ key: "67212", uom: "ml", dump_milk_days: 0, meat_withhold_days: 5 }] })]);
+  await db.query(`select delpro_catalog_upload($1::jsonb)`, [JSON.stringify({ run_id: run, object_type: "Drug", records: [{ code: "120", name: "Meloxidyl", active: true, default_parameters: "67212" }] })]);
+  await db.query(`select delpro_catalog_finish_run($1::jsonb)`, [JSON.stringify({ run_id: run, types: {} })]);
+  await db.exec(`select fn_delpro_catalog_create_link('Drug', '120', '43000000-0000-0000-0000-0000000000a3', 'manual', null)`);
+  await db.exec("reset role");
+
+  const mass = (await asUser(VET, `select create_mass_treatment(jsonb_build_object(
+    'animal_ids', (select jsonb_agg(id) from animals where tag_no = 'LT000044547452'),
+    'reg_date', '2026-10-30', 'diagnosis', 'Akių ligos', 'disease_id', '43000000-0000-0000-0000-0000000000d1',
+    'medications', jsonb_build_array(
+      jsonb_build_object('product_id', '43000000-0000-0000-0000-0000000000a1', 'qty', 20, 'unit', 'ml', 'frequency_per_day', 1, 'course_days', 3),
+      jsonb_build_object('product_id', '43000000-0000-0000-0000-0000000000a3', 'qty', 5, 'unit', 'ml', 'frequency_per_day', 1, 'course_days', 1))))->>'id' as id`)).id;
+  const [{ id }] = await q(`select j.id from delpro_sync_jobs j join treatments t on t.id = j.treatment_id where t.mass_treatment_id = $1`, [mass]);
+  assert.deepEqual((await plan(id)).problems, []);
+
+  assert.equal(await idx.runOutbound(), 1);
+  const j = await job(id);
+  assert.deepEqual([j.status, j.verified, j.actual_result.medication.verified], ["success", true, true]);
+  const usages = Object.values(delpro.db.TestDrugUsage).filter((u) => u.HealthEvent === j.actual_result.object_guid);
+  assert.deepEqual(
+    usages.map((u) => [u.Drug, u.DrugParams, u.Dosage, u.Frequency, u.TreatCowDays]).sort(),
+    [["119", "67211", "20", "1", "3"], ["120", "67212", "5", "1", "1"]],
+  );
+  assert.equal(writes(), 3, "one event + two medicine records");
+});

@@ -7,8 +7,8 @@
   §4.6, Priedas §1.5/§6.3) — flag it, don't build it.
 - **Added at the farm's request (2026-10), NOT in Priedas Nr. 1 — billed separately per Sutartis §2.5/§4.6:** Sėklinimas
   (0017), Vizitai (0018), Nagos (0019), Sinchronizacijos protokolai (0025), the bulk vaccination picker/plan, the extended Biocidai tab, VIC login + daily
-  animal import (0013/0014), CMS atskyrimai (0048, 2026-11). Don't extend them without confirming scope.
-- **Not in scope** (built in sibling projects, deliberately removed here): masinis gydymas,
+  animal import (0013/0014), CMS atskyrimai (0048, 2026-11), Masinis gydymas (0056, 2026-11). Don't extend them without confirming scope.
+- **Not in scope** (built in sibling projects, deliberately removed here):
   gydymų savikaina, VIC sync beyond the animal import, UNIFORM. Animals come from DelPro, not VIC.
   The farm asked (2026-10) for an Integracija → VIC tab that only **stores** VIC logins (0013). Since 0024 there are two, one row each in
   `vic_credentials` keyed by `kind`: `seklinimas` (Sėklinimo prisijungimai — the original login) and `veterinaras`
@@ -73,6 +73,14 @@ not look for Žibartoniai's 0013–0021 VIC/UNIFORM history here.
   `create_treatment_with_visits(data, visit?)`: from a visit card it links that visit, on its own it also records a finished (`baigtas`)
   day-1 visit. Deleting a treatment removes its planned course visits. Not mirrored yet: standalone vaccinations, inseminations,
   hoof exams (only when done from a visit card).
+- **Masinis gydymas** (0056, 2026-11, billed separately; pattern from Oksana's `BulkTreatment`): `/veterinarija/masinis-gydymas`.
+  `create_mass_treatment(jsonb)` = `create_treatment_with_visits()` once per animal in ONE transaction (any stock shortfall saves
+  nothing), header in `mass_treatments`, `treatments.mass_treatment_id` links them. gydymas / profilaktika only, gydymas needs a disease,
+  no course days, ≤2000 animals; the dose is per animal. Each gydymas gets its **own ordinary** `delpro_sync_jobs` row via the 0006
+  trigger — the worker sees normal single-animal jobs, so the farm PC needs nothing new. "Siųsti į DelPro (N)" =
+  `delpro_approve_mass_treatment()` → `delpro_approve_jobs()` (same validation, 0045 admin gate). History = `vw_mass_treatments`.
+  Several medicines per treatment go to DelPro on the gateway channel (live since 0044; one usage record each — scenario 0056 + worker
+  test). Only the legacy `ui_script` channel blocks them (`multi_medicine`); the form warns only then.
 - **Profilaktika / Boliusai product types** (0026 enum + 0027 rules, farm's request): drugs like medicines — `fn_is_drug_category()`
   drives serija+galiojimas on pajamavimas, the vet drug journal and pack-based acts (keep `DRUG_CATEGORIES` in
   `src/lib/product-categories.ts` in sync). A profilaktika treatment may only use these two types

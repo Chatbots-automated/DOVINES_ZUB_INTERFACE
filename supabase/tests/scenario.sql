@@ -2840,3 +2840,107 @@ update insemination_records set pregnancy_confirmed = true where delpro_event_gu
 select 'ins_request' as step, delpro_insemination_request('{"tags":["LT0000INS00001"]}'::jsonb)->'requested' as requested;
 reset role;
 select 'assert' as step, '0053 DelPro inseminations: idempotent by event GUID, Vilnius date, failed read keeps data, import-only rows' as what;
+
+-- 0056. Masinis gydymas: N ordinary treatments in one transaction, one DelPro job each, bulk release via the queue rules
+insert into animals (tag_no, animal_no, active, source, delpro_object_guid) values
+  ('LT0000MAS00001', 'M1', true, 'delpro', 'e0000000-0000-4000-8000-000000000001'),
+  ('LT0000MAS00002', 'M2', true, 'delpro', 'e0000000-0000-4000-8000-000000000002'),
+  ('LT0000MAS00003', 'M3', false, 'delpro', null);
+insert into batches (product_id, lot, expiry_date, received_qty) values ('36000000-0000-0000-0000-0000000000a1', 'MAS1', '2030-01-01', 30);
+update system_settings set setting_value = 'true' where setting_key = 'delpro_admin_approval_required';
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000b',false);
+-- blocked: an inactive animal, gydymas without a disease, missing frequency, more stock than there is (rolls back everything)
+do $$ declare blocked boolean := false; begin
+  begin perform create_mass_treatment(jsonb_build_object('animal_ids', (select jsonb_agg(id) from animals where tag_no like 'LT0000MAS%'),
+    'reg_date', '2026-11-04', 'disease_id', '36000000-0000-0000-0000-0000000000d2',
+    'medications', jsonb_build_array(jsonb_build_object('product_id', '36000000-0000-0000-0000-0000000000a1', 'qty', 1, 'unit', 'ml', 'frequency_per_day', 1, 'course_days', 1))));
+  exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: mass treatment with an inactive animal'; end if;
+end $$;
+do $$ declare blocked boolean := false; begin
+  begin perform create_mass_treatment(jsonb_build_object('animal_ids', (select jsonb_agg(id) from animals where tag_no in ('LT0000MAS00001', 'LT0000MAS00002')),
+    'reg_date', '2026-11-04',
+    'medications', jsonb_build_array(jsonb_build_object('product_id', '36000000-0000-0000-0000-0000000000a1', 'qty', 1, 'unit', 'ml', 'frequency_per_day', 1, 'course_days', 1))));
+  exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: mass gydymas without a disease'; end if;
+end $$;
+do $$ declare blocked boolean := false; begin
+  begin perform create_mass_treatment(jsonb_build_object('animal_ids', (select jsonb_agg(id) from animals where tag_no in ('LT0000MAS00001', 'LT0000MAS00002')),
+    'reg_date', '2026-11-04', 'disease_id', '36000000-0000-0000-0000-0000000000d2',
+    'medications', jsonb_build_array(jsonb_build_object('product_id', '36000000-0000-0000-0000-0000000000a1', 'qty', 1, 'unit', 'ml'))));
+  exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: mass gydymas without frequency/duration'; end if;
+end $$;
+do $$ declare blocked boolean := false; v_before integer; begin
+  select count(*) into v_before from treatments;
+  begin perform create_mass_treatment(jsonb_build_object('animal_ids', (select jsonb_agg(id) from animals where tag_no in ('LT0000MAS00001', 'LT0000MAS00002')),
+    'reg_date', '2026-11-04', 'disease_id', '36000000-0000-0000-0000-0000000000d2',
+    'medications', jsonb_build_array(jsonb_build_object('product_id', '36000000-0000-0000-0000-0000000000a1', 'qty', 100000, 'unit', 'ml', 'frequency_per_day', 1, 'course_days', 1))));
+  exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: mass treatment beyond stock'; end if;
+  if (select count(*) from treatments) <> v_before then raise exception 'a failed mass treatment must leave nothing behind'; end if;
+end $$;
+select set_config('t.mass', (create_mass_treatment(jsonb_build_object(
+  'animal_ids', (select jsonb_agg(id) from animals where tag_no in ('LT0000MAS00001', 'LT0000MAS00002')),
+  'reg_date', '2026-11-04', 'diagnosis', 'Mastitas', 'disease_id', '36000000-0000-0000-0000-0000000000d2', 'vet_name', 'Dr. Mass',
+  'medications', jsonb_build_array(jsonb_build_object('product_id', '36000000-0000-0000-0000-0000000000a1', 'qty', 2, 'unit', 'ml',
+    'frequency_per_day', 1, 'course_days', 2))))->>'id'), false);
+do $$ declare blocked boolean := false; begin
+  -- the admin gate (0045) holds for a vet here too
+  begin perform delpro_approve_mass_treatment(current_setting('t.mass')::uuid);
+  exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: vet released gated mass treatment jobs'; end if;
+end $$;
+reset role;
+do $$ declare v jsonb; begin
+  if (select count(*) from treatments where mass_treatment_id = current_setting('t.mass')::uuid) <> 2 then raise exception 'one treatment per animal expected'; end if;
+  if (select count(*) from usage_items u join treatments t on t.id = u.treatment_id where t.mass_treatment_id = current_setting('t.mass')::uuid and u.qty = 2) <> 2 then
+    raise exception 'each animal must consume its own dose';
+  end if;
+  if (select count(*) from treatment_medicine_schedules s join treatments t on t.id = s.treatment_id
+      where t.mass_treatment_id = current_setting('t.mass')::uuid and s.frequency_per_day = 1 and s.course_days = 2) <> 2 then
+    raise exception 'frequency + duration must be stored per treatment';
+  end if;
+  if (select count(*) from delpro_sync_jobs j join treatments t on t.id = j.treatment_id
+      where t.mass_treatment_id = current_setting('t.mass')::uuid and j.status = 'pending_approval' and j.admin_approval_required) <> 2 then
+    raise exception 'each treatment must get its own gated DelPro job';
+  end if;
+  select delpro_status_counts into v from vw_mass_treatments where id = current_setting('t.mass')::uuid;
+  if (v->>'pending_approval')::int <> 2 then raise exception 'view must count waiting jobs: %', v; end if;
+end $$;
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000a',false);
+select 'mass_release' as step, delpro_approve_mass_treatment(current_setting('t.mass')::uuid) as result;
+do $$ begin
+  if (select delpro_approve_mass_treatment(current_setting('t.mass')::uuid)->>'waiting') <> '0' then raise exception 'second release must find nothing waiting'; end if;
+end $$;
+reset role;
+update system_settings set setting_value = 'false' where setting_key = 'delpro_admin_approval_required';
+-- several medicines in one mass treatment: the gateway channel (live since 0044) sends them all
+insert into products (id, name, category, unit, withdrawal_days_milk, withdrawal_days_meat) values
+  ('56000000-0000-0000-0000-0000000000a2', 'MAS Meloksikamas', 'medicines', 'ml', 0, 5);
+insert into batches (product_id, lot, expiry_date, received_qty) values
+  ('56000000-0000-0000-0000-0000000000a2', 'MAS2', '2030-01-01', 50),
+  ('36000000-0000-0000-0000-0000000000a1', 'MAS3', '2030-01-01', 30);
+update system_settings set setting_value = 'gateway' where setting_key = 'delpro_write_channel';
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000b',false);
+select set_config('t.mass2', (create_mass_treatment(jsonb_build_object(
+  'animal_ids', (select jsonb_agg(id) from animals where tag_no in ('LT0000MAS00001', 'LT0000MAS00002')),
+  'reg_date', '2026-11-04', 'diagnosis', 'Mastitas', 'disease_id', '36000000-0000-0000-0000-0000000000d2',
+  'medications', jsonb_build_array(
+    jsonb_build_object('product_id', '36000000-0000-0000-0000-0000000000a1', 'qty', 2, 'unit', 'ml', 'frequency_per_day', 1, 'course_days', 3),
+    jsonb_build_object('product_id', '56000000-0000-0000-0000-0000000000a2', 'qty', 5, 'unit', 'ml', 'frequency_per_day', 1, 'course_days', 1))))->>'id'), false);
+reset role;
+do $$ declare t uuid; v_codes text[]; v_meds integer; begin
+  for t in select id from treatments where mass_treatment_id = current_setting('t.mass2')::uuid loop
+    select array_agg(p->>'code') into v_codes from jsonb_array_elements(fn_delpro_transfer_problems(t)) p;
+    if 'multi_medicine' = any (coalesce(v_codes, '{}')) then raise exception 'gateway must accept several medicines: %', v_codes; end if;
+    select jsonb_array_length(fn_delpro_treatment_plan((select id from delpro_sync_jobs where treatment_id = t))->'medicines') into v_meds;
+    if v_meds <> 2 then raise exception 'DelPro plan must carry both medicines, got %', v_meds; end if;
+    if (select count(*) from treatment_medicine_schedules where treatment_id = t) <> 2 then raise exception 'schedule per medicine expected'; end if;
+  end loop;
+end $$;
+update system_settings set setting_value = 'ui_script' where setting_key = 'delpro_write_channel';
+select 'assert' as step, '0056 mass treatment: atomic, per-animal treatment + DelPro job, gated bulk release, several medicines via gateway' as what;

@@ -289,6 +289,8 @@ export interface Database {
           visit_id: string | null;
           /** Set when the treatment was created by a nagų apžiūra finding that used a drug / planned a course (0030). */
           hoof_finding_id: string | null;
+          /** Set when the treatment was created by a masinis gydymas (0056). */
+          mass_treatment_id: string | null;
           withdrawal_until_milk: string | null;
           withdrawal_until_meat: string | null;
           created_by: string | null;
@@ -712,6 +714,13 @@ export interface Database {
         Update: Updatable<TreatmentTemplateItemRow>;
         Relationships: [];
       };
+      // 0056 — masinis gydymas header (written by create_mass_treatment)
+      mass_treatments: {
+        Row: Row<MassTreatmentRow>;
+        Insert: Insertable<MassTreatmentRow, never>;
+        Update: Updatable<MassTreatmentRow>;
+        Relationships: [];
+      };
       // 0046 — per-medicine frequency + duration of a treatment (written by create_treatment_with_visits)
       treatment_medicine_schedules: {
         Row: Row<TreatmentMedicineScheduleRow>;
@@ -927,6 +936,17 @@ export interface Database {
     };
 
     Views: {
+      // 0056 — one row per masinis gydymas with its DelPro job status counts
+      vw_mass_treatments: {
+        Row: Row<
+          MassTreatmentRow & {
+            disease_name: string | null;
+            treatment_count: number;
+            delpro_status_counts: Partial<Record<DelproSyncJobStatus, number>>;
+          }
+        >;
+        Relationships: [];
+      };
       stock_by_batch: {
         Row: Row<{
           id: string;
@@ -1267,6 +1287,8 @@ export interface Database {
       generate_pazymejimo_nr: { Args: { p_vet_code: string }; Returns: string };
       create_biocide_usage: { Args: { p_data: Record<string, unknown> }; Returns: string };
       create_visit: { Args: { p_data: Record<string, unknown> }; Returns: string };
+      create_mass_treatment: { Args: { p_data: Record<string, unknown> }; Returns: { id: string; count: number } };
+      delpro_approve_mass_treatment: { Args: { p_mass_treatment_id: string }; Returns: { waiting: number; approved: number } };
       create_treatment_with_visits: { Args: { p_data: Record<string, unknown>; p_visit_id?: string }; Returns: string };
       create_treatment_for_visit: { Args: { p_visit_id: string; p_data: Record<string, unknown> }; Returns: string };
       create_insemination_for_visit: { Args: { p_visit_id: string; p_data: Record<string, unknown> }; Returns: string };
@@ -1733,6 +1755,30 @@ type TreatmentMedicineScheduleRow = {
   product_id: string;
   frequency_per_day: number;
   course_days: number;
+  created_at: string;
+};
+
+/** One medicine line of a masinis gydymas, per animal, as saved (0056). */
+export type MassTreatmentMedication = {
+  product_id: string;
+  qty: number;
+  unit: string;
+  administration_route: string | null;
+  frequency_per_day?: number;
+  course_days?: number;
+};
+
+export type MassTreatmentRow = {
+  id: string;
+  reg_date: string;
+  procedure_type: "gydymas" | "profilaktika";
+  disease_id: string | null;
+  diagnosis: string | null;
+  vet_name: string | null;
+  notes: string | null;
+  medications: MassTreatmentMedication[];
+  animal_count: number;
+  created_by: string | null;
   created_at: string;
 };
 
