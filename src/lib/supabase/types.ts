@@ -437,6 +437,7 @@ export interface Database {
           animal_id: string;
           start_date: string;
           applied_by: string | null;
+          mass_application_id: string | null;
           created_by: string | null;
           created_at: string;
         }>;
@@ -727,6 +728,13 @@ export interface Database {
         Update: Updatable<BiocidePlannedUsageRow>;
         Relationships: [];
       };
+      // 0059 — sinchronizacija for many animals (written by apply_sync_protocol_mass)
+      sync_mass_applications: {
+        Row: Row<SyncMassApplicationRow>;
+        Insert: Insertable<SyncMassApplicationRow, never>;
+        Update: Updatable<SyncMassApplicationRow>;
+        Relationships: [];
+      };
       // 0056 — masinis gydymas header (written by create_mass_treatment)
       mass_treatments: {
         Row: Row<MassTreatmentRow>;
@@ -958,6 +966,17 @@ export interface Database {
               unit: string;
             }
         >;
+        Relationships: [];
+      };
+      // 0059 — Sinchronizacijos tab
+      vw_sync_applications: { Row: Row<SyncApplicationViewRow>; Relationships: [] };
+      vw_sync_open_steps: { Row: Row<SyncOpenStepRow>; Relationships: [] };
+      vw_sync_mass_applications: {
+        Row: Row<SyncMassApplicationRow & { active_count: number; finished_count: number; cancelled_count: number }>;
+        Relationships: [];
+      };
+      vw_sync_animal_flags: {
+        Row: Row<{ animal_id: string; open_protocol_name: string | null; last_insemination_date: string | null; last_pregnancy_confirmed: boolean | null }>;
         Relationships: [];
       };
       // 0056 — one row per masinis gydymas with its DelPro job status counts
@@ -1315,6 +1334,12 @@ export interface Database {
       confirm_biocide_planned_usages: { Args: { p_data: Record<string, unknown> }; Returns: number };
       skip_biocide_planned_usages: { Args: { p_ids: string[] }; Returns: number };
       cancel_biocide_usage_plan: { Args: { p_plan_id: string }; Returns: number };
+      // 0060 DelPro master
+      delpro_catalog_set_inbound_mode: { Args: { p_mode: string }; Returns: { ok: boolean; message: string; result: Record<string, unknown> | null } };
+      // 0059 Sinchronizacijos tab
+      apply_sync_protocol_mass: { Args: { p_data: Record<string, unknown> }; Returns: { mass_application_id: string; animals: number; visits: number } };
+      complete_sync_steps: { Args: { p_data: Record<string, unknown> }; Returns: { steps: number; treatments: number } };
+      cancel_sync_applications: { Args: { p_ids: string[] }; Returns: number };
       create_mass_treatment: { Args: { p_data: Record<string, unknown> }; Returns: { id: string; count: number } };
       delpro_approve_mass_treatment: { Args: { p_mass_treatment_id: string }; Returns: { waiting: number; approved: number } };
       create_treatment_with_visits: { Args: { p_data: Record<string, unknown>; p_visit_id?: string }; Returns: string };
@@ -1328,6 +1353,12 @@ export interface Database {
       };
       cancel_sync_application: { Args: { p_application_id: string }; Returns: number };
       receive_invoice: { Args: { p_data: Record<string, unknown> }; Returns: { invoice_id: string | null; batches: number; total: number } };
+      // 0058 Pajamavimas → Redagavimas
+      update_invoice: { Args: { p_data: Record<string, unknown> }; Returns: { invoice_id: string; lines: number; total: number } };
+      update_receipt_batch: { Args: { p_data: Record<string, unknown> }; Returns: string };
+      delete_receipt_batch: { Args: { p_batch_id: string }; Returns: undefined };
+      update_supplier: { Args: { p_data: Record<string, unknown> }; Returns: string };
+      receipt_edit_detail: { Args: { p_invoice_id?: string | null; p_batch_id?: string | null }; Returns: ReceiptEditDetail };
       delete_invoice: { Args: { p_invoice_id: string }; Returns: undefined };
       create_general_usage: { Args: { p_data: Record<string, unknown> }; Returns: number };
       vic_get_settings: {
@@ -2243,4 +2274,101 @@ export type DelproTemplateDrugUsage = {
   application_method: string | null;
   dump_milk_days: number | null;
   meat_withhold_days: number | null;
+};
+
+// 0058 receipt_edit_detail()
+export type ReceiptEditLine = {
+  batch_id: string;
+  item_id: string | null;
+  line_no: number | null;
+  product_id: string;
+  product_name: string;
+  product_unit: string;
+  product_category: string;
+  description: string | null;
+  sku: string | null;
+  lot: string | null;
+  expiry_date: string | null;
+  received_qty: number;
+  qty_left: number;
+  used_qty: number;
+  package_size: number | null;
+  package_count: number | null;
+  purchase_price: number | null;
+  line_total: number | null;
+  currency: string;
+  supplier_id: string | null;
+  received_at: string;
+  on_act: boolean;
+};
+export type ReceiptEditDetail = {
+  invoice: {
+    id: string;
+    invoice_number: string | null;
+    invoice_date: string | null;
+    supplier_id: string | null;
+    supplier_name: string | null;
+    total_net: number | null;
+    total_vat: number | null;
+    total_gross: number | null;
+    currency: string;
+    pdf_filename: string | null;
+  } | null;
+  lines: ReceiptEditLine[];
+};
+
+// 0059 Sinchronizacijos tab
+export type SyncMassApplicationRow = {
+  id: string;
+  protocol_id: string | null;
+  protocol_name: string;
+  start_date: string;
+  start_time: string;
+  vet_name: string | null;
+  notes: string | null;
+  animal_count: number;
+  created_by: string | null;
+  created_at: string;
+};
+export type SyncApplicationStatus = "aktyvus" | "baigtas" | "nutrauktas";
+export type SyncApplicationViewRow = {
+  id: string;
+  protocol_id: string | null;
+  protocol_name: string;
+  animal_id: string;
+  animal_no: string | null;
+  tag_no: string;
+  group_name: string | null;
+  start_date: string;
+  applied_by: string | null;
+  mass_application_id: string | null;
+  created_at: string;
+  steps_total: number;
+  steps_done: number;
+  steps_cancelled: number;
+  steps_open: number;
+  next_step_at: string | null;
+  next_step_title: string | null;
+  last_step_at: string | null;
+  status: SyncApplicationStatus;
+};
+export type SyncOpenStepRow = {
+  visit_id: string;
+  visit_datetime: string;
+  step_date: string;
+  status: VisitStatus;
+  procedures: string[];
+  sync_step_title: string | null;
+  sync_step_no: number | null;
+  sync_step_total: number | null;
+  planned_medications: SyncStepMedication[];
+  vet_name: string | null;
+  notes: string | null;
+  animal_id: string;
+  animal_no: string | null;
+  tag_no: string;
+  group_name: string | null;
+  application_id: string;
+  protocol_name: string;
+  mass_application_id: string | null;
 };

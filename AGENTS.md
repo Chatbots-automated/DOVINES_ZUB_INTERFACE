@@ -7,7 +7,8 @@
   §4.6, Priedas §1.5/§6.3) — flag it, don't build it.
 - **Added at the farm's request (2026-10), NOT in Priedas Nr. 1 — billed separately per Sutartis §2.5/§4.6:** Sėklinimas
   (0017), Vizitai (0018), Nagos (0019), Sinchronizacijos protokolai (0025), the bulk vaccination picker/plan, the extended Biocidai tab, VIC login + daily
-  animal import (0013/0014), CMS atskyrimai (0048, 2026-11), Masinis gydymas (0056, 2026-11), Biocidų planas (0057, 2026-11). Don't extend them without confirming scope.
+  animal import (0013/0014), CMS atskyrimai (0048, 2026-11), Masinis gydymas (0056, 2026-11), Biocidų planas (0057, 2026-11), Pajamavimas → Redagavimas (0058, 2026-11),
+  the Sinchronizacijos tab (0059, 2026-11). Don't extend them without confirming scope.
 - **Not in scope** (built in sibling projects, deliberately removed here):
   gydymų savikaina, VIC sync beyond the animal import, UNIFORM. Animals come from DelPro, not VIC.
   The farm asked (2026-10) for an Integracija → VIC tab that only **stores** VIC logins (0013). Since 0024 there are two, one row each in
@@ -81,6 +82,13 @@ not look for Žibartoniai's 0013–0021 VIC/UNIFORM history here.
   `delpro_approve_mass_treatment()` → `delpro_approve_jobs()` (same validation, 0045 admin gate). History = `vw_mass_treatments`.
   Several medicines per treatment go to DelPro on the gateway channel (live since 0044; one usage record each — scenario 0056 + worker
   test). Only the legacy `ui_script` channel blocks them (`multi_medicine`); the form warns only then.
+- **Sinchronizacijos tab** (0059, farm's request, billed with 0025): `/veterinarija/sinchronizacijos` — Nauja sinchronizacija (animal picker
+  like Masinis gydymas + `SyncProtocolPicker`), Žingsniai, Vykdomi ir istorija, Protokolai (same `ProtocolDialog`). `apply_sync_protocol_mass(jsonb)`
+  = `apply_sync_protocol()` per animal in ONE transaction (any busy animal refuses all; header `sync_mass_applications`,
+  `sync_protocol_applications.mass_application_id`); no stock. `complete_sync_steps({visit_ids})` records due steps (≤ today) on their planned
+  day: planned medicine → `create_treatment_with_visits(sinchronizacija, visit)` (FEFO, karencija, not DelPro), no medicine → `baigtas`;
+  sekinimas steps refused (semen is picked in the insemination dialog). `cancel_sync_applications(uuid[])`. Views: `vw_sync_applications`
+  (progress + status aktyvus/baigtas/nutrauktas), `vw_sync_open_steps`, `vw_sync_mass_applications`, `vw_sync_animal_flags`.
 - **Profilaktika / Boliusai product types** (0026 enum + 0027 rules, farm's request): drugs like medicines — `fn_is_drug_category()`
   drives serija+galiojimas on pajamavimas, the vet drug journal and pack-based acts (keep `DRUG_CATEGORIES` in
   `src/lib/product-categories.ts` in sync). A profilaktika treatment may only use these two types
@@ -94,7 +102,8 @@ not look for Žibartoniai's 0013–0021 VIC/UNIFORM history here.
   fields (0020: lactation/reproduction/milk/…) arrive through `upsert_animals_from_delpro` with coalesce-patch semantics.
 - Course karencija (0021) = **last dose date** + withdrawal days + 1 (was reg_date-based). **0 days = no karencija** (0028:
   `fn_withdrawal_until()` returns NULL, so a 0-day product like Bioestrovet-milk never sets a date; the MAX over a treatment's
-  products ignores it). UI mirror: `withdrawalUntil()` in `src/lib/treatments/planner.ts`. Keep both in sync. `products.subcategory_id`
+  products ignores it). **0060: karencija is live** — changing any withdrawal column of a product (Produktai or DelPro)
+  recomputes the stored `withdrawal_until_*` of every treatment / course / vaccination that used it (`trg_products_withdrawal_recalc`). UI mirror: `withdrawalUntil()` in `src/lib/treatments/planner.ts`. Keep both in sync. `products.subcategory_id`
   + `product_subcategories` (0023); `hoof_care` category lands on the medžiagos act.
 - `usage_items` has one source column per consumer (treatment, course dose, vaccination, biocide, general usage,
   insemination, hoof finding) with a single-source CHECK, and `vw_usage_items_detailed` exposes them all. A new
@@ -105,6 +114,10 @@ not look for Žibartoniai's 0013–0021 VIC/UNIFORM history here.
   `manual` appends to it. qty = pack size × pack count; `purchase_price` on a batch is **per unit** (line total ÷ qty).
   Medicines, vaccines and biocides require serija + non-expired galiojimo terminas (journals §2.8). `delete_invoice` is
   refused once any of the stock was used. The PDF parse webhook is called from the browser (`src/lib/invoice-parse-client.ts`).
+  **Redagavimas** (0058, Pajamavimas tab): `update_invoice(jsonb)` (header + lines + `removed_batch_ids`, one transaction),
+  `update_receipt_batch` / `delete_receipt_batch` (stock without an invoice), `update_supplier` (copies the name to `invoices.supplier_name`),
+  `receipt_edit_detail()` for the dialog. used = received_qty − qty_left: a new qty keeps it (never below), a used line can't change product
+  or be removed; lot/expiry/price of used stock may change (journals read live, generated acts keep their snapshot). UI → `/api/pajamavimas/edit`.
   Journals: `vw_vet_drug_journal` is medicines + vaccines only, dated by invoice date; biocide receipts are in
   `vw_biocide_receiving_journal`.
 - **Nurašymo aktai follow the farm's three Excel templates** (0012): `act_kind` `vaistai` (vaistai, biocidai),
@@ -184,8 +197,12 @@ not look for Žibartoniai's 0013–0021 VIC/UNIFORM history here.
   an exact normalized-name match is a `suggested_match` issue an admin confirms. `fn_delpro_catalog_reconcile()` recomputes
   `delpro_catalog_issues` (full, cheap) after every run and admin decision; per link it is a 3-way field compare against
   `synced_fields` (the last agreed values) → `field_difference` / `inbound_change` / `outbound_pending` / `conflict`. Applying a side
-  updates the base, so nothing echoes back. Withdrawal days + UOM + template lines are clinical: never applied automatically
-  (`delpro_catalog_inbound_mode` `auto` only covers name / active substance / active / treatment type). Statement triggers on
+  updates the base, so nothing echoes back. Withdrawal days + UOM + template lines are clinical: not applied automatically in
+  `review` / `auto` (`auto` only covers name / active substance / active / treatment type). **0060 (farm's decision 2026-11-05): mode `delpro`
+  (the farm's setting) = DelPro is master**: `fn_delpro_catalog_reconcile()` (wrapper; the 0037 body is `fn_delpro_catalog_reconcile_0037`)
+  first auto-imports every create/link row of the import plan (no clinical_review), then applies every differing DelPro value except a field
+  changed only in GVET (outbound_pending is never reverted); what GVET can't take stays an issue. Admin switch = `delpro_catalog_set_inbound_mode`
+  (reconciles at once). Tests that link by hand pin `review`. Statement triggers on
   diseases / products / templates re-run the reconcile when a shared field changes (guarded by `delpro.reconciling`, never blocking the save).
   **Dry run** (0038, `npm run catalog:dry-run`): `delpro_catalog_preview(jsonb)` runs the real begin/upload/ingest/finish (+ reconcile)
   inside a block that always raises `GVPRV` and returns the summary collected before the rollback — never reimplement the sync

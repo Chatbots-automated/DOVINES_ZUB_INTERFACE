@@ -84,10 +84,12 @@ export const CATALOG_FIELD_LABEL: Record<string, string> = {
   usages: "Vaistai (dozė × kartai × d.)",
 };
 
-/** Withdrawal days / units: never applied automatically (clinical data). */
+/** Withdrawal days / units: applied automatically only in the "delpro" inbound mode (0060). */
 export const CATALOG_CLINICAL_FIELDS = new Set(["uom", "milk_days", "meat_days", "usages"]);
 
-export const CATALOG_INBOUND_MODES = ["review", "auto"] as const;
+// "delpro" (0060, farm's decision 2026-11): DelPro is the master — every difference, karencija and units
+// included, and new DelPro records are applied without confirmation.
+export const CATALOG_INBOUND_MODES = ["review", "auto", "delpro"] as const;
 export type CatalogInboundMode = (typeof CATALOG_INBOUND_MODES)[number];
 
 export function catalogValue(v: unknown): string {

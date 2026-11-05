@@ -19,6 +19,7 @@ import {
   KeyRound,
   Split,
   Users,
+  Timer,
   type LucideIcon,
 } from "lucide-react";
 
@@ -54,6 +55,8 @@ export const vetNavGroups: NavGroup[] = [
       { href: "/veterinarija/masinis-gydymas", label: "Masinis gydymas", icon: Users },
       { href: "/veterinarija/vakcinacijos", label: "Vakcinacijos", icon: Syringe },
       { href: "/veterinarija/sekinimas", label: "Sėklinimas", icon: Dna },
+      // 0059 — farm's request, billed with Sinchronizacijos protokolai (0025)
+      { href: "/veterinarija/sinchronizacijos", label: "Sinchronizacijos", icon: Timer },
       { href: "/veterinarija/biocidai", label: "Biocidai", icon: Droplet },
       { href: "/veterinarija/nagos", label: "Nagos", icon: Footprints },
       // 0048 — farm's request (2026-11), billed separately

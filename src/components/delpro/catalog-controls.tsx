@@ -71,10 +71,15 @@ export function CatalogInboundModeForm({ mode }: { mode: CatalogInboundMode }) {
       <div className="min-w-[260px] flex-1">
         <Label htmlFor="delpro_catalog_inbound_mode">DelPro pakeitimai susietiems įrašams</Label>
         <Select id="delpro_catalog_inbound_mode" name="delpro_catalog_inbound_mode" defaultValue={mode}>
-          <option value="review">Tvirtinami ranka</option>
+          <option value="delpro">DelPro pagrindinis — viskas automatiškai (ir karencija, vienetai, nauji įrašai)</option>
           <option value="auto">Pavadinimai ir aktyvumas — automatiškai</option>
+          <option value="review">Tvirtinami ranka</option>
         </Select>
-        <p className="mt-1 text-[11px] text-text-muted">Karencija ir matavimo vienetai visada tvirtinami ranka.</p>
+        <p className="mt-1 text-[11px] text-text-muted">
+          {mode === "delpro"
+            ? "DelPro reikšmės ir nauji DelPro vaistai / diagnozės perkeliami be patvirtinimo; pakeitus karenciją perskaičiuojama ir ankstesnių gydymų karencija. Tik GVET pakeistas laukas neperrašomas — jis laukia siuntimo į DelPro."
+            : "Karencija ir matavimo vienetai tvirtinami ranka."}
+        </p>
       </div>
       <Button type="submit" size="sm" disabled={pending}>
         {pending ? "Saugoma..." : "Išsaugoti"}

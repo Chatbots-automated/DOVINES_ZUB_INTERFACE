@@ -138,10 +138,11 @@ export async function releaseSingleCatalogJob(_prev: DelproActionResult | null, 
 export async function updateCatalogInboundMode(_prev: DelproActionResult | null, formData: FormData): Promise<DelproActionResult> {
   const mode = String(formData.get("delpro_catalog_inbound_mode") ?? "") as CatalogInboundMode;
   if (!CATALOG_INBOUND_MODES.includes(mode)) return { ok: false, error: "Neteisingas režimas." };
+  // 0060: saved + reconciled at once (in "delpro" mode DelPro values / new records are applied immediately).
   const supabase = await createClient();
-  const { error } = await supabase.from("system_settings").update({ setting_value: mode }).eq("setting_key", "delpro_catalog_inbound_mode");
+  const { data, error } = await supabase.rpc("delpro_catalog_set_inbound_mode", { p_mode: mode });
   if (error) return { ok: false, error: error.message };
-  return done("Išsaugota.");
+  return done(data?.message ?? "Išsaugota.");
 }
 
 // --- GVET -> DelPro catalog writes (0037) ------------------------------------

@@ -6,6 +6,8 @@ update system_settings set setting_value = '10' where setting_key = 'delpro_auto
 update system_settings set setting_value = 'ui_script' where setting_key = 'delpro_write_channel';
 -- 0045's temporary admin gate is tested in its own block at the end.
 update system_settings set setting_value = 'false' where setting_key = 'delpro_admin_approval_required';
+-- 0060 makes DelPro the catalog master ('delpro'); the catalog blocks below test the review flow, 0060 has its own block.
+update system_settings set setting_value = 'review' where setting_key = 'delpro_catalog_inbound_mode';
 insert into auth.users values ('00000000-0000-0000-0000-00000000000a','admin@x'),('00000000-0000-0000-0000-00000000000b','vet@x'),('00000000-0000-0000-0000-00000000000c','viewer@x');
 insert into users (id,email,role) values ('00000000-0000-0000-0000-00000000000a','admin@x','admin'),('00000000-0000-0000-0000-00000000000b','vet@x','vet'),('00000000-0000-0000-0000-00000000000c','viewer@x','viewer');
 
@@ -3011,3 +3013,238 @@ do $$ begin
   end if;
 end $$;
 select 'assert' as step, '0057 biocide plan: nothing until confirmed, backlog at once on own dates, atomic, skip, cancel' as what;
+
+-- 0058 Pajamavimas → Redagavimas: header, lines, add/remove, stock floor, supplier snapshot, standalone batch
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000b',false);
+insert into products (id,name,category,unit) values
+  ('58000000-0000-0000-0000-0000000000a1','EDIT Dezinfektantas','biocide','l'),
+  ('58000000-0000-0000-0000-0000000000a2','EDIT Pirštinės','treatment_materials','vnt'),
+  ('58000000-0000-0000-0000-0000000000a3','EDIT Šluostės','treatment_materials','vnt');
+select 'edit_recv' as step, receive_invoice(jsonb_build_object('mode','pdf','supplier',jsonb_build_object('name','Senas tiekėjas 58'),
+  'invoice', jsonb_build_object('number','R-58','date','2026-10-01','total_net',30),
+  'items', jsonb_build_array(
+    jsonb_build_object('product_id','58000000-0000-0000-0000-0000000000a1','qty',10,'line_total',10,'lot','L1','expiry_date','2030-01-01'),
+    jsonb_build_object('product_id','58000000-0000-0000-0000-0000000000a2','qty',20,'line_total',20)))) as r;
+select set_config('t.inv58', (select id::text from invoices where invoice_number='R-58'), false);
+select set_config('t.b58', (select id::text from batches where product_id='58000000-0000-0000-0000-0000000000a1'), false);
+select set_config('t.m58', (select id::text from batches where product_id='58000000-0000-0000-0000-0000000000a2'), false);
+select create_biocide_usage('{"product_id":"58000000-0000-0000-0000-0000000000a1","qty":3,"unit":"l","purpose":"x"}'::jsonb);
+select 'edit_detail' as step, (receipt_edit_detail(current_setting('t.inv58')::uuid)->'lines'->0->>'used_qty')::numeric as used;
+select 'edit_update' as step, update_invoice(jsonb_build_object('invoice_id', current_setting('t.inv58'),
+  'supplier', jsonb_build_object('name','Naujas tiekėjas 58'),
+  'invoice', jsonb_build_object('number','R-58b','date','2026-10-02','total_net',55),
+  'items', jsonb_build_array(
+    jsonb_build_object('batch_id', current_setting('t.b58'),'product_id','58000000-0000-0000-0000-0000000000a1','qty',12,'line_total',24,'lot','L1b','expiry_date','2031-01-01'),
+    jsonb_build_object('batch_id', current_setting('t.m58'),'product_id','58000000-0000-0000-0000-0000000000a3','package_size',10,'package_count',2,'line_total',20),
+    jsonb_build_object('product_id','58000000-0000-0000-0000-0000000000a2','qty',5,'unit_price',2)))) as r;
+do $$ declare b batches%rowtype; begin
+  select * into b from batches where id = current_setting('t.b58')::uuid;
+  if b.received_qty <> 12 or b.qty_left <> 9 or b.lot <> 'L1b' or b.purchase_price <> 2 then raise exception 'edited line wrong: %', row_to_json(b); end if;
+  if (select supplier_name from invoices where id = current_setting('t.inv58')::uuid) <> 'Naujas tiekėjas 58' then raise exception 'supplier not changed'; end if;
+  if exists (select 1 from batches where invoice_id = current_setting('t.inv58')::uuid
+             and supplier_id is distinct from (select supplier_id from invoices where id = current_setting('t.inv58')::uuid)) then
+    raise exception 'every line must follow the invoice supplier';
+  end if;
+  if (select product_id from batches where id = current_setting('t.m58')::uuid) <> '58000000-0000-0000-0000-0000000000a3' then raise exception 'unused line product not changed'; end if;
+  if (select product_id from invoice_items where batch_id = current_setting('t.m58')::uuid) <> '58000000-0000-0000-0000-0000000000a3' then raise exception 'invoice line product not changed'; end if;
+  if (select count(*) from invoice_items where invoice_id = current_setting('t.inv58')::uuid) <> 3 then raise exception 'new line not added'; end if;
+  if not exists (select 1 from vw_biocide_receiving_journal where invoice_number = 'R-58b' and lower(supplier_name) like '%58%') then raise exception 'journal must show the new number'; end if;
+end $$;
+do $$ declare blocked boolean := false; begin
+  begin perform update_invoice(jsonb_build_object('invoice_id', current_setting('t.inv58'), 'items', jsonb_build_array(
+    jsonb_build_object('batch_id', current_setting('t.b58'),'product_id','58000000-0000-0000-0000-0000000000a1','qty',2,'lot','L1b','expiry_date','2031-01-01'))));
+  exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: qty below used'; end if;
+end $$;
+do $$ declare blocked boolean := false; begin
+  begin perform update_invoice(jsonb_build_object('invoice_id', current_setting('t.inv58'), 'items', jsonb_build_array(
+    jsonb_build_object('batch_id', current_setting('t.b58'),'product_id','58000000-0000-0000-0000-0000000000a2','qty',12))));
+  exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: product change of a used line'; end if;
+end $$;
+do $$ declare blocked boolean := false; begin
+  begin perform update_invoice(jsonb_build_object('invoice_id', current_setting('t.inv58'), 'removed_batch_ids', jsonb_build_array(current_setting('t.b58'))));
+  exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: removing a used line'; end if;
+end $$;
+do $$ declare blocked boolean := false; begin
+  begin perform update_invoice(jsonb_build_object('invoice_id', current_setting('t.inv58'),
+    'supplier_id', (select id from suppliers where lower(name)='uab vetpharma'), 'invoice', jsonb_build_object('number','VP-001')));
+  exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: duplicate number on edit'; end if;
+end $$;
+do $$ declare blocked boolean := false; begin
+  begin perform update_invoice(jsonb_build_object('invoice_id', current_setting('t.inv58'), 'items', jsonb_build_array(
+    jsonb_build_object('batch_id', current_setting('t.b58'),'product_id','58000000-0000-0000-0000-0000000000a1','qty',12,'lot','L1b','expiry_date','2020-01-01'))));
+  exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: expired date on edit'; end if;
+end $$;
+-- removing the unused added line is fine
+select 'edit_remove' as step, update_invoice(jsonb_build_object('invoice_id', current_setting('t.inv58'), 'removed_batch_ids',
+  (select jsonb_agg(id) from batches where invoice_id = current_setting('t.inv58')::uuid and product_id = '58000000-0000-0000-0000-0000000000a2'))) as r;
+select 'edit_supplier' as step, update_supplier(jsonb_build_object('id', (select supplier_id from invoices where id = current_setting('t.inv58')::uuid),
+  'name', 'Pervadintas tiekėjas 58', 'vat_code', 'LT58')) is not null as ok;
+do $$ begin
+  if (select supplier_name from invoices where id = current_setting('t.inv58')::uuid) <> 'Pervadintas tiekėjas 58' then raise exception 'invoice supplier_name must follow the rename'; end if;
+end $$;
+-- stock received without an invoice
+select receive_invoice(jsonb_build_object('mode','manual','items',jsonb_build_array(jsonb_build_object('product_id','58000000-0000-0000-0000-0000000000a3','qty',4,'unit_price',1))));
+select set_config('t.s58', (select id::text from batches where product_id='58000000-0000-0000-0000-0000000000a3' and invoice_id is null), false);
+select update_receipt_batch(jsonb_build_object('batch_id', current_setting('t.s58'), 'product_id','58000000-0000-0000-0000-0000000000a3','qty',6,'line_total',3,'received_date','2026-10-03'));
+do $$ begin
+  if (select received_qty from batches where id = current_setting('t.s58')::uuid) <> 6 or (select qty_left from batches where id = current_setting('t.s58')::uuid) <> 6 then
+    raise exception 'standalone batch not edited';
+  end if;
+end $$;
+select delete_receipt_batch(current_setting('t.s58')::uuid);
+do $$ begin
+  if exists (select 1 from batches where id = current_setting('t.s58')::uuid) then raise exception 'standalone batch not deleted'; end if;
+end $$;
+reset role;
+select 'assert' as step, '0058 receipt editing: header/lines/add/remove, used floor, product lock, supplier snapshot, standalone' as what;
+
+-- 0059 Sinchronizacijos tab: mass apply (atomic, no stock), bulk step recording (FEFO, atomic), cancel, views
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000b',false);
+insert into animals (id, tag_no, animal_no, sex) values
+  ('59000000-0000-0000-0000-000000000001','LT0000059001','5901','Karvė'),
+  ('59000000-0000-0000-0000-000000000002','LT0000059002','5902','Karvė'),
+  ('59000000-0000-0000-0000-000000000003','LT0000059003','5903','Karvė');
+insert into products (id,name,category,unit,withdrawal_days_milk,withdrawal_days_meat) values
+  ('59000000-0000-0000-0000-0000000000a1','SYNC GnRH','medicines','ml',0,0);
+insert into batches (product_id,lot,expiry_date,received_qty,purchase_price) values ('59000000-0000-0000-0000-0000000000a1','S1','2030-01-01',5,1);
+select set_config('t.sp59', save_sync_protocol(jsonb_build_object('name','TEST59 Ovsynch','steps', jsonb_build_array(
+  jsonb_build_object('day_offset',0,'title','GnRH','medications', jsonb_build_array(jsonb_build_object('product_id','59000000-0000-0000-0000-0000000000a1','qty',2))),
+  jsonb_build_object('day_offset',1,'title','Apžiūra'),
+  jsonb_build_object('day_offset',2,'title','Sėklinimas','kind','sekinimas'))))::text, false);
+select 'sync_mass' as step, apply_sync_protocol_mass(jsonb_build_object('protocol_id', current_setting('t.sp59'),
+  'animal_ids', jsonb_build_array('59000000-0000-0000-0000-000000000001','59000000-0000-0000-0000-000000000002','59000000-0000-0000-0000-000000000003'),
+  'start_date', (fn_vilnius_today() - 2)::text, 'start_time', '08:30', 'vet_name', 'Dr. Sync')) - 'mass_application_id' as r;
+do $$ begin
+  if (select count(*) from vw_sync_open_steps where animal_id::text like '59000000-%') <> 9 then raise exception 'one open step per animal + step expected'; end if;
+  if (select count(*) from sync_protocol_applications where mass_application_id is not null and animal_id::text like '59000000-%') <> 3 then raise exception 'applications must link the mass header'; end if;
+  if (select qty_left from batches where lot = 'S1' and product_id = '59000000-0000-0000-0000-0000000000a1') <> 5 then raise exception 'applying must not consume stock'; end if;
+  if (select count(*) from vw_sync_animal_flags where open_protocol_name = 'TEST59 Ovsynch') <> 3 then raise exception 'flags must show the open protocol'; end if;
+end $$;
+do $$ declare blocked boolean := false; begin
+  begin perform apply_sync_protocol_mass(jsonb_build_object('protocol_id', current_setting('t.sp59'),
+    'animal_ids', jsonb_build_array('59000000-0000-0000-0000-000000000001'), 'start_date', fn_vilnius_today()::text));
+  exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: second protocol on a busy animal'; end if;
+end $$;
+-- 3 × 2 ml needed, 5 ml in stock: nothing recorded
+do $$ declare blocked boolean := false; begin
+  begin perform complete_sync_steps(jsonb_build_object('visit_ids', (select jsonb_agg(visit_id) from vw_sync_open_steps
+    where animal_id::text like '59000000-%' and sync_step_no = 1)));
+  exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: bulk step beyond stock'; end if;
+  if exists (select 1 from treatments where procedure_type = 'sinchronizacija' and animal_id::text like '59000000-%') then raise exception 'shortfall must record no step'; end if;
+end $$;
+do $$ declare blocked boolean := false; begin
+  begin perform complete_sync_steps(jsonb_build_object('visit_ids', (select jsonb_agg(visit_id) from vw_sync_open_steps
+    where animal_id::text like '59000000-%' and sync_step_no = 3)));
+  exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: insemination step in bulk'; end if;
+end $$;
+insert into batches (product_id,lot,expiry_date,received_qty,purchase_price) values ('59000000-0000-0000-0000-0000000000a1','S2','2031-01-01',10,1);
+select 'sync_complete' as step, complete_sync_steps(jsonb_build_object('vet_name','Dr. Sync', 'visit_ids', (select jsonb_agg(visit_id) from vw_sync_open_steps
+  where animal_id::text like '59000000-%' and sync_step_no in (1, 2)))) as r;
+do $$ begin
+  if (select count(*) from treatments where procedure_type = 'sinchronizacija' and animal_id::text like '59000000-%' and reg_date = fn_vilnius_today() - 2) <> 3 then
+    raise exception 'one sinchronizacija treatment per animal on the planned day expected';
+  end if;
+  if (select sum(qty_left) from batches where product_id = '59000000-0000-0000-0000-0000000000a1') <> 9 then raise exception 'FEFO must consume 6 ml'; end if;
+  if exists (select 1 from delpro_sync_jobs j join treatments t on t.id = j.treatment_id where t.animal_id::text like '59000000-%') then
+    raise exception 'sinchronizacija must not be queued for DelPro';
+  end if;
+  if (select count(*) from vw_sync_open_steps where animal_id::text like '59000000-%') <> 3 then raise exception 'only the insemination steps stay open'; end if;
+  if (select count(*) from vw_sync_applications where animal_id::text like '59000000-%' and steps_done = 2 and status = 'aktyvus') <> 3 then raise exception 'progress wrong'; end if;
+end $$;
+select 'sync_cancel' as step, cancel_sync_applications((select array_agg(id) from sync_protocol_applications where animal_id::text like '59000000-%')) as cancelled;
+do $$ begin
+  if (select count(*) from vw_sync_applications where animal_id::text like '59000000-%' and status = 'nutrauktas') <> 3 then raise exception 'cancel must stop the protocol'; end if;
+  if (select active_count from vw_sync_mass_applications where protocol_name = 'TEST59 Ovsynch') <> 0
+     or (select cancelled_count from vw_sync_mass_applications where protocol_name = 'TEST59 Ovsynch') <> 3 then raise exception 'mass header counts wrong'; end if;
+end $$;
+reset role;
+select 'assert' as step, '0059 sync mass: atomic apply, no stock, bulk step FEFO atomic, insemination refused, cancel, views' as what;
+
+-- 0060 A. karencija follows the product's current withdrawal days
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000b',false);
+insert into products (id,name,category,unit,withdrawal_days_milk,withdrawal_days_meat) values
+  ('60000000-0000-0000-0000-0000000000a1','LIVE60 Vaistas','medicines','ml',2,3);
+insert into batches (product_id,lot,expiry_date,received_qty,purchase_price) values ('60000000-0000-0000-0000-0000000000a1','L60','2030-01-01',100,1);
+select set_config('t.tr60', create_treatment(jsonb_build_object('animal_id', (select id from animals where animal_no='512'),
+  'procedure_type','profilaktika','reg_date',(fn_vilnius_today() - 7)::text,
+  'medications', jsonb_build_array(jsonb_build_object('product_id','60000000-0000-0000-0000-0000000000a1','qty',5,'administration_route','im'))))::text, false);
+do $$ begin
+  if (select withdrawal_until_milk from treatments where id = current_setting('t.tr60')::uuid) <> fn_vilnius_today() - 7 + 3 then raise exception 'initial karencija wrong'; end if;
+end $$;
+update products set withdrawal_days_milk = 10, withdrawal_days_meat = 0 where id = '60000000-0000-0000-0000-0000000000a1';
+do $$ begin
+  if (select withdrawal_until_milk from treatments where id = current_setting('t.tr60')::uuid) <> fn_vilnius_today() - 7 + 11 then
+    raise exception 'old treatment must follow the new milk days: %', (select withdrawal_until_milk from treatments where id = current_setting('t.tr60')::uuid);
+  end if;
+  if (select withdrawal_until_meat from treatments where id = current_setting('t.tr60')::uuid) is not null then raise exception '0 days = no karencija'; end if;
+end $$;
+update products set withdrawal_im_milk = 20 where id = '60000000-0000-0000-0000-0000000000a1';
+do $$ begin
+  if (select withdrawal_until_milk from treatments where id = current_setting('t.tr60')::uuid) <> fn_vilnius_today() - 7 + 21 then raise exception 'route override must apply to old treatments'; end if;
+end $$;
+update products set withdrawal_im_milk = null where id = '60000000-0000-0000-0000-0000000000a1';
+reset role;
+select 'assert' as step, '0060 A: stored karencija recomputed from current product days (flat, 0 days, per route)' as what;
+
+-- 0060 B. DelPro master: automatic import + DelPro values applied without confirmations
+insert into delpro_catalog_items (object_type, delpro_key, name, active, fields, record_hash) values
+  ('DrugParameters', 'P60', null, null, '{"uom":"ml","dump_milk_days":4,"meat_withhold_days":6}', 'h1'),
+  ('Drug', 'D60', 'LIVE60 Vaistas', true, '{"name":"LIVE60 Vaistas","active":true,"active_substance":null,"default_parameters":"P60"}', 'h2'),
+  ('DrugParameters', 'P61', null, null, '{"uom":"ml","dump_milk_days":1,"meat_withhold_days":2}', 'h3'),
+  ('Drug', 'D61', 'NEW61 DelPro vaistas', true, '{"name":"NEW61 DelPro vaistas","active":true,"active_substance":null,"default_parameters":"P61"}', 'h4');
+update system_settings set setting_value = 'delpro' where setting_key = 'delpro_catalog_inbound_mode';
+select 'master_reconcile' as step, fn_delpro_catalog_reconcile() - 'open' - 'opened' - 'closed' as r;
+do $$ declare p products%rowtype; begin
+  if not exists (select 1 from delpro_catalog_links where retired_at is null and object_type = 'Drug' and delpro_key = 'D60'
+                 and product_id = '60000000-0000-0000-0000-0000000000a1') then raise exception 'same-name drug must be linked automatically'; end if;
+  select * into p from products where id = '60000000-0000-0000-0000-0000000000a1';
+  if p.withdrawal_days_milk <> 4 or p.withdrawal_days_meat <> 6 then raise exception 'DelPro days must be applied: % / %', p.withdrawal_days_milk, p.withdrawal_days_meat; end if;
+  if (select withdrawal_until_milk from treatments where id = current_setting('t.tr60')::uuid) <> fn_vilnius_today() - 7 + 5 then raise exception 'treatment must follow the DelPro days'; end if;
+  if not exists (select 1 from products p2 join delpro_catalog_links l on l.product_id = p2.id and l.delpro_key = 'D61' and l.retired_at is null
+                 where p2.name = 'NEW61 DelPro vaistas' and p2.withdrawal_days_milk = 1 and p2.withdrawal_days_meat = 2) then
+    raise exception 'new DelPro drug must be imported automatically';
+  end if;
+  if exists (select 1 from delpro_catalog_issues where status = 'open' and issue_type in ('clinical_review', 'field_difference', 'suggested_match')
+             and delpro_key in ('D60', 'D61')) then raise exception 'no confirmations may be left open'; end if;
+end $$;
+-- DelPro changes again -> applied at the next reconcile
+update delpro_catalog_items set fields = fields || '{"dump_milk_days":7}' where object_type = 'DrugParameters' and delpro_key = 'P60';
+-- as the worker does it (delpro_catalog_finish_run runs as service_role)
+set role service_role;
+select fn_delpro_catalog_reconcile() is not null;
+reset role;
+do $$ begin
+  if (select withdrawal_days_milk from products where id = '60000000-0000-0000-0000-0000000000a1') <> 7 then raise exception 'DelPro change must be applied'; end if;
+  if (select withdrawal_until_milk from treatments where id = current_setting('t.tr60')::uuid) <> fn_vilnius_today() - 7 + 8 then raise exception 'treatment must follow again'; end if;
+end $$;
+-- an edit made only in GVET is never reverted (it waits to be sent to DelPro)
+update products set withdrawal_days_meat = 9 where id = '60000000-0000-0000-0000-0000000000a1';
+select fn_delpro_catalog_reconcile() is not null;
+do $$ begin
+  if (select withdrawal_days_meat from products where id = '60000000-0000-0000-0000-0000000000a1') <> 9 then raise exception 'a GVET-only edit must not be reverted'; end if;
+  if not exists (select 1 from delpro_catalog_issues where status = 'open' and issue_type = 'outbound_pending' and delpro_key = 'D60') then
+    raise exception 'GVET-only edit must show as waiting for DelPro';
+  end if;
+end $$;
+-- admin switch applies at once; a vet may not switch
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000b',false);
+do $$ declare blocked boolean := false; begin
+  begin perform delpro_catalog_set_inbound_mode('review'); exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: vet switching the inbound mode'; end if;
+end $$;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000a',false);
+select 'master_switch' as step, delpro_catalog_set_inbound_mode('review')->>'message' as m;
+reset role;
+select 'assert' as step, '0060 B: DelPro master — auto import/link, days applied + karencija recomputed, GVET-only edit kept' as what;

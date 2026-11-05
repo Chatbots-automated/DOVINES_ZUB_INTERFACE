@@ -20,6 +20,8 @@ const NAMED_ARGS = { delpro_claim_next_job: ["p_worker_id", "p_channel"], delpro
 
 before(async () => {
   db = await createTestDb();
+  // 0060 made DelPro the catalog master (auto import); these tests link catalog records by hand — that flow is 'review'.
+  await db.exec(`update system_settings set setting_value = 'review' where setting_key = 'delpro_catalog_inbound_mode'`);
   server = http.createServer(async (req, res) => {
     const m = req.url.match(/^\/rest\/v1\/rpc\/([a-z_]+)$/);
     let body = "";

@@ -66,3 +66,25 @@ export async function deleteInvoiceImpl(invoiceId: string): Promise<SimpleResult
   if (error) return { error: error.message };
   return { error: null };
 }
+
+// ---------------------------------------------------------------------------
+// Pajamavimas → Redagavimas (0058). Same rule: one RPC per save.
+// ---------------------------------------------------------------------------
+
+export const RECEIPT_EDIT_OPS = ["update_invoice", "update_batch", "delete_batch", "update_supplier"] as const;
+export type ReceiptEditOp = (typeof RECEIPT_EDIT_OPS)[number];
+
+export async function receiptEditImpl(op: ReceiptEditOp, data: Record<string, unknown>): Promise<SimpleResult> {
+  const supabase = await createClient();
+  let error: { message: string } | null = null;
+  if (op === "update_invoice") ({ error } = await supabase.rpc("update_invoice", { p_data: data }));
+  else if (op === "update_batch") ({ error } = await supabase.rpc("update_receipt_batch", { p_data: data }));
+  else if (op === "delete_batch") ({ error } = await supabase.rpc("delete_receipt_batch", { p_batch_id: String(data.batch_id ?? "") }));
+  else if (op === "update_supplier") ({ error } = await supabase.rpc("update_supplier", { p_data: data }));
+  else return { error: "Nežinomas veiksmas." };
+  if (error) {
+    console.error(`[pajamavimas] ${op} failed:`, error);
+    return { error: error.message || "Nepavyko išsaugoti pakeitimų." };
+  }
+  return { error: null };
+}

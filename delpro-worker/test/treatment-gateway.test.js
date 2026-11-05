@@ -56,6 +56,8 @@ async function savedTreatment(qty = 20) {
 
 before(async () => {
   db = await createTestDb();
+  // 0060 made DelPro the catalog master (auto import); these tests link catalog records by hand — that flow is 'review'.
+  await db.exec(`update system_settings set setting_value = 'review' where setting_key = 'delpro_catalog_inbound_mode'`);
   // 0045's temporary admin gate has its own test below; the rest covers the automatic path
   await db.exec(`update system_settings set setting_value = 'false' where setting_key = 'delpro_admin_approval_required'`);
   server = http.createServer(async (req, res) => {
