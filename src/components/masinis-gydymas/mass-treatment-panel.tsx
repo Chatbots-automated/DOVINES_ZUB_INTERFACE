@@ -14,7 +14,7 @@ import type { CreatedDisease } from "@/lib/actions/diseases";
 import { createMassTreatment, type MassActionResult } from "@/lib/actions/mass-treatments";
 import { catalogFromProps, loadTreatmentCatalog } from "@/lib/treatments/catalog";
 import type { CatalogProduct, MedLine } from "@/lib/treatments/planner";
-import { PROPHYLAXIS_CATEGORIES } from "@/lib/product-categories";
+import { DRUG_CATEGORIES, PROPHYLAXIS_CATEGORIES } from "@/lib/product-categories";
 import type { ProductCategory } from "@/lib/supabase/types";
 import { ageInMonths } from "@/lib/vaccinations";
 import {
@@ -274,6 +274,9 @@ export function MassTreatmentPanel({
       const productLinks = new Set(delpro.linkedProductIds);
       if (diseaseId && !diseaseLinks.has(diseaseId)) warnings.push("Liga nesusieta su DelPro diagnoze — DelPro perdavimas nepavyks.");
       for (const l of validLines) {
+        // 0063: a material (not a drug category) without a DelPro Drug stays in GVET only — not a problem
+        const cat = productById.get(l.product_id)?.category as ProductCategory | undefined;
+        if (cat && !DRUG_CATEGORIES.includes(cat)) continue;
         if (!productLinks.has(l.product_id)) warnings.push(`Vaistas „${productById.get(l.product_id)?.name ?? "?"}“ nesusietas su DelPro vaistu.`);
       }
       const noGuid = animals.filter((a) => selected.has(a.id) && !a.delpro_object_guid).length;

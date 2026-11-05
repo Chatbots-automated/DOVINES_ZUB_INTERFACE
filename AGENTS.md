@@ -90,6 +90,10 @@ not look for Žibartoniai's 0013–0021 VIC/UNIFORM history here.
   day: planned medicine → `create_treatment_with_visits(sinchronizacija, visit)` (FEFO, karencija, not DelPro), no medicine → `baigtas`;
   sekinimas steps refused (semen is picked in the insemination dialog). `cancel_sync_applications(uuid[])`. Views: `vw_sync_applications`
   (progress + status aktyvus/baigtas/nutrauktas), `vw_sync_open_steps`, `vw_sync_mass_applications`, `vw_sync_animal_flags`.
+- **Product duplicates** (0062): `vw_product_duplicates` (same `fn_delpro_norm_name`) is shown on Produktai; `merge_products(keep, remove)`
+  (admin) moves every FK to products found in `pg_constraint` + the ids in `sync_protocol_steps.medications` / `animal_visits.planned_medications`
+  / `delpro_mappings`, fills keep's empty fields, recomputes karencija, deletes `remove`. Same unit required; not both DelPro-linked. A new
+  JSON column holding product ids must be added to it. `complete_sync_steps` checks the selection's total need first (clear message).
 - **Profilaktika / Boliusai product types** (0026 enum + 0027 rules, farm's request): drugs like medicines — `fn_is_drug_category()`
   drives serija+galiojimas on pajamavimas, the vet drug journal and pack-based acts (keep `DRUG_CATEGORIES` in
   `src/lib/product-categories.ts` in sync). A profilaktika treatment may only use these two types
@@ -260,7 +264,8 @@ not look for Žibartoniai's 0013–0021 VIC/UNIFORM history here.
 - **Treatments → DelPro** (0044; 0043's pilot gate removed): saving a gydymas treatment queues it (`delpro_outbound_mode='auto'`,
   delay 0, `delpro_write_channel='gateway'`). `delpro_claim_next_job` (gateway) hands out `treatment_plan` =
   `fn_delpro_treatment_plan(job)` (animal ObjectGuid, DelPro diagnosis / drug / parameters codes, dose, course, withdrawal GVET vs DelPro;
-  data problems fail that job only). Worker `runOutboundGateway` → `treatment-gateway.js writeTreatment`: event by `GVET:<id>` marker
+  data problems fail that job only; 0063: only drug-category lines + products linked to a DelPro Drug go in `medicines`, other unlinked
+  materials stay GVET-only, listed in `gvet_only`). Worker `runOutboundGateway` → `treatment-gateway.js writeTreatment`: event by `GVET:<id>` marker
   first, medicine records through the farm-verified `treatment-model.json` (no model = nothing claimed), every property read back.
   Report v4: `success` only with `actual_result.medication.verified`; retryable / unknown-outcome failures go back to `approved` with
   `next_attempt_at` backoff (max 8 attempts). Poll 5 s (`OUTBOUND_INTERVAL_SEC`), catalog daily (`CATALOG_INTERVAL_MIN=1440`).

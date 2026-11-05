@@ -968,6 +968,26 @@ export interface Database {
         >;
         Relationships: [];
       };
+      // 0062 — products sharing a normalized name
+      vw_product_duplicates: {
+        Row: Row<{
+          group_key: string;
+          id: string;
+          name: string;
+          category: ProductCategory;
+          unit: Unit;
+          is_active: boolean;
+          created_at: string;
+          registration_code: string | null;
+          withdrawal_days_milk: number;
+          withdrawal_days_meat: number;
+          stock_qty: number;
+          batch_count: number;
+          usage_count: number;
+          delpro_key: string | null;
+        }>;
+        Relationships: [];
+      };
       // 0059 — Sinchronizacijos tab
       vw_sync_applications: { Row: Row<SyncApplicationViewRow>; Relationships: [] };
       vw_sync_open_steps: { Row: Row<SyncOpenStepRow>; Relationships: [] };
@@ -1334,6 +1354,8 @@ export interface Database {
       confirm_biocide_planned_usages: { Args: { p_data: Record<string, unknown> }; Returns: number };
       skip_biocide_planned_usages: { Args: { p_ids: string[] }; Returns: number };
       cancel_biocide_usage_plan: { Args: { p_plan_id: string }; Returns: number };
+      // 0062
+      merge_products: { Args: { p_keep: string; p_remove: string }; Returns: { ok: boolean; kept: string; removed: string; moved: Record<string, number>; stock_qty: number } };
       // 0060 DelPro master
       delpro_catalog_set_inbound_mode: { Args: { p_mode: string }; Returns: { ok: boolean; message: string; result: Record<string, unknown> | null } };
       // 0059 Sinchronizacijos tab

@@ -3248,3 +3248,99 @@ select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000a'
 select 'master_switch' as step, delpro_catalog_set_inbound_mode('review')->>'message' as m;
 reset role;
 select 'assert' as step, '0060 B: DelPro master — auto import/link, days applied + karencija recomputed, GVET-only edit kept' as what;
+
+-- 0062 Sujungti dublikatus: the live "Bioestrovet" case — stock on a duplicate, protocol steps on the original
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000b',false);
+insert into products (id,name,category,unit,withdrawal_days_milk,withdrawal_days_meat,registration_code) values
+  ('62000000-0000-0000-0000-0000000000a1','DUP62 Bioestrovet','medicines','ml',0,1,'9291020300');
+insert into products (id,name,category,unit,withdrawal_days_milk,withdrawal_days_meat,pack_size) values
+  ('62000000-0000-0000-0000-0000000000a2','DUP62  bioestrovet ','medicines','ml',0,3,20),
+  ('62000000-0000-0000-0000-0000000000a3','DUP62 Bioestrovet','medicines','vnt',0,0,null);
+insert into batches (product_id,lot,expiry_date,received_qty,purchase_price) values
+  ('62000000-0000-0000-0000-0000000000a1','B62','2030-01-01',8,1),
+  ('62000000-0000-0000-0000-0000000000a2','B62','2030-01-01',360,1);
+insert into animals (id, tag_no, animal_no, sex) values
+  ('62000000-0000-0000-0000-000000000001','LT0000062001','6201','Karvė'),
+  ('62000000-0000-0000-0000-000000000002','LT0000062002','6202','Karvė'),
+  ('62000000-0000-0000-0000-000000000003','LT0000062003','6203','Karvė'),
+  ('62000000-0000-0000-0000-000000000004','LT0000062004','6204','Karvė'),
+  ('62000000-0000-0000-0000-000000000005','LT0000062005','6205','Karvė');
+select set_config('t.sp62', save_sync_protocol(jsonb_build_object('name','TEST62 G7G','steps', jsonb_build_array(
+  jsonb_build_object('day_offset',0,'title','Bioestrovet 1','medications', jsonb_build_array(jsonb_build_object('product_id','62000000-0000-0000-0000-0000000000a1','qty',2))),
+  jsonb_build_object('day_offset',1,'title','Bioestrovet 2','medications', jsonb_build_array(jsonb_build_object('product_id','62000000-0000-0000-0000-0000000000a2','qty',2))))))::text, false);
+select apply_sync_protocol_mass(jsonb_build_object('protocol_id', current_setting('t.sp62'), 'start_date', (fn_vilnius_today() - 3)::text,
+  'animal_ids', (select jsonb_agg(id) from animals where animal_no like '620%'))) is not null;
+-- 5 × 2 ml on the original, 8 ml there: refused (the live error), now with the total + duplicate hint
+do $$ declare blocked boolean := false; msg text; begin
+  begin perform complete_sync_steps(jsonb_build_object('visit_ids', (select jsonb_agg(visit_id) from vw_sync_open_steps where protocol_name = 'TEST62 G7G' and sync_step_no = 1)));
+  exception when others then blocked := true; msg := sqlerrm; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: duplicate stock is invisible to the original'; end if;
+  if msg not like '%reikia 10 ml (5 žingsn.), turima 8 ml%' or msg not like '%kitame produkte tuo pačiu pavadinimu%' then raise exception 'unclear stock message: %', msg; end if;
+end $$;
+do $$ begin
+  if (select count(*) from vw_product_duplicates where name like 'DUP62%') <> 3 then raise exception 'duplicates view must group by normalized name'; end if;
+end $$;
+-- a vet may not merge
+do $$ declare blocked boolean := false; begin
+  begin perform merge_products('62000000-0000-0000-0000-0000000000a1','62000000-0000-0000-0000-0000000000a2'); exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: vet merging products'; end if;
+end $$;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000a',false);
+do $$ declare blocked boolean := false; begin
+  begin perform merge_products('62000000-0000-0000-0000-0000000000a1','62000000-0000-0000-0000-0000000000a3'); exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: merging different units'; end if;
+end $$;
+select 'merge' as step, merge_products('62000000-0000-0000-0000-0000000000a1','62000000-0000-0000-0000-0000000000a2')->'moved' as moved;
+do $$ begin
+  if exists (select 1 from products where id = '62000000-0000-0000-0000-0000000000a2') then raise exception 'duplicate must be deleted'; end if;
+  if (select sum(qty_left) from batches where product_id = '62000000-0000-0000-0000-0000000000a1') <> 368 then raise exception 'stock must be moved'; end if;
+  if (select pack_size from products where id = '62000000-0000-0000-0000-0000000000a1') <> 20
+     or (select withdrawal_days_meat from products where id = '62000000-0000-0000-0000-0000000000a1') <> 1 then
+    raise exception 'empty fields filled, own values kept';
+  end if;
+  if exists (select 1 from sync_protocol_steps s, jsonb_array_elements(s.medications) e where e->>'product_id' = '62000000-0000-0000-0000-0000000000a2')
+     or exists (select 1 from animal_visits v, jsonb_array_elements(v.planned_medications) e where e->>'product_id' = '62000000-0000-0000-0000-0000000000a2') then
+    raise exception 'protocol + planned visits must point at the kept product';
+  end if;
+end $$;
+select 'merge_steps' as step, complete_sync_steps(jsonb_build_object('visit_ids', (select jsonb_agg(visit_id) from vw_sync_open_steps where protocol_name = 'TEST62 G7G'))) as r;
+reset role;
+select 'assert' as step, '0062 merge: stock + protocol/visit JSON + FKs moved, own values kept, admin only, same unit; steps then record' as what;
+
+-- 0063. DelPro plan: materials (Gydymo medžiagos) without a DelPro Drug stay in GVET; an unlinked drug is still a problem
+reset role;
+insert into products (id, name, category, unit) values
+  ('63000000-0000-0000-0000-0000000000a1', 'TEST63 Provent gel', 'treatment_materials', 'vnt'),
+  ('63000000-0000-0000-0000-0000000000a2', 'TEST63 Nesusietas vaistas', 'medicines', 'ml');
+insert into batches (product_id, lot, expiry_date, received_qty) values
+  ('63000000-0000-0000-0000-0000000000a1', 'P63', '2030-01-01', 5),
+  ('63000000-0000-0000-0000-0000000000a2', 'V63', '2030-01-01', 50),
+  ('36000000-0000-0000-0000-0000000000a1', 'D63', '2030-01-01', 10);
+select set_config('t.mat63', create_treatment(jsonb_build_object('animal_id', (select id from animals where animal_no = 'KT338'), 'reg_date', '2026-11-05',
+  'diagnosis', 'Mastitas', 'disease_id', '36000000-0000-0000-0000-0000000000d2',
+  'medications', jsonb_build_array(
+    jsonb_build_object('product_id', '36000000-0000-0000-0000-0000000000a1', 'qty', 1, 'unit', 'ml'),
+    jsonb_build_object('product_id', '63000000-0000-0000-0000-0000000000a1', 'qty', 1, 'unit', 'vnt'))))::text, false);
+select set_config('t.drug63', create_treatment(jsonb_build_object('animal_id', (select id from animals where animal_no = 'KT338'), 'reg_date', '2026-11-05',
+  'diagnosis', 'Mastitas', 'disease_id', '36000000-0000-0000-0000-0000000000d2',
+  'medications', jsonb_build_array(jsonb_build_object('product_id', '63000000-0000-0000-0000-0000000000a2', 'qty', 1, 'unit', 'ml'))))::text, false);
+do $$ declare v jsonb; begin
+  v := fn_delpro_treatment_plan((select id from delpro_sync_jobs where treatment_id = current_setting('t.mat63')::uuid));
+  if exists (select 1 from jsonb_array_elements(v->'medicines') m where m->>'product_name' = 'TEST63 Provent gel') then
+    raise exception 'an unlinked material must not be sent as a DelPro medicine: %', v->'medicines';
+  end if;
+  if jsonb_array_length(v->'medicines') <> 1 then raise exception 'the drug must still be in the plan: %', v->'medicines'; end if;
+  if exists (select 1 from jsonb_array_elements(v->'problems') p where p->>'product' = 'TEST63 Provent gel') then
+    raise exception 'an unlinked material must not block the transfer: %', v->'problems';
+  end if;
+  if not (v->'gvet_only') ? 'TEST63 Provent gel' then raise exception 'the material must be listed as GVET-only: %', v->'gvet_only'; end if;
+  -- an unlinked DRUG is still never guessed
+  v := fn_delpro_treatment_plan((select id from delpro_sync_jobs where treatment_id = current_setting('t.drug63')::uuid));
+  if not exists (select 1 from jsonb_array_elements(v->'problems') p where p->>'code' = 'medicine_not_linked' and p->>'product' = 'TEST63 Nesusietas vaistas') then
+    raise exception 'an unlinked drug must stay a problem: %', v->'problems';
+  end if;
+  -- stock of the material is still written off in GVET
+  if (select sum(qty_left) from batches where product_id = '63000000-0000-0000-0000-0000000000a1') <> 4 then raise exception 'material stock must be written off'; end if;
+end $$;
+select 'assert' as step, '0063 DelPro plan: unlinked materials stay in GVET only; unlinked drugs still blocked' as what;

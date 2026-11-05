@@ -8,6 +8,8 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { ProductFormDialog } from "@/components/produktai/product-form-dialog";
 import { Select } from "@/components/ui/input";
 import { SubcategoryManager } from "@/components/produktai/subcategory-manager";
+import { DuplicateProducts } from "@/components/produktai/duplicate-products";
+import { getCurrentProfile } from "@/lib/auth";
 import type { SubcategoryOption } from "@/lib/product-subcategories";
 import type { ProductCategory } from "@/lib/supabase/types";
 import { PRODUCT_CATEGORY_LABELS, PRODUCT_CATEGORY_OPTIONS } from "@/lib/product-categories";
@@ -16,10 +18,13 @@ import { WRITE_OFF_KINDS, productWriteOffKind } from "@/lib/write-off-kinds";
 export default async function ProduktaiPage({ searchParams }: { searchParams: Promise<{ category?: string; subcategory?: string }> }) {
   const sp = await searchParams;
   const supabase = await createClient();
-  const [{ data: allProducts }, { data: groups }, { data: subs }] = await Promise.all([
+  const session = await getCurrentProfile();
+  const [{ data: allProducts }, { data: groups }, { data: subs }, { data: duplicates }] = await Promise.all([
     supabase.from("products").select("*").order("name"),
     supabase.from("write_off_groups").select("id, name, act_kinds").eq("active", true).order("sort_order"),
     supabase.from("product_subcategories").select("id, category, name, active").order("category").order("sort_order").order("name"),
+    // 0062 — same-name products split the stock
+    supabase.from("vw_product_duplicates").select("*").order("group_key").order("created_at"),
   ]);
   const groupOptions = groups ?? [];
   const subcategories: SubcategoryOption[] = subs ?? [];
@@ -44,6 +49,7 @@ export default async function ProduktaiPage({ searchParams }: { searchParams: Pr
         }
       />
       <div className="px-4 py-6 sm:px-6 lg:px-8">
+        <DuplicateProducts rows={duplicates ?? []} canMerge={session?.profile.role === "admin"} />
         <form method="get" className="mb-4 flex flex-wrap items-center gap-2">
           <Select name="category" defaultValue={categoryFilter} aria-label="Kategorija" className="w-auto min-w-44">
             <option value="">Visos kategorijos</option>
