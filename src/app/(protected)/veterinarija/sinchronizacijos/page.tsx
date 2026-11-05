@@ -40,7 +40,7 @@ export default async function SinchronizacijosPage() {
   const session = await getCurrentProfile();
   const today = vilniusDay(new Date());
 
-  const [animals, flags, steps, applications, { data: massApplications }, { data: groups }, { data: protocols }, { data: products }] = await Promise.all([
+  const [animals, flags, steps, applications, { data: massApplications }, { data: groups }, { data: protocols, error: protocolsError }, { data: products }] = await Promise.all([
     fetchAll<Omit<SyncAnimal, "open_protocol_name" | "last_insemination_date" | "last_pregnancy_confirmed">>(
       (from, to) =>
         supabase
@@ -98,6 +98,11 @@ export default async function SinchronizacijosPage() {
         description="Sinchronizacijos protokolas daugeliui gyvūnų vienu metu, visų gyvūnų protokolo žingsniai ir protokolų šablonai"
       />
       <div className="px-4 py-6 sm:px-6 lg:px-8">
+        {protocolsError && (
+          <p className="mb-4 rounded-control bg-danger-soft px-3 py-2 text-[13px] text-danger">
+            Nepavyko įkelti protokolų: {protocolsError.message}
+          </p>
+        )}
         <SyncClient
           animals={syncAnimals}
           groups={(groups ?? []).map((g) => g.name)}

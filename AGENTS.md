@@ -59,7 +59,8 @@ not look for Žibartoniai's 0013–0021 VIC/UNIFORM history here.
   consumes **no stock**: the vet records the step from the visit card, which pre-fills the planned medicine into the normal
   treatment dialog → `create_treatment_for_visit` (`procedure_type='sinchronizacija'`, FEFO, karencija). That type is not
   queued for DelPro (only `gydymas` is) — ask the farm before changing that. Protocol medicine is limited to the categories
-  the treatment dialog can give (`TREATMENT_PRODUCT_CATEGORIES`, enforced in `fn_sync_clean_medications`). One open
+  the treatment dialog can give (`TREATMENT_PRODUCT_CATEGORIES`, enforced in `fn_sync_clean_medications`). 0061 repairs live, where 0025 had been edited after it was applied
+  (no `sync_protocol_steps.kind` → every protocol query failed, the dialog had no medicines). One open
   protocol per animal; `cancel_sync_application` (button on an open sync visit card) cancels the open steps.
   A step has a `kind`: `veiksmas` (procedure/medicine) or `sekinimas` (the insemination, usually the last step of a FTAI protocol).
   A sekinimas step makes a visit with procedure `sekinimas` (also selectable on its own in Naujas vizitas); the card's

@@ -35,6 +35,7 @@ export function SyncProtocolPicker({
   const [protocols, setProtocols] = React.useState<LoadedProtocol[] | null>(null);
   const [products, setProducts] = React.useState<SyncProductOption[]>([]);
   const [reloadKey, setReloadKey] = React.useState(0);
+  const [loadError, setLoadError] = React.useState<string | null>(null);
   const selected = protocols?.find((p) => p.id === protocolId) ?? null;
 
   React.useEffect(() => {
@@ -47,8 +48,17 @@ export function SyncProtocolPicker({
       supabase.from("products").select("id, name, unit").eq("is_active", true).in("category", [...TREATMENT_PRODUCT_CATEGORIES]).order("name"),
     ]).then(([protocolsRes, productsRes]) => {
       if (cancelled) return;
-      if (protocolsRes.error || productsRes.error) {
-        console.error("[SyncProtocolPicker] load failed:", protocolsRes.error ?? productsRes.error);
+      // Each list on its own: a failing protocol query must not also empty the medicine list
+      // (that hid the medicines in "Naujas protokolas" when the live table lacked a column — 0061).
+      if (productsRes.error) console.error("[SyncProtocolPicker] products load failed:", productsRes.error);
+      setProducts((productsRes.data ?? []) as SyncProductOption[]);
+      setLoadError(
+        protocolsRes.error || productsRes.error
+          ? `Nepavyko įkelti ${protocolsRes.error ? "protokolų" : "vaistų"}: ${(protocolsRes.error ?? productsRes.error)?.message ?? ""}`
+          : null,
+      );
+      if (protocolsRes.error) {
+        console.error("[SyncProtocolPicker] protocols load failed:", protocolsRes.error);
         setProtocols([]);
         return;
       }
@@ -68,7 +78,6 @@ export function SyncProtocolPicker({
             .map((s) => ({ day_offset: s.day_offset, title: s.title, notes: s.notes, kind: s.kind, medications: s.medications ?? [] })),
         })),
       );
-      setProducts((productsRes.data ?? []) as SyncProductOption[]);
     });
     return () => {
       cancelled = true;
@@ -112,6 +121,7 @@ export function SyncProtocolPicker({
         </div>
       </div>
 
+      {loadError && <p className="rounded-control bg-danger-soft px-3 py-2 text-[12.5px] text-danger">{loadError}</p>}
       {protocols === null ? (
         <p className="text-[13px] text-text-muted">Kraunama...</p>
       ) : protocols.length === 0 ? (
