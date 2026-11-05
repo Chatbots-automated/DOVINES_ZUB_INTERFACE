@@ -94,6 +94,10 @@ not look for Žibartoniai's 0013–0021 VIC/UNIFORM history here.
   day: planned medicine → `create_treatment_with_visits(sinchronizacija, visit)` (FEFO, karencija, not DelPro), no medicine → `baigtas`;
   sekinimas steps refused (semen is picked in the insemination dialog). `cancel_sync_applications(uuid[])`. Views: `vw_sync_applications`
   (progress + status aktyvus/baigtas/nutrauktas), `vw_sync_open_steps`, `vw_sync_mass_applications`, `vw_sync_animal_flags`.
+  0066 (Žingsniai → **Redaguoti** per step group, `StepGroupDialog`): `edit_sync_steps` (date/time of the ticked animals' visits, optionally
+  moving their later open steps by the same days; planned medicine via `fn_sync_clean_medications`; title), `skip_sync_steps` (visit →
+  `atsauktas`, rest of the protocol stays), `add_sync_animals` (same protocol into the same mass application, its start date by default).
+  Open visits only; templates and recorded steps never change.
 - **Product duplicates** (0062): `vw_product_duplicates` (same `fn_delpro_norm_name`) is shown on Produktai; `merge_products(keep, remove)`
   (admin) moves every FK to products found in `pg_constraint` + the ids in `sync_protocol_steps.medications` / `animal_visits.planned_medications`
   / `delpro_mappings`, fills keep's empty fields, recomputes karencija, deletes `remove`. Same unit required; not both DelPro-linked. A new
@@ -348,6 +352,19 @@ not look for Žibartoniai's 0013–0021 VIC/UNIFORM history here.
   403. Use `useActionState` + `<form action>` (all actions here), or a Route Handler + `fetch()` for direct calls
   (`/api/pajamavimas/*`, `/api/gydymo-kursai/administer-dose`, `/api/vartotojai/set-frozen`). Route Handlers do a
   manual Origin/Host check.
+- **DelPro screen layout** (2026-11-05, farm's request): status tiles + tabs (Gydymai → DelPro / Vaistai ir ligos / Dienos ataskaitos /
+  Gyvuliai / Nustatymai, `?skirtukas=`), a `HowTo` box per section and the **Jei kas nors neveikia** drawer. All error help lives in
+  `src/lib/delpro-help.ts` (`findHelp(code | message)` — the queue shows its `short` line under each problem): a new problem code or error
+  message needs an entry there. `CatalogSyncSection part="main" | "advanced"` (advanced = templates, catalog writes, history, mode → Nustatymai).
+  0065: `delpro_reject_job(s)` also rejects `error` jobs (never `verification_failed`); bulk = `rejectDelproJobs`.
+  **0067 Greitas taisymas** (button on every blocked / failed job, `QuickFixButton`, `/api/delpro/quick-fix` GET+POST): `delpro_quick_fixes(job)` =
+  what's wrong now (`fn_delpro_job_open_problems` = transfer checks + plan checks; stored PC-only problems kept, fixed GVET ones dropped) + one
+  fix per problem; `delpro_apply_quick_fix({job_id, fixes})` applies them in ONE transaction (link_drug / link_diagnosis — only the record the
+  admin picked; set_schedule; take_delpro_withdrawal; dose_factor; fix_tag; refresh_catalog; retry; reject), then releases the job if nothing is
+  left (and every other `error` job the same fix cured), or reports what's left. PC-only problems (`params_not_in_delpro` …) set
+  `retry_after_catalog_at` + request a catalog sync; `trg_delpro_catalog_run_quick_retry` re-releases (or re-explains) them when that sync
+  completes. `products.delpro_dose_factor` = DelPro dose per 1 GVET unit (Metricure 1 vnt = N ml): the plan sends qty × factor in DelPro's UOM;
+  stock/acts/karencija stay in GVET units. A new problem code needs a fix case in `delpro_quick_fixes` + the dialog (and a help entry).
 - The DelPro screen (`src/components/delpro/*`) calls `/api/delpro/action` (`useDelproAction(op)`, ops in `src/lib/delpro-ops.ts`)
   instead of Server Actions: its action POSTs came back non-RSC ("An unexpected response was received from the server.") locally.
   The functions in `src/lib/actions/delpro*.ts` are unchanged and only called from that route; add a new one to `DELPRO_OPS` too.

@@ -8,6 +8,7 @@ import { CatalogInboundModeForm, CatalogLinkForm } from "@/components/delpro/cat
 import { CatalogWritePanel, type CatalogJob } from "@/components/delpro/catalog-write";
 import { CatalogImportPanel } from "@/components/delpro/catalog-import";
 import { TreatmentTemplates, type TemplateProduct, type TemplateRow } from "@/components/delpro/treatment-templates";
+import { HowTo } from "@/components/delpro/how-to";
 import {
   CATALOG_ACTION_CONFIRM,
   CATALOG_ACTION_LABEL,
@@ -199,6 +200,7 @@ export function CatalogSyncSection({
   importPlan,
   singleJob,
   animalStats,
+  part = "main",
 }: {
   summary: CatalogSummary[];
   issues: CatalogIssue[];
@@ -223,6 +225,8 @@ export function CatalogSyncSection({
   importPlan: { rows: DelproImportPlanRow[]; drug_parameters_complete: boolean } | null;
   singleJob: string | null;
   animalStats: { active: number; withNumber: number };
+  /** main = everyday linking; advanced = templates, catalog writes, history, mode. */
+  part?: "main" | "advanced";
 }) {
   const sum = (t: DelproCatalogObjectType) => summary.find((s) => s.object_type === t);
   const lastRun = runs[0] ?? null;
@@ -247,12 +251,142 @@ export function CatalogSyncSection({
         (j.disease_id ?? j.product_id ?? j.template_id) === g.gvet_id,
     );
 
+  if (part === "advanced") {
+    return (
+      <Card>
+        <CardHeader className="py-3">
+          <CardTitle className="flex items-center gap-2">
+            <BookOpen className="size-4 text-text-muted" />
+            Vaistai ir ligos — išplėstiniai nustatymai
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <HowTo
+            title="Kada čia reikia ką nors keisti"
+            intro="Kasdieniam darbui šių nustatymų nereikia. Čia yra gydymo šablonai, rašymas į DelPro ir sinchronizacijų istorija."
+            steps={[
+              <>Keiskite tik tada, kai tiksliai žinote kodėl — pvz. kai prižiūrintis asmuo paprašo.</>,
+              <><b>„Kas pagrindinis“</b> turi likti <b>„DelPro – pagrindinis“</b>: vaistų karencijas ir pavadinimus taisykite DelPro, GVET pasiims pats.</>,
+              <><b>„Sinchronizacijų istorija“</b> parodo, kada ir kiek įrašų gauta iš DelPro — naudinga, kai kažkas neatsinaujina.</>,
+            ]}
+          />
+        <CollapsibleSection defaultOpen={false} title={`GVET gydymo šablonai (${gvetTemplates.length})`}>
+            <TreatmentTemplates templates={gvetTemplates} products={templateProducts} diseases={diseases} />
+          </CollapsibleSection>
+
+          <CollapsibleSection
+            defaultOpen={false}
+            title={`Rašymas į DelPro (${jobs.filter((j) => !j.is_test && ["queued", "processing", "needs_review", "failed", "verification_failed"].includes(j.status)).length})`}
+          >
+            <CatalogWritePanel
+              writeEnabled={writeEnabled}
+              workerWriteEnabled={workerWriteEnabled}
+              validated={validated}
+              outboundMode={outboundMode}
+              writeChannel={writeChannel}
+              jobs={jobs}
+              singleJob={singleJob}
+            />
+          </CollapsibleSection>
+
+          <CollapsibleSection defaultOpen={false} title={`DelPro gydymo šablonai (${templates.length})`}>
+            <table className="w-full text-[12px]">
+              <thead className="border-b border-border text-left text-text-muted">
+                <tr>
+                  <th className="py-1.5 pr-2 font-medium">Kodas</th>
+                  <th className="px-2 py-1.5 font-medium">Šablonas</th>
+                  <th className="px-2 py-1.5 font-medium">Vaistai (dozė × kartai × d.)</th>
+                  <th className="px-2 py-1.5 font-medium">Diagnozių</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border">
+                {templates.map((t) => (
+                  <tr key={t.code} className={t.removed_at || t.active === false ? "text-text-muted" : ""}>
+                    <td className="py-1.5 pr-2 align-top">{t.code}</td>
+                    <td className="px-2 py-1.5 align-top">
+                      {t.name ?? "—"}
+                      {t.removed_at && " (pašalintas)"}
+                    </td>
+                    <td className="px-2 py-1.5">
+                      {t.drug_usages.length === 0
+                        ? "—"
+                        : t.drug_usages.map((u) => (
+                            <div key={u.key}>
+                              {u.drug_name ?? `Drug ${u.drug_code ?? "?"}`} — {catalogValue(u.dosage)} {u.uom ?? ""} × {catalogValue(u.frequency)} × {catalogValue(u.treat_cow_days)} d.
+                              <span className="text-text-muted">
+                                {" "}
+                                (pienas {catalogValue(u.dump_milk_days)} d., mėsa {catalogValue(u.meat_withhold_days)} d.)
+                              </span>
+                            </div>
+                          ))}
+                    </td>
+                    <td className="px-2 py-1.5 align-top">{t.recommended_for}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </CollapsibleSection>
+
+          <CollapsibleSection defaultOpen={false} title={`Katalogo sinchronizacijų istorija (${runs.length})`}>
+            <div className="space-y-4">
+              <CatalogInboundModeForm mode={inboundMode} />
+              {runs.length === 0 ? (
+                <p className="text-[12px] text-text-muted">Dar nebuvo.</p>
+              ) : (
+                <table className="w-full text-[12px]">
+                  <thead className="border-b border-border text-left text-text-muted">
+                    <tr>
+                      <th className="py-1.5 pr-2 font-medium">Pradėta</th>
+                      <th className="px-2 py-1.5 font-medium">Būsena</th>
+                      <th className="px-2 py-1.5 font-medium">Gauta (nauji / pakeisti / pašalinti)</th>
+                      <th className="px-2 py-1.5 font-medium">Atidaryta / uždaryta</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-border">
+                    {runs.map((r) => (
+                      <tr key={r.id}>
+                        <td className="py-1.5 pr-2 align-top text-text-secondary">{formatDateTime(r.started_at)}</td>
+                        <td className="px-2 py-1.5 align-top">
+                          {r.status === "completed" ? "Baigta" : r.status === "running" ? "Vyksta" : "Nepavyko"}
+                          {r.error && <div className="text-danger">{r.error}</div>}
+                        </td>
+                        <td className="px-2 py-1.5">
+                          {Object.entries(r.stats)
+                            .filter(([t]) => t !== "Animal")
+                            .map(([t, s]) => (
+                              <div key={t} className={s.complete === false ? "text-warning" : ""}>
+                                {objectLabel(t)}: {s.received ?? 0} ({s.inserted ?? 0} / {s.changed ?? 0} / {s.removed ?? 0})
+                                {s.invalid ? `, netinkami ${s.invalid}` : ""}
+                                {s.complete === false ? ` — nepilnas${s.note ? ` (${s.note})` : ""}` : ""}
+                              </div>
+                            ))}
+                          {r.stats.Animal && (
+                            <div className="text-text-muted">
+                              Gyvulių ID: susieta {r.stats.Animal.matched ?? 0}, nerasta {r.stats.Animal.unmatched ?? 0}
+                              {(r.stats.Animal.ambiguous ?? 0) > 0 ? `, dviprasmiški ${r.stats.Animal.ambiguous}` : ""}
+                              {(r.stats.Animal.conflicts ?? 0) > 0 ? `, konfliktai ${r.stats.Animal.conflicts}` : ""}
+                            </div>
+                          )}
+                        </td>
+                        <td className="px-2 py-1.5 align-top">{r.reconcile ? `${r.reconcile.opened} / ${r.reconcile.closed}` : "—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </CollapsibleSection>
+        </CardContent>
+      </Card>
+    );
+  }
+
   return (
     <Card>
       <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-2 py-3">
         <CardTitle className="flex items-center gap-2">
           <BookOpen className="size-4 text-text-muted" />
-          Katalogo sinchronizacija (DelPro ↔ GVET)
+          Vaistai ir ligos (DelPro ↔ GVET)
         </CardTitle>
         <div className="flex flex-wrap items-start gap-2">
           {suggestions > 0 && (
@@ -276,6 +410,16 @@ export function CatalogSyncSection({
         </div>
       </CardHeader>
       <CardContent className="space-y-4">
+        <HowTo
+          intro="Kad gydymas nueitų į DelPro, kiekviena GVET liga ir kiekvienas vaistas turi turėti savo porą DelPro sąraše. Čia tos poros sudaromos ir prižiūrimos. Sąrašas iš DelPro paimamas kartą per dieną."
+          steps={[
+            <>Sukūrėte naują vaistą ar ligą DelPro? Spauskite <b>„Sinchronizuoti dabar“</b> ir palaukite kelias minutes. Tokiu pat pavadinimu jis susies pats.</>,
+            <>Atsidarykite <b>„Reikia sprendimo“</b>. Kiekvienas įrašas turi mygtukus — pasirinkite teisingą (dažniausiai „Susieti“ arba „Imti iš DelPro“).</>,
+            <>Jei pavadinimai DelPro ir GVET skiriasi — <b>„Rankinis susiejimas“</b>: pasirinkite tipą, DelPro įrašą, GVET įrašą ir spauskite „Susieti“.</>,
+            <>Karenciją ir pavadinimus taisykite <b>DelPro</b> — GVET pasiims pats ir perskaičiuos senų gydymų karencijos datas.</>,
+          ]}
+          note="„Susieta X/Y“ reiškia: iš Y DelPro įrašų X jau turi porą GVET. Nesusieti DelPro įrašai netrukdo, jei jų nenaudojate."
+        />
         <div className="flex flex-wrap items-center gap-x-8 gap-y-3">
           <div className="flex items-center gap-2">
             <span className="text-[13px] text-text-secondary">Paskutinė sinchronizacija</span>
@@ -292,9 +436,9 @@ export function CatalogSyncSection({
           <Stat label="ligų susieta" value={`${sum("Diagnosis")?.linked ?? 0}/${sum("Diagnosis")?.items ?? 0}`} />
           <Stat label="vaistų susieta" value={`${sum("Drug")?.linked ?? 0}/${sum("Drug")?.items ?? 0}`} />
           <Stat label="gydymo šablonų" value={sum("Treatment")?.items ?? 0} />
-          <Stat label="nesusieta DelPro" value={(sum("Diagnosis")?.unlinked ?? 0) + (sum("Drug")?.unlinked ?? 0)} />
-          <Stat label="GVET be DelPro" value={gvetUnlinked.length} />
-          <Stat label="klaidos / konfliktai" value={problems} tone={problems > 0 ? "danger" : undefined} />
+          <Stat label="DelPro be poros" value={(sum("Diagnosis")?.unlinked ?? 0) + (sum("Drug")?.unlinked ?? 0)} />
+          <Stat label="GVET be poros" value={gvetUnlinked.length} />
+          <Stat label="reikia sprendimo (klaidos)" value={problems} tone={problems > 0 ? "danger" : undefined} />
           <Stat label="laukia siuntimo į DelPro" value={outbound} tone={outbound > 0 ? "warning" : undefined} />
           <div className="flex items-center gap-2" title="GVET → DelPro katalogo rašymas (CreateData / UpdateData)">
             <span className="text-[13px] text-text-secondary">Rašymas į DelPro</span>
@@ -329,7 +473,7 @@ export function CatalogSyncSection({
 
         <CollapsibleSection defaultOpen={issues.length > 0} title={`Reikia sprendimo (${issues.length})`}>
           {issues.length === 0 ? (
-            <p className="text-[12px] text-text-muted">Nėra.</p>
+            <p className="text-[12px] text-text-muted">Nieko spręsti nereikia.</p>
           ) : (
             <div className="-mx-4 -my-4 divide-y divide-border">
               {issues.map((i) => (
@@ -341,7 +485,7 @@ export function CatalogSyncSection({
 
         <CollapsibleSection
           defaultOpen={(importPlan?.rows ?? []).some((r) => r.action === "create" || r.action === "link")}
-          title={`Importas iš DelPro į GVET (${(importPlan?.rows ?? []).filter((r) => r.action !== "linked").length})`}
+          title={`Nauji įrašai iš DelPro, kurių GVET dar neturi (${(importPlan?.rows ?? []).filter((r) => r.action !== "linked").length})`}
         >
           {importPlan ? (
             <CatalogImportPanel rows={importPlan.rows} drugParametersComplete={importPlan.drug_parameters_complete} />
@@ -352,7 +496,7 @@ export function CatalogSyncSection({
 
         <CollapsibleSection
           defaultOpen={false}
-          title={`Rankinis susiejimas ir DelPro šablonai (${unlinkedItems.filter((i) => i.object_type === "Treatment").length})`}
+          title="Rankinis susiejimas (kai pavadinimai skiriasi)"
         >
           <div className="space-y-4">
             <CatalogLinkForm delpro={linkOptions.delpro} gvet={linkOptions.gvet} />
@@ -376,7 +520,7 @@ export function CatalogSyncSection({
           </div>
         </CollapsibleSection>
 
-        <CollapsibleSection defaultOpen={false} title={`Susieti įrašai (${linkedItems.length})`}>
+        <CollapsibleSection defaultOpen={false} title={`Jau susieta (${linkedItems.length})`}>
           <div className="-mx-4 -my-4 divide-y divide-border">
             {linkedItems.map((i) => (
               <div key={i.id} className="flex items-center justify-between gap-3 px-4 py-1.5">
@@ -391,7 +535,7 @@ export function CatalogSyncSection({
           </div>
         </CollapsibleSection>
 
-        <CollapsibleSection defaultOpen={false} title={`GVET be DelPro atitikmens (${gvetUnlinked.length})`}>
+        <CollapsibleSection defaultOpen={false} title={`GVET įrašai, kurių nėra DelPro (${gvetUnlinked.length})`}>
           <div className="-mx-4 divide-y divide-border border-t border-border">
             {gvetUnlinked.map((g) => {
               const job = queuedCreate(g);
@@ -412,112 +556,6 @@ export function CatalogSyncSection({
           </div>
         </CollapsibleSection>
 
-        <CollapsibleSection defaultOpen={false} title={`GVET gydymo šablonai (${gvetTemplates.length})`}>
-          <TreatmentTemplates templates={gvetTemplates} products={templateProducts} diseases={diseases} />
-        </CollapsibleSection>
-
-        <CollapsibleSection
-          defaultOpen={false}
-          title={`Rašymas į DelPro (${jobs.filter((j) => !j.is_test && ["queued", "processing", "needs_review", "failed", "verification_failed"].includes(j.status)).length})`}
-        >
-          <CatalogWritePanel
-            writeEnabled={writeEnabled}
-            workerWriteEnabled={workerWriteEnabled}
-            validated={validated}
-            outboundMode={outboundMode}
-            writeChannel={writeChannel}
-            jobs={jobs}
-            singleJob={singleJob}
-          />
-        </CollapsibleSection>
-
-        <CollapsibleSection defaultOpen={false} title={`DelPro gydymo šablonai (${templates.length})`}>
-          <table className="w-full text-[12px]">
-            <thead className="border-b border-border text-left text-text-muted">
-              <tr>
-                <th className="py-1.5 pr-2 font-medium">Kodas</th>
-                <th className="px-2 py-1.5 font-medium">Šablonas</th>
-                <th className="px-2 py-1.5 font-medium">Vaistai (dozė × kartai × d.)</th>
-                <th className="px-2 py-1.5 font-medium">Diagnozių</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-border">
-              {templates.map((t) => (
-                <tr key={t.code} className={t.removed_at || t.active === false ? "text-text-muted" : ""}>
-                  <td className="py-1.5 pr-2 align-top">{t.code}</td>
-                  <td className="px-2 py-1.5 align-top">
-                    {t.name ?? "—"}
-                    {t.removed_at && " (pašalintas)"}
-                  </td>
-                  <td className="px-2 py-1.5">
-                    {t.drug_usages.length === 0
-                      ? "—"
-                      : t.drug_usages.map((u) => (
-                          <div key={u.key}>
-                            {u.drug_name ?? `Drug ${u.drug_code ?? "?"}`} — {catalogValue(u.dosage)} {u.uom ?? ""} × {catalogValue(u.frequency)} × {catalogValue(u.treat_cow_days)} d.
-                            <span className="text-text-muted">
-                              {" "}
-                              (pienas {catalogValue(u.dump_milk_days)} d., mėsa {catalogValue(u.meat_withhold_days)} d.)
-                            </span>
-                          </div>
-                        ))}
-                  </td>
-                  <td className="px-2 py-1.5 align-top">{t.recommended_for}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </CollapsibleSection>
-
-        <CollapsibleSection defaultOpen={false} title={`Katalogo sinchronizacijų istorija (${runs.length})`}>
-          <div className="space-y-4">
-            <CatalogInboundModeForm mode={inboundMode} />
-            {runs.length === 0 ? (
-              <p className="text-[12px] text-text-muted">Dar nebuvo.</p>
-            ) : (
-              <table className="w-full text-[12px]">
-                <thead className="border-b border-border text-left text-text-muted">
-                  <tr>
-                    <th className="py-1.5 pr-2 font-medium">Pradėta</th>
-                    <th className="px-2 py-1.5 font-medium">Būsena</th>
-                    <th className="px-2 py-1.5 font-medium">Gauta (nauji / pakeisti / pašalinti)</th>
-                    <th className="px-2 py-1.5 font-medium">Atidaryta / uždaryta</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-border">
-                  {runs.map((r) => (
-                    <tr key={r.id}>
-                      <td className="py-1.5 pr-2 align-top text-text-secondary">{formatDateTime(r.started_at)}</td>
-                      <td className="px-2 py-1.5 align-top">
-                        {r.status === "completed" ? "Baigta" : r.status === "running" ? "Vyksta" : "Nepavyko"}
-                        {r.error && <div className="text-danger">{r.error}</div>}
-                      </td>
-                      <td className="px-2 py-1.5">
-                        {Object.entries(r.stats)
-                          .filter(([t]) => t !== "Animal")
-                          .map(([t, s]) => (
-                            <div key={t} className={s.complete === false ? "text-warning" : ""}>
-                              {objectLabel(t)}: {s.received ?? 0} ({s.inserted ?? 0} / {s.changed ?? 0} / {s.removed ?? 0})
-                              {s.invalid ? `, netinkami ${s.invalid}` : ""}
-                              {s.complete === false ? ` — nepilnas${s.note ? ` (${s.note})` : ""}` : ""}
-                            </div>
-                          ))}
-                        {r.stats.Animal && (
-                          <div className="text-text-muted">
-                            Gyvulių ID: susieta {r.stats.Animal.matched ?? 0}, nerasta {r.stats.Animal.unmatched ?? 0}
-                            {(r.stats.Animal.ambiguous ?? 0) > 0 ? `, dviprasmiški ${r.stats.Animal.ambiguous}` : ""}
-                            {(r.stats.Animal.conflicts ?? 0) > 0 ? `, konfliktai ${r.stats.Animal.conflicts}` : ""}
-                          </div>
-                        )}
-                      </td>
-                      <td className="px-2 py-1.5 align-top">{r.reconcile ? `${r.reconcile.opened} / ${r.reconcile.closed}` : "—"}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-          </div>
-        </CollapsibleSection>
       </CardContent>
     </Card>
   );

@@ -3413,3 +3413,293 @@ do $$ declare t uuid := current_setting('t.times64')::uuid; begin
   end if;
 end $$;
 select 'assert' as step, '0064 course dose times: visit per time, shared by medicines, day-1 extra doses, closes/moves per time' as what;
+
+-- 0065. Reject waiting AND failed transfers, many at once; never a verification_failed one; admin only
+reset role;
+do $$ declare j uuid; begin
+  -- three jobs from the 0063/0064 treatments: one error, one pending, one verification_failed
+  update delpro_sync_jobs set status = 'error', error = 'test' where treatment_id = current_setting('t.mat63')::uuid;
+  update delpro_sync_jobs set status = 'pending_approval' where treatment_id = current_setting('t.drug63')::uuid;
+  update delpro_sync_jobs set status = 'verification_failed' where treatment_id = current_setting('t.times64')::uuid;
+end $$;
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000b',false);
+do $$ declare blocked boolean := false; begin
+  begin perform delpro_reject_jobs(array[(select id from delpro_sync_jobs where treatment_id = current_setting('t.drug63')::uuid)]);
+  exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: a vet rejected transfers'; end if;
+end $$;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000a',false);
+do $$ declare n integer; begin
+  n := delpro_reject_jobs((select array_agg(id) from delpro_sync_jobs where treatment_id in
+        (current_setting('t.mat63')::uuid, current_setting('t.drug63')::uuid, current_setting('t.times64')::uuid)), 'bandomasis');
+  if n <> 2 then raise exception 'expected 2 rejected, got %', n; end if;
+  if (select status from delpro_sync_jobs where treatment_id = current_setting('t.times64')::uuid) <> 'verification_failed' then
+    raise exception 'a verification_failed transfer must not be rejected';
+  end if;
+  if (select count(*) from delpro_sync_jobs where treatment_id in (current_setting('t.mat63')::uuid, current_setting('t.drug63')::uuid)
+      and status = 'rejected' and rejection_reason = 'bandomasis') <> 2 then raise exception 'error + pending must be rejected'; end if;
+  if not exists (select 1 from treatments where id = current_setting('t.mat63')::uuid) then raise exception 'rejecting must keep the treatment'; end if;
+end $$;
+reset role;
+select 'assert' as step, '0065 reject: waiting + failed, bulk, admin only, verification_failed kept' as what;
+
+-- 0066. Editing planned sync steps: date/time (+ later steps), medicine, title; skip a step; add animals
+reset role;
+insert into animals (id, tag_no, animal_no, sex) values
+  ('66000000-0000-0000-0000-000000000001','LT0000066001','6601','Karvė'),
+  ('66000000-0000-0000-0000-000000000002','LT0000066002','6602','Karvė'),
+  ('66000000-0000-0000-0000-000000000003','LT0000066003','6603','Karvė');
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000b',false);
+select set_config('t.sp66', save_sync_protocol(jsonb_build_object('name','TEST66 Ovsynch','steps', jsonb_build_array(
+  jsonb_build_object('day_offset',0,'title','GnRH 1','medications', jsonb_build_array(jsonb_build_object('product_id','59000000-0000-0000-0000-0000000000a1','qty',2))),
+  jsonb_build_object('day_offset',7,'title','PGF'),
+  jsonb_build_object('day_offset',9,'title','GnRH 2'))))::text, false);
+select set_config('t.m66', apply_sync_protocol_mass(jsonb_build_object('protocol_id', current_setting('t.sp66'), 'start_date', '2030-06-01', 'start_time', '08:00',
+  'animal_ids', jsonb_build_array('66000000-0000-0000-0000-000000000001','66000000-0000-0000-0000-000000000002')))->>'mass_application_id', false);
+-- move step 1 of animal 6601 by +2 days to 10:30, later steps follow; animal 6602 untouched
+select 'edit66' as step, edit_sync_steps(jsonb_build_object(
+  'visit_ids', (select jsonb_agg(visit_id) from vw_sync_open_steps where protocol_name = 'TEST66 Ovsynch' and sync_step_no = 1 and animal_no = '6601'),
+  'date', '2030-06-03', 'time', '10:30', 'shift_following', true, 'title', 'GnRH 1 (perkelta)',
+  'medications', jsonb_build_array(jsonb_build_object('product_id','59000000-0000-0000-0000-0000000000a1','qty',3,'unit','ml')))) as r;
+do $$ begin
+  if (select to_char(visit_datetime at time zone 'Europe/Vilnius', 'YYYY-MM-DD HH24:MI') from vw_sync_open_steps
+      where protocol_name = 'TEST66 Ovsynch' and animal_no = '6601' and sync_step_no = 1) <> '2030-06-03 10:30' then raise exception 'step not moved'; end if;
+  if (select step_date from vw_sync_open_steps where protocol_name = 'TEST66 Ovsynch' and animal_no = '6601' and sync_step_no = 3) <> '2030-06-12' then
+    raise exception 'later steps must move by the same days';
+  end if;
+  if (select to_char(visit_datetime at time zone 'Europe/Vilnius', 'HH24:MI') from vw_sync_open_steps
+      where protocol_name = 'TEST66 Ovsynch' and animal_no = '6601' and sync_step_no = 3) <> '08:00' then raise exception 'later steps keep their time'; end if;
+  if (select step_date from vw_sync_open_steps where protocol_name = 'TEST66 Ovsynch' and animal_no = '6602' and sync_step_no = 1) <> '2030-06-01' then
+    raise exception 'another animal must not move';
+  end if;
+  if (select (planned_medications->0->>'qty')::numeric from vw_sync_open_steps where protocol_name = 'TEST66 Ovsynch' and animal_no = '6601' and sync_step_no = 1) <> 3
+     or (select sync_step_title from vw_sync_open_steps where protocol_name = 'TEST66 Ovsynch' and animal_no = '6601' and sync_step_no = 1) <> 'GnRH 1 (perkelta)' then
+    raise exception 'medicine / title not edited';
+  end if;
+  if (select count(*) from sync_protocol_steps where protocol_id = current_setting('t.sp66')::uuid and title = 'GnRH 1') <> 1 then raise exception 'template must stay'; end if;
+end $$;
+-- skip step 2 for 6602 only
+select skip_sync_steps((select array_agg(visit_id) from vw_sync_open_steps where protocol_name = 'TEST66 Ovsynch' and animal_no = '6602' and sync_step_no = 2));
+do $$ begin
+  if exists (select 1 from vw_sync_open_steps where protocol_name = 'TEST66 Ovsynch' and animal_no = '6602' and sync_step_no = 2) then raise exception 'step not skipped'; end if;
+  if not exists (select 1 from vw_sync_open_steps where protocol_name = 'TEST66 Ovsynch' and animal_no = '6602' and sync_step_no = 3) then raise exception 'other steps must stay'; end if;
+end $$;
+do $$ declare blocked boolean := false; begin
+  begin perform skip_sync_steps((select array_agg(v.id) from animal_visits v join sync_protocol_applications a on a.id = v.sync_application_id
+                                 where a.protocol_name = 'TEST66 Ovsynch' and v.status = 'atsauktas'));
+  exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: editing a step that is not open'; end if;
+end $$;
+-- add 6603 to the same group; an animal already running is refused
+select 'add66' as step, add_sync_animals(jsonb_build_object('mass_application_id', current_setting('t.m66'), 'animal_ids', jsonb_build_array('66000000-0000-0000-0000-000000000003'))) as r;
+do $$ declare blocked boolean := false; begin
+  if (select count(*) from vw_sync_open_steps where mass_application_id = current_setting('t.m66')::uuid and animal_no = '6603') <> 3 then raise exception 'added animal needs its steps'; end if;
+  if (select step_date from vw_sync_open_steps where animal_no = '6603' and sync_step_no = 1) <> '2030-06-01' then raise exception 'added animal starts with the group'; end if;
+  if (select animal_count from sync_mass_applications where id = current_setting('t.m66')::uuid) <> 3 then raise exception 'mass count not updated'; end if;
+  begin perform add_sync_animals(jsonb_build_object('mass_application_id', current_setting('t.m66'), 'animal_ids', jsonb_build_array('66000000-0000-0000-0000-000000000001')));
+  exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: adding an animal that already runs a protocol'; end if;
+end $$;
+reset role;
+select 'assert' as step, '0066 sync step editing: move (+ later), medicine/title, skip, add animals; template untouched' as what;
+
+-- 0067. Greitas taisymas: propose a fix per problem, apply it, send again; catalog-sync wait; dose factor
+reset role;
+update system_settings set setting_value = 'review' where setting_key = 'delpro_catalog_inbound_mode';
+insert into delpro_catalog_items (object_type, delpro_key, name, active, fields, record_hash, raw) values
+  ('Drug', 'T67', 'TEST63 Nesusietas vaistas', true, '{"name":"TEST63 Nesusietas vaistas","active":true,"default_parameters":"T67P"}', 'h67', '{}'),
+  ('DrugParameters', 'T67P', null, null, '{"uom":"ml","dump_milk_days":0,"meat_withhold_days":0}', 'h67p', '{}');
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000b',false);
+select set_config('t.qf67', create_treatment(jsonb_build_object('animal_id', (select id from animals where animal_no = 'KT338'), 'reg_date', '2026-11-05',
+  'diagnosis', 'Mastitas', 'disease_id', '36000000-0000-0000-0000-0000000000d2',
+  'medications', jsonb_build_array(jsonb_build_object('product_id', '63000000-0000-0000-0000-0000000000a2', 'qty', 1, 'unit', 'ml'))))::text, false);
+do $$ declare blocked boolean := false; begin
+  begin perform delpro_quick_fixes((select id from delpro_sync_jobs where treatment_id = current_setting('t.qf67')::uuid));
+  exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: a vet used the quick fix'; end if;
+end $$;
+reset role;
+update delpro_sync_jobs set status = 'error', error = '„TEST63 Nesusietas vaistas“ nesusietas su DelPro vaistu.',
+  error_details = jsonb_build_object('problems', jsonb_build_array(jsonb_build_object('code','medicine_not_linked','product','TEST63 Nesusietas vaistas')))
+where treatment_id = current_setting('t.qf67')::uuid;
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000a',false);
+select 'qf67' as step, delpro_quick_fixes((select id from delpro_sync_jobs where treatment_id = current_setting('t.qf67')::uuid)) as r;
+do $$ declare v jsonb; j uuid := (select id from delpro_sync_jobs where treatment_id = current_setting('t.qf67')::uuid); begin
+  v := delpro_quick_fixes(j);
+  if not exists (select 1 from jsonb_array_elements(v->'problems') p where p->'fix'->>'kind' = 'link_drug'
+                 and p->'fix'->'candidates'->0->>'key' = 'T67' and (p->'fix'->'candidates'->0->>'score')::int = 100) then
+    raise exception 'expected a link_drug fix with the same-name DelPro drug first: %', v;
+  end if;
+  -- link only: the schedule is still missing → saved, the rest is reported, nothing sent
+  v := delpro_apply_quick_fix(jsonb_build_object('job_id', j, 'fixes', jsonb_build_array(
+         jsonb_build_object('kind','link_drug','product_id','63000000-0000-0000-0000-0000000000a2','delpro_key','T67'))));
+  if v->>'outcome' <> 'remaining' or not exists (select 1 from delpro_catalog_links where delpro_key = 'T67' and retired_at is null) then
+    raise exception 'link must be saved and the schedule reported: %', v;
+  end if;
+  if (select status from delpro_sync_jobs where id = j) <> 'error' then raise exception 'must not be sent while something is left'; end if;
+  v := delpro_quick_fixes(j);
+  if not exists (select 1 from jsonb_array_elements(v->'problems') p where p->'fix'->>'kind' = 'set_schedule'
+                 and (p->'fix'->>'frequency_per_day')::int = 1 and (p->'fix'->>'course_days')::int >= 1) then
+    raise exception 'expected a set_schedule fix with defaults: %', v;
+  end if;
+  if exists (select 1 from jsonb_array_elements(v->'problems') p where p->>'code' = 'medicine_not_linked') then
+    raise exception 'a fixed stored problem must disappear: %', v;
+  end if;
+  v := delpro_apply_quick_fix(jsonb_build_object('job_id', j, 'fixes', jsonb_build_array(
+         jsonb_build_object('kind','set_schedule','product_id','63000000-0000-0000-0000-0000000000a2','frequency_per_day',2,'course_days',3))));
+  if v->>'outcome' <> 'released' then raise exception 'expected the job to be sent again: %', v; end if;
+  if (select status from delpro_sync_jobs where id = j) <> 'approved' or (select error from delpro_sync_jobs where id = j) is not null then
+    raise exception 'job not released';
+  end if;
+  if (select frequency_per_day from treatment_medicine_schedules where treatment_id = current_setting('t.qf67')::uuid) <> 2 then raise exception 'schedule not saved'; end if;
+end $$;
+-- dose factor: DelPro gets qty × factor in its own unit
+reset role;
+update products set unit = 'vnt' where id = '63000000-0000-0000-0000-0000000000a2';
+update usage_items set unit = 'vnt' where treatment_id = current_setting('t.qf67')::uuid;
+do $$ declare v jsonb; j uuid := (select id from delpro_sync_jobs where treatment_id = current_setting('t.qf67')::uuid); begin
+  if not exists (select 1 from jsonb_array_elements(fn_delpro_treatment_plan(j)->'problems') p where p->>'code' = 'unit_mismatch') then
+    raise exception 'vnt vs ml must be a unit problem';
+  end if;
+  update products set delpro_dose_factor = 19 where id = '63000000-0000-0000-0000-0000000000a2';
+  v := fn_delpro_treatment_plan(j);
+  if exists (select 1 from jsonb_array_elements(v->'problems') p where p->>'code' = 'unit_mismatch')
+     or (v->'medicines'->0->>'qty')::numeric <> 19 or (v->'medicines'->0->>'gvet_qty')::numeric <> 1 then
+    raise exception 'factor must convert the DelPro dose: %', v->'medicines';
+  end if;
+end $$;
+-- a PC-only problem: fresh DelPro data first, then sent again by itself when the sync finishes
+update delpro_sync_jobs set status = 'error', error = 'DelPro neturi parametrų T67P.',
+  error_details = jsonb_build_object('problems', jsonb_build_array(jsonb_build_object('code','params_not_in_delpro','message','DelPro neturi parametrų T67P.')))
+where treatment_id = current_setting('t.qf67')::uuid;
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000a',false);
+do $$ declare v jsonb; j uuid := (select id from delpro_sync_jobs where treatment_id = current_setting('t.qf67')::uuid); begin
+  v := delpro_quick_fixes(j);
+  if not exists (select 1 from jsonb_array_elements(v->'problems') p where p->'fix'->>'kind' = 'refresh_catalog' and p->'fix'->>'params_key' = 'T67P') then
+    raise exception 'expected refresh_catalog for the parameters key: %', v;
+  end if;
+  v := delpro_apply_quick_fix(jsonb_build_object('job_id', j, 'fixes', jsonb_build_array(jsonb_build_object('kind','refresh_catalog'))));
+  if v->>'outcome' <> 'waiting_catalog' or (select retry_after_catalog_at from delpro_sync_jobs where id = j) is null then
+    raise exception 'expected to wait for the catalog sync: %', v;
+  end if;
+end $$;
+reset role;
+insert into delpro_catalog_runs (id, status, started_at) values ('67000000-0000-0000-0000-0000000000c1', 'running', now() + interval '1 second');
+update delpro_catalog_runs set status = 'completed', finished_at = now() + interval '2 seconds' where id = '67000000-0000-0000-0000-0000000000c1';
+do $$ begin
+  if (select status from delpro_sync_jobs where treatment_id = current_setting('t.qf67')::uuid) <> 'approved'
+     or (select retry_after_catalog_at from delpro_sync_jobs where treatment_id = current_setting('t.qf67')::uuid) is not null then
+    raise exception 'a finished catalog sync must send the waiting job again';
+  end if;
+end $$;
+update system_settings set setting_value = 'delpro' where setting_key = 'delpro_catalog_inbound_mode';
+select 'assert' as step, '0067 quick fix: link + schedule → sent again, leftovers reported, dose factor, waits for catalog sync' as what;
+
+-- 0068. Quick fix on live-like cases: lost DelPro settings warned up front, failed sync keeps waiting, a still-broken
+-- record gets its new reason (never breaks the sync), the "also cured" sweep, test animal rejected, karencija taken
+reset role;
+update system_settings set setting_value = 'review' where setting_key = 'delpro_catalog_inbound_mode';
+insert into products (id, name, category, unit, withdrawal_days_milk, withdrawal_days_meat) values
+  ('68000000-0000-0000-0000-0000000000a1', 'TEST68 Vaistas', 'medicines', 'ml', 5, 5);
+insert into batches (product_id, lot, expiry_date, received_qty) values
+  ('68000000-0000-0000-0000-0000000000a1', 'V68', '2030-01-01', 50),
+  ('63000000-0000-0000-0000-0000000000a2', 'V68B', '2030-01-01', 50);
+insert into delpro_catalog_items (object_type, delpro_key, name, active, fields, record_hash, raw) values
+  ('Drug', 'T68', 'TEST68 Vaistas', true, '{"name":"TEST68 Vaistas","active":true,"default_parameters":"T68P"}', 'h68', '{}'),
+  ('DrugParameters', 'T68P', null, null, '{"uom":"ml","dump_milk_days":0,"meat_withhold_days":0}', 'h68p', '{}');
+insert into animals (id, tag_no, animal_no, active) values ('68000000-0000-0000-0000-0000000000b1', 'lt 168', null, true);
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000b',false);
+-- like live Glucose/Bioestrovet: settings record gone + old treatment without a schedule
+select set_config('t.lost68', create_treatment(jsonb_build_object('animal_id', (select id from animals where animal_no = 'KT338'), 'reg_date', '2026-11-05',
+  'diagnosis', 'Mastitas', 'disease_id', '36000000-0000-0000-0000-0000000000d2',
+  'medications', jsonb_build_array(jsonb_build_object('product_id', '63000000-0000-0000-0000-0000000000a2', 'qty', 1, 'unit', 'vnt'))))::text, false);
+select set_config('t.s1', create_treatment(jsonb_build_object('animal_id', (select id from animals where animal_no = 'KT338'), 'reg_date', '2026-11-05',
+  'diagnosis', 'Mastitas', 'disease_id', '36000000-0000-0000-0000-0000000000d2',
+  'medications', jsonb_build_array(jsonb_build_object('product_id', '68000000-0000-0000-0000-0000000000a1', 'qty', 2, 'unit', 'ml'))))::text, false);
+select set_config('t.s2', create_treatment(jsonb_build_object('animal_id', (select id from animals where animal_no = 'KT338'), 'reg_date', '2026-11-05',
+  'diagnosis', 'Mastitas', 'disease_id', '36000000-0000-0000-0000-0000000000d2',
+  'medications', jsonb_build_array(jsonb_build_object('product_id', '68000000-0000-0000-0000-0000000000a1', 'qty', 3, 'unit', 'ml'))))::text, false);
+select set_config('t.test68', create_treatment(jsonb_build_object('animal_id', '68000000-0000-0000-0000-0000000000b1', 'reg_date', '2026-11-05',
+  'diagnosis', 'Mastitas', 'disease_id', '36000000-0000-0000-0000-0000000000d2',
+  'medications', jsonb_build_array(jsonb_build_object('product_id', '68000000-0000-0000-0000-0000000000a1', 'qty', 1, 'unit', 'ml'))))::text, false);
+reset role;
+update delpro_catalog_items set last_seen_at = '2020-01-01' where object_type = 'DrugParameters' and delpro_key = 'T67P';
+insert into delpro_catalog_runs (id, status, started_at, stats) values ('68000000-0000-0000-0000-0000000000c1', 'running', now() + interval '3 seconds', '{"DrugParameters":{"seen":5}}');
+update delpro_catalog_runs set status = 'completed' where id = '68000000-0000-0000-0000-0000000000c1';
+update delpro_sync_jobs set status = 'error', error = 'x', error_details = jsonb_build_object('problems', jsonb_build_array(jsonb_build_object('code','frequency_missing')))
+where treatment_id = current_setting('t.lost68')::uuid;
+update delpro_sync_jobs set status = 'error', error = 'nesusietas',
+  error_details = jsonb_build_object('problems', jsonb_build_array(jsonb_build_object('code','medicine_not_linked','product','TEST68 Vaistas')))
+where treatment_id in (current_setting('t.s1')::uuid, current_setting('t.s2')::uuid);
+insert into treatment_medicine_schedules (treatment_id, product_id, frequency_per_day, course_days) values
+  (current_setting('t.s1')::uuid, '68000000-0000-0000-0000-0000000000a1', 1, 1),
+  (current_setting('t.s2')::uuid, '68000000-0000-0000-0000-0000000000a1', 1, 1);
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000b',false);
+do $$ declare blocked boolean := false; begin
+  begin perform delpro_apply_quick_fix(jsonb_build_object('job_id', (select id from delpro_sync_jobs where treatment_id = current_setting('t.s1')::uuid),
+                                                        'fixes', jsonb_build_array(jsonb_build_object('kind','retry'))));
+  exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: a vet applied a quick fix'; end if;
+end $$;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000a',false);
+do $$ declare v jsonb; j uuid := (select id from delpro_sync_jobs where treatment_id = current_setting('t.lost68')::uuid); begin
+  -- lost settings are warned up front, next to the missing schedule
+  v := delpro_quick_fixes(j);
+  if not exists (select 1 from jsonb_array_elements(v->'problems') p where p->>'code' = 'params_not_in_delpro' and (p->'fix'->>'delpro_lost')::boolean) then
+    raise exception 'expected the lost DelPro settings hint: %', v;
+  end if;
+  if not exists (select 1 from jsonb_array_elements(v->'problems') p where p->'fix'->>'kind' = 'set_schedule') then raise exception 'schedule fix missing: %', v; end if;
+  v := delpro_apply_quick_fix(jsonb_build_object('job_id', j, 'fixes', jsonb_build_array(
+         jsonb_build_object('kind','set_schedule','product_id','63000000-0000-0000-0000-0000000000a2','frequency_per_day',1,'course_days',1),
+         jsonb_build_object('kind','refresh_catalog'))));
+  if v->>'outcome' <> 'waiting_catalog' then raise exception 'expected waiting: %', v; end if;
+  -- sweep: linking TEST68 once sends BOTH records that failed on it
+  v := delpro_apply_quick_fix(jsonb_build_object('job_id', (select id from delpro_sync_jobs where treatment_id = current_setting('t.s1')::uuid),
+         'fixes', jsonb_build_array(jsonb_build_object('kind','link_drug','product_id','68000000-0000-0000-0000-0000000000a1','delpro_key','T68'))));
+  -- karencija 5/5 vs DelPro 0/0 is left → reported, nothing sent
+  if v->>'outcome' <> 'remaining' or not exists (select 1 from jsonb_array_elements(v->'remaining') p where p->>'code' = 'withdrawal_mismatch') then
+    raise exception 'expected the karencija difference to be left: %', v;
+  end if;
+  v := delpro_apply_quick_fix(jsonb_build_object('job_id', (select id from delpro_sync_jobs where treatment_id = current_setting('t.s1')::uuid),
+         'fixes', jsonb_build_array(jsonb_build_object('kind','take_delpro_withdrawal','product_id','68000000-0000-0000-0000-0000000000a1'))));
+  if v->>'outcome' <> 'released' or (v->>'also_released')::int <> 1 then raise exception 'expected this + 1 other released: %', v; end if;
+  if (select withdrawal_days_milk from products where id = '68000000-0000-0000-0000-0000000000a1') <> 0 then raise exception 'DelPro karencija not taken'; end if;
+  if (select status from delpro_sync_jobs where treatment_id = current_setting('t.s2')::uuid) <> 'approved' then raise exception 'the other record was not sent'; end if;
+  -- test animal: reject proposed, treatment kept
+  j := (select id from delpro_sync_jobs where treatment_id = current_setting('t.test68')::uuid);
+  v := delpro_quick_fixes(j);
+  if not exists (select 1 from jsonb_array_elements(v->'problems') p where p->'fix'->>'kind' = 'reject' and not (p->'fix'->>'tag_valid')::boolean) then
+    raise exception 'expected reject for a test animal: %', v;
+  end if;
+  v := delpro_apply_quick_fix(jsonb_build_object('job_id', j, 'fixes', jsonb_build_array(jsonb_build_object('kind','reject'))));
+  if (select status from delpro_sync_jobs where id = j) <> 'rejected' or not exists (select 1 from treatments where id = current_setting('t.test68')::uuid) then
+    raise exception 'test animal: rejected, treatment kept';
+  end if;
+end $$;
+reset role;
+-- a failed sync does not release; a waiting record that is still broken gets the new reason; the sync itself never fails
+insert into delpro_catalog_runs (id, status, started_at) values ('68000000-0000-0000-0000-0000000000c2', 'running', now() + interval '5 seconds');
+update delpro_catalog_runs set status = 'failed' where id = '68000000-0000-0000-0000-0000000000c2';
+do $$ begin
+  if (select retry_after_catalog_at from delpro_sync_jobs where treatment_id = current_setting('t.lost68')::uuid) is null then raise exception 'a failed sync must keep waiting'; end if;
+end $$;
+delete from treatment_medicine_schedules where treatment_id = current_setting('t.lost68')::uuid;
+insert into delpro_catalog_runs (id, status, started_at) values ('68000000-0000-0000-0000-0000000000c3', 'running', now() + interval '6 seconds');
+update delpro_catalog_runs set status = 'completed' where id = '68000000-0000-0000-0000-0000000000c3';
+do $$ begin
+  if (select status from delpro_sync_jobs where treatment_id = current_setting('t.lost68')::uuid) <> 'error'
+     or (select retry_after_catalog_at from delpro_sync_jobs where treatment_id = current_setting('t.lost68')::uuid) is not null
+     or (select error from delpro_sync_jobs where treatment_id = current_setting('t.lost68')::uuid) not like '%dažnumas%' then
+    raise exception 'still broken after the sync: must show the new reason and stop waiting';
+  end if;
+  if (select status from delpro_catalog_runs where id = '68000000-0000-0000-0000-0000000000c3') <> 'completed' then raise exception 'sync must complete'; end if;
+end $$;
+update system_settings set setting_value = 'delpro' where setting_key = 'delpro_catalog_inbound_mode';
+select 'assert' as step, '0068 quick fix: lost settings hint, sweep, karencija, test animal, failed/broken syncs safe' as what;

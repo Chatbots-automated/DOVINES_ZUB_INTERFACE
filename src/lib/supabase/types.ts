@@ -196,6 +196,8 @@ export interface Database {
           act_unit_size: number | null;
           default_write_off_group_id: string | null;
           pack_size: number | null;
+          // 0067 — DelPro dose per 1 GVET unit (null = same unit)
+          delpro_dose_factor: number | null;
           subcategory_id: string | null;
           standard_amount: number | null;
           is_active: boolean;
@@ -1364,6 +1366,10 @@ export interface Database {
       apply_sync_protocol_mass: { Args: { p_data: Record<string, unknown> }; Returns: { mass_application_id: string; animals: number; visits: number } };
       complete_sync_steps: { Args: { p_data: Record<string, unknown> }; Returns: { steps: number; treatments: number } };
       cancel_sync_applications: { Args: { p_ids: string[] }; Returns: number };
+      // 0066 — edit planned sync steps
+      edit_sync_steps: { Args: { p_data: Record<string, unknown> }; Returns: { steps: number; moved_following: number } };
+      skip_sync_steps: { Args: { p_visit_ids: string[] }; Returns: number };
+      add_sync_animals: { Args: { p_data: Record<string, unknown> }; Returns: { animals: number; visits: number } };
       create_mass_treatment: { Args: { p_data: Record<string, unknown> }; Returns: { id: string; count: number } };
       delpro_approve_mass_treatment: { Args: { p_mass_treatment_id: string }; Returns: { waiting: number; approved: number } };
       create_treatment_with_visits: { Args: { p_data: Record<string, unknown>; p_visit_id?: string }; Returns: string };
@@ -1417,7 +1423,12 @@ export interface Database {
       };
       delpro_approve_jobs: { Args: { p_job_ids: string[] }; Returns: number };
       delpro_reject_job: { Args: { p_job_id: string; p_reason?: string }; Returns: undefined };
+      // 0065 — reject many waiting / failed transfers
+      delpro_reject_jobs: { Args: { p_job_ids: string[]; p_reason?: string }; Returns: number };
       delpro_retry_job: { Args: { p_job_id: string; p_refresh?: boolean }; Returns: undefined };
+      // 0067 — Greitas taisymas
+      delpro_quick_fixes: { Args: { p_job_id: string }; Returns: DelproQuickFixes };
+      delpro_apply_quick_fix: { Args: { p_data: Record<string, unknown> }; Returns: DelproQuickFixResult };
       // 0033 — treatment-level confirmation (same approval core as the queue)
       delpro_approve_treatment: { Args: { p_treatment_id: string; p_reapprove?: boolean }; Returns: DelproApprovalResult };
       delpro_treatment_transfer_state: { Args: { p_treatment_id: string }; Returns: DelproTransferState };
@@ -1896,6 +1907,36 @@ export type MassTreatmentRow = {
   created_at: string;
 };
 
+// 0067 — delpro_quick_fixes(job): one proposed fix per problem
+export type DelproQuickCandidate = { key: string; name: string; score: number };
+export type DelproQuickFix =
+  | { kind: "link_drug"; product_id: string; product_name: string; candidates: DelproQuickCandidate[] }
+  | { kind: "link_diagnosis"; disease_id: string; disease_name: string; candidates: DelproQuickCandidate[] }
+  | { kind: "set_schedule"; product_id: string; product_name: string; frequency_per_day: number; course_days: number }
+  | { kind: "take_delpro_withdrawal"; product_id: string; product_name: string; gvet_milk: number | null; gvet_meat: number | null; delpro_milk: number | null; delpro_meat: number | null }
+  | { kind: "dose_factor"; product_id: string; product_name: string; gvet_unit: string; delpro_uom: string; factor: number | null; gvet_qty: number | null }
+  | { kind: "fix_tag"; tag_no: string; tag_valid: boolean; animal_id: string }
+  | { kind: "refresh_catalog"; reason: string; product_name?: string | null; drug_code?: string | null; params_key?: string | null; delpro_lost?: boolean; disease_name?: string | null }
+  | { kind: "reject"; tag_no?: string; tag_valid?: boolean }
+  | { kind: "retry" }
+  | { kind: "resend" }
+  | { kind: "manual"; where: "treatment" | "settings" | "unknown" };
+export type DelproQuickProblem = { code: string; message: string; product?: string; product_id?: string; duplicate: boolean; fix: DelproQuickFix };
+export type DelproQuickFixes = {
+  job_id: string;
+  status: DelproSyncJobStatus;
+  attempts: number;
+  animal: string;
+  tag_no: string;
+  reg_date: string;
+  disease: string | null;
+  waiting_catalog_since: string | null;
+  worker_last_seen: string | null;
+  last_catalog_at: string | null;
+  problems: DelproQuickProblem[];
+};
+export type DelproQuickFixResult = { outcome: "released" | "remaining" | "waiting_catalog" | "rejected"; message: string; remaining: unknown[]; also_released: number };
+
 type DelproSyncJobRow = {
   id: string;
   treatment_id: string;
@@ -1923,6 +1964,9 @@ type DelproSyncJobRow = {
   requires_verification: boolean;
   // 0045 — queued while the temporary admin gate was on: only an administrator releases it
   admin_approval_required: boolean;
+  // 0067 — quick fix waiting for the next catalog sync, then sent again by itself
+  retry_after_catalog_at: string | null;
+  retry_after_catalog_by: string | null;
 };
 
 // ---------------------------------------------------------------------------

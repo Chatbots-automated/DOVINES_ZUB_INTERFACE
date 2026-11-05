@@ -1,6 +1,7 @@
 import { FileSpreadsheet } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { HowTo } from "@/components/delpro/how-to";
 import { CollapsibleSection } from "@/components/ui/collapsible-section";
 import { ActionButton } from "@/components/delpro/action-button";
 import { ReportTokenForm } from "@/components/delpro/report-token-form";
@@ -58,10 +59,20 @@ export function ReportImportsSection({
       <CardHeader className="py-3">
         <CardTitle className="flex items-center gap-2">
           <FileSpreadsheet className="size-4 text-text-muted" />
-          DelPro Excel ataskaitos (dieninės)
+          Dienos ataskaitos iš DelPro (Excel)
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-4">
+        <HowTo
+          intro="Kiekvieną dieną DelPro sukuria Excel ataskaitą, o ūkio kompiuteris ją pats atsiunčia į GVET (iš aplanko C:\GVET\Ataskaitos\Dienine). Duomenys (diagnozė, vaistai, karencijos pabaiga, gardas, primilžis ir kt.) atsiranda gyvulio kortelėje, skiltyje „DelPro ataskaita“."
+          steps={[
+            <>Kartą per dieną pažiūrėkite <b>„Paskutinis importas“</b> — data turi būti šiandienos.</>,
+            <>Jei yra <b>„atviri konfliktai“</b> — atsidarykite „Konfliktai ir neatpažinti įrašai“ ir sutvarkykite pagal priežastį.</>,
+            <>Jei yra <b>„nepavykę įkėlimai“</b> — ten parašyta, kodėl failas neperskaitytas.</>,
+            <>Pridėjote stulpelį DelPro ataskaitoje? Nieko daryti nereikia — jis atsiras pats (žr. „Ataskaitos laukai“).</>,
+          ]}
+          note="Ataskaita GVET gydymų nekuria ir karencijos neskaičiuoja — ji tik rodo, ką sako DelPro. Atnaujinami tik tie gyvuliai, kurie yra faile."
+        />
         <div className="flex flex-wrap items-center gap-x-8 gap-y-3">
           <div className="flex items-center gap-2">
             <span className="text-[13px] text-text-secondary">Paskutinis importas</span>
@@ -73,8 +84,8 @@ export function ReportImportsSection({
               <Badge tone="neutral">Dar nebuvo</Badge>
             )}
           </div>
-          <Stat label="failų" value={imports.length} />
-          <Stat label="gyvūnų su ataskaita" value={animalsWithReport} />
+          <Stat label="failų iš viso" value={imports.length} />
+          <Stat label="gyvulių turi ataskaitos duomenų" value={animalsWithReport} />
           <Stat label="atviri konfliktai" value={reviews.length} tone={reviews.length > 0 ? "warning" : undefined} />
           <Stat label="nepavykę įkėlimai" value={failures.length} tone={failures.length > 0 ? "danger" : undefined} />
           <Stat label="nauji stulpeliai" value={newFields.length} />

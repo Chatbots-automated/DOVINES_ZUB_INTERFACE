@@ -9,6 +9,7 @@ export const DELPRO_OPS = [
   "approveDelproJobs",
   "confirmDelproTransfer",
   "rejectDelproJob",
+  "rejectDelproJobs",
   "retryDelproJob",
   "updateDelproSettings",
   "saveDelproMapping",

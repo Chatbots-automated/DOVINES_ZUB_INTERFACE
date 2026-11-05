@@ -1,11 +1,14 @@
 import { redirect } from "next/navigation";
 import { headers } from "next/headers";
-import { Activity } from "lucide-react";
+import type * as React from "react";
+import { Activity, BookOpen, FileSpreadsheet, Send } from "lucide-react";
 import { createClient } from "@/lib/supabase/server";
 import { getCurrentProfile } from "@/lib/auth";
 import { PageHeader } from "@/components/layout/page-header";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { DelproHelpDrawer } from "@/components/delpro/help-drawer";
+import { HowTo } from "@/components/delpro/how-to";
 import { CollapsibleSection } from "@/components/ui/collapsible-section";
 import { DelproSettingsForm } from "@/components/delpro/settings-form";
 import { DelproSyncQueue, type QueueJob } from "@/components/delpro/sync-queue";
@@ -19,6 +22,7 @@ import type { DelproOutboundMode } from "@/lib/supabase/types";
 // The worker heartbeats on every poll (every minute or so); anything older
 // than this means the farm PC / worker is down (contract §7.5).
 const WORKER_STALE_MINUTES = 15;
+const TABS = ["gydymai", "katalogas", "ataskaitos", "gyvuliai", "nustatymai"];
 
 function minutesSince(iso: string | null | undefined): number | null {
   if (!iso) return null;
@@ -26,7 +30,7 @@ function minutesSince(iso: string | null | undefined): number | null {
 }
 
 // DelPro integracija (Priedas §3-§4) — admin only.
-export default async function DelproPage() {
+export default async function DelproPage({ searchParams }: { searchParams?: Promise<Record<string, string | string[] | undefined>> }) {
   const session = await getCurrentProfile();
   if (session?.profile.role !== "admin") redirect("/veterinarija");
 
@@ -99,141 +103,280 @@ export default async function DelproPage() {
 
   const mappingFor = (kind: string, id: string) => (mappingsRes.data ?? []).find((m) => m.kind === kind && m.local_id === id);
   const jobs = (jobsRes.data ?? []) as QueueJob[];
+  // 0067: quick fixes waiting for the next DelPro data refresh (sent again by themselves)
+  const { data: waitingRows } = await supabase.from("delpro_sync_jobs").select("id").not("retry_after_catalog_at", "is", null);
+  const waitingIds = (waitingRows ?? []).map((r) => r.id);
   const runs = runsRes.data ?? [];
 
   const countOf = (...statuses: string[]) => jobs.filter((j) => statuses.includes(j.status)).length;
   const workerLabel = workerOnline ? "Veikia" : lastSeen ? "Neatsako" : "Neprisijungė";
 
+  const catalogProps = {
+    summary: catSummaryRes.data ?? [],
+    issues: catIssuesRes.data ?? [],
+    unlinkedItems: catItems.filter((i) => !i.link_id),
+    linkedItems: catItems.filter((i) => i.link_id),
+    gvetUnlinked: catGvetRes.data ?? [],
+    templates: catTemplatesRes.data ?? [],
+    runs: catRunsRes.data ?? [],
+    writeEnabled: settings.get("delpro_catalog_write_enabled") === "true",
+    workerWriteEnabled: typeof workerInfo?.catalog_write_enabled === "boolean" ? workerInfo.catalog_write_enabled : null,
+    workerCatalogSource: typeof workerInfo?.catalog_source === "string" ? workerInfo.catalog_source : null,
+    inboundMode: (settings.get("delpro_catalog_inbound_mode") ?? "review") as CatalogInboundMode,
+    syncRequestedAt: settings.get("delpro_catalog_sync_requested_at") ?? null,
+    names: catNames,
+    gvetTemplates: gvetTemplatesRes.data ?? [],
+    templateProducts: templateProductsRes.data ?? [],
+    diseases: diseasesRes.data ?? [],
+    jobs: catJobsRes.data ?? [],
+    validated: (settings.get("delpro_catalog_validated_operations") ?? "").split(",").filter(Boolean),
+    outboundMode: (settings.get("delpro_catalog_outbound_mode") ?? "manual") as CatalogOutboundMode,
+    writeChannel: settings.get("delpro_write_channel") ?? "ui_script",
+    importPlan: importPlanRes.error ? null : (importPlanRes.data ?? null),
+    singleJob: settings.get("delpro_catalog_write_only_job") || null,
+    animalStats: { active: activeAnimalsRes.count ?? 0, withNumber: numberedAnimalsRes.count ?? 0 },
+  };
+  const issuesOpen = (catIssuesRes.data ?? []).length;
+  const lastCatalog = (catRunsRes.data ?? []).find((r) => r.status === "completed") ?? null;
+  const lastReport = (repImportsRes.data ?? [])[0] ?? null;
+  const reportToday = lastReport ? new Date(lastReport.received_at).toDateString() === new Date().toDateString() : false;
+  const failedCount = countOf("error", "verification_failed");
+  const waitingCount = countOf("pending_approval");
+  const sendingCount = countOf("approved", "processing");
+  const sp = (await searchParams) ?? {};
+  const tab = typeof sp.skirtukas === "string" && TABS.includes(sp.skirtukas) ? sp.skirtukas : "gydymai";
+
   return (
     <div className="flex flex-col">
-      <PageHeader title="DelPro" />
+      <PageHeader
+        title="DelPro"
+        description="Ryšys tarp GVET ir DelPro: gydymai keliauja į DelPro, vaistai, ligos, gyvuliai ir dienos ataskaitos — iš DelPro į GVET."
+        actions={<DelproHelpDrawer />}
+      />
       <div className="space-y-4 px-4 py-6 sm:px-6 lg:px-8">
-        <Card>
-          <CardContent className="flex flex-wrap items-center gap-x-8 gap-y-3 py-3">
-            <div className="flex items-center gap-2" title={lastSeen ? `Paskutinis signalas ${formatDateTime(lastSeen)}` : undefined}>
-              <Activity className="size-4 text-text-muted" />
-              <span className="text-[13px] text-text-secondary">Ūkio kompiuteris</span>
-              <Badge tone={workerOnline ? "success" : "danger"}>{workerLabel}</Badge>
-              {workerInfo?.version ? <span className="text-[11px] text-text-muted">v{String(workerInfo.version)}</span> : null}
-            </div>
-            <Stat label="Gyvulių iš DelPro" value={animalsRes.count ?? 0} />
-            <Stat label="Perduota" value={countOf("success")} />
-            <Stat label="Laukia patvirtinimo" value={countOf("pending_approval")} />
-            <Stat label="Laukia perdavimo" value={countOf("approved", "processing")} />
-            <Stat label="Klaidos" value={countOf("error", "verification_failed")} tone={countOf("error", "verification_failed") > 0 ? "danger" : undefined} />
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader className="py-3">
-            <CardTitle>Gydymų perdavimas</CardTitle>
-          </CardHeader>
-          <CardContent className="p-0">
-            <DelproSyncQueue jobs={jobs} workerOnline={workerOnline} />
-          </CardContent>
-        </Card>
-
-        <CatalogSyncSection
-          summary={catSummaryRes.data ?? []}
-          issues={catIssuesRes.data ?? []}
-          unlinkedItems={catItems.filter((i) => !i.link_id)}
-          linkedItems={catItems.filter((i) => i.link_id)}
-          gvetUnlinked={catGvetRes.data ?? []}
-          templates={catTemplatesRes.data ?? []}
-          runs={catRunsRes.data ?? []}
-          writeEnabled={settings.get("delpro_catalog_write_enabled") === "true"}
-          workerWriteEnabled={typeof workerInfo?.catalog_write_enabled === "boolean" ? workerInfo.catalog_write_enabled : null}
-          workerCatalogSource={typeof workerInfo?.catalog_source === "string" ? workerInfo.catalog_source : null}
-          inboundMode={(settings.get("delpro_catalog_inbound_mode") ?? "review") as CatalogInboundMode}
-          syncRequestedAt={settings.get("delpro_catalog_sync_requested_at") ?? null}
-          names={catNames}
-          gvetTemplates={gvetTemplatesRes.data ?? []}
-          templateProducts={templateProductsRes.data ?? []}
-          diseases={diseasesRes.data ?? []}
-          jobs={catJobsRes.data ?? []}
-          validated={(settings.get("delpro_catalog_validated_operations") ?? "").split(",").filter(Boolean)}
-          outboundMode={(settings.get("delpro_catalog_outbound_mode") ?? "manual") as CatalogOutboundMode}
-          writeChannel={settings.get("delpro_write_channel") ?? "ui_script"}
-          importPlan={importPlanRes.error ? null : (importPlanRes.data ?? null)}
-          singleJob={settings.get("delpro_catalog_write_only_job") || null}
-          animalStats={{ active: activeAnimalsRes.count ?? 0, withNumber: numberedAnimalsRes.count ?? 0 }}
-        />
-
-        <ReportImportsSection
-          imports={repImportsRes.data ?? []}
-          failures={repFailuresRes.data ?? []}
-          reviews={repReviewsRes.data ?? []}
-          fields={repFieldsRes.data ?? []}
-          tokens={repTokensRes.data ?? []}
-          endpointUrl={reportEndpoint}
-          endpointAltUrl={reportEndpointAlt}
-          endpointIsLocal={reportEndpointLocal}
-          animalsWithReport={repAnimalsRes.count ?? 0}
-        />
-
-        <CollapsibleSection defaultOpen={false} title="Nustatymai">
-          <DelproSettingsForm mode={(settings.get("delpro_outbound_mode") ?? "approval") as DelproOutboundMode} delayMinutes={settings.get("delpro_auto_delay_minutes") ?? "10"} />
-        </CollapsibleSection>
-
-        <CollapsibleSection defaultOpen={false} title={`Gyvulių sinchronizacijos (${runs.length})`}>
-          {runs.length === 0 ? (
-            <p className="text-[12px] text-text-muted">Dar nebuvo.</p>
-          ) : (
-            <table className="w-full text-[12px]">
-              <thead className="border-b border-border text-left text-text-muted">
-                <tr>
-                  <th className="py-1.5 pr-2 font-medium">Laikas</th>
-                  <th className="px-2 py-1.5 font-medium">Gauta</th>
-                  <th className="px-2 py-1.5 font-medium">Nauji</th>
-                  <th className="px-2 py-1.5 font-medium">Atnaujinti</th>
-                  <th className="px-2 py-1.5 font-medium">Išėję</th>
-                  <th className="px-2 py-1.5 font-medium">Praleisti</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-border">
-                {runs.map((r) => (
-                  <tr key={r.id}>
-                    <td className="py-1.5 pr-2 text-text-secondary">{formatDateTime(r.created_at)}</td>
-                    <td className="px-2 py-1.5">{r.received_rows}</td>
-                    <td className="px-2 py-1.5">{r.inserted}</td>
-                    <td className="px-2 py-1.5">{r.updated}</td>
-                    <td className="px-2 py-1.5">{r.deactivated}</td>
-                    <td className={r.skipped > 0 ? "px-2 py-1.5 font-semibold text-warning" : "px-2 py-1.5"}>{r.skipped}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-        </CollapsibleSection>
-
-        <div id="susiejimai" className="space-y-2">
-          <CollapsibleSection defaultOpen={false} title={`Kitokie pavadinimai DelPro: ligos (${(diseasesRes.data ?? []).length})`}>
-            <div className="-mx-4 divide-y divide-border">
-              {(diseasesRes.data ?? []).map((d) => {
-                const m = mappingFor("disease", d.id);
-                return <MappingRow key={d.id} kind="disease" localId={d.id} localName={d.name} code={m?.delpro_code ?? null} name={m?.delpro_name ?? null} />;
-              })}
-            </div>
-          </CollapsibleSection>
-          <CollapsibleSection defaultOpen={false} title={`Kitokie pavadinimai DelPro: vaistai (${(productsRes.data ?? []).length})`}>
-            <div className="-mx-4 divide-y divide-border">
-              {(productsRes.data ?? []).map((p) => {
-                const m = mappingFor("product", p.id);
-                return <MappingRow key={p.id} kind="product" localId={p.id} localName={p.name} code={m?.delpro_code ?? null} name={m?.delpro_name ?? null} />;
-              })}
-            </div>
-          </CollapsibleSection>
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <StatusTile
+            icon={<Activity className="size-4" />}
+            title="Ūkio kompiuteris"
+            tone={workerOnline ? "success" : "danger"}
+            value={workerLabel}
+            detail={
+              workerOnline
+                ? `Ryšys yra. Paskutinis signalas ${formatDateTime(lastSeen)}.`
+                : lastSeen
+                  ? `Paskutinis signalas ${formatDateTime(lastSeen)}. Kol neatsako, niekas nesiunčiama ir negaunama — bet ir neprarandama.`
+                  : "Kompiuteris dar niekada neprisijungė."
+            }
+            hint={workerOnline ? undefined : "Žr. „Jei kas nors neveikia“ → Ūkio kompiuteris."}
+          />
+          <StatusTile
+            icon={<Send className="size-4" />}
+            title="Gydymai į DelPro"
+            tone={failedCount > 0 ? "danger" : waitingCount > 0 ? "warning" : "success"}
+            value={failedCount > 0 ? `${failedCount} nepavyko` : waitingCount > 0 ? `${waitingCount} laukia` : "Viskas išsiųsta"}
+            detail={`Laukia siuntimo: ${waitingCount} · siunčiama: ${sendingCount} · nepavyko: ${failedCount} · perduota: ${countOf("success")}.`}
+            hint={failedCount > 0 || waitingCount > 0 ? "Skirtukas „Gydymai → DelPro“." : undefined}
+          />
+          <StatusTile
+            icon={<BookOpen className="size-4" />}
+            title="Vaistai ir ligos"
+            tone={issuesOpen > 0 ? "warning" : "success"}
+            value={issuesOpen > 0 ? `${issuesOpen} reikia sprendimo` : "Suderinta"}
+            detail={lastCatalog ? `Paskutinė sinchronizacija ${formatDateTime(lastCatalog.finished_at ?? lastCatalog.started_at)}.` : "Sinchronizacijos dar nebuvo."}
+            hint={issuesOpen > 0 ? "Skirtukas „Vaistai ir ligos“ → Reikia sprendimo." : undefined}
+          />
+          <StatusTile
+            icon={<FileSpreadsheet className="size-4" />}
+            title="Dienos ataskaita"
+            tone={!lastReport ? "neutral" : reportToday ? "success" : "warning"}
+            value={!lastReport ? "Dar negauta" : reportToday ? "Šiandienos gauta" : "Šiandien negauta"}
+            detail={lastReport ? `${lastReport.filename} · ${formatDateTime(lastReport.received_at)} · ${lastReport.rows_received} eil.` : "Ūkio kompiuteris dar neatsiuntė nė vieno failo."}
+            hint={lastReport && !reportToday ? "Žr. „Jei kas nors neveikia“ → Dienos ataskaitos." : undefined}
+          />
         </div>
+
+        <Tabs defaultValue={tab}>
+          <TabsList className="flex-wrap">
+            <TabsTrigger value="gydymai">Gydymai → DelPro{waitingCount + failedCount > 0 ? ` (${waitingCount + failedCount})` : ""}</TabsTrigger>
+            <TabsTrigger value="katalogas">Vaistai ir ligos{issuesOpen > 0 ? ` (${issuesOpen})` : ""}</TabsTrigger>
+            <TabsTrigger value="ataskaitos">Dienos ataskaitos</TabsTrigger>
+            <TabsTrigger value="gyvuliai">Gyvuliai</TabsTrigger>
+            <TabsTrigger value="nustatymai">Nustatymai</TabsTrigger>
+          </TabsList>
+
+          <TabsContent value="gydymai">
+            <Card>
+              <CardHeader className="py-3">
+                <CardTitle>Gydymų siuntimas į DelPro</CardTitle>
+              </CardHeader>
+              <CardContent className="p-0">
+                <DelproSyncQueue jobs={jobs} workerOnline={workerOnline} waitingIds={waitingIds} />
+              </CardContent>
+            </Card>
+          </TabsContent>
+
+          <TabsContent value="katalogas">
+            <CatalogSyncSection {...catalogProps} part="main" />
+          </TabsContent>
+
+          <TabsContent value="ataskaitos">
+            <ReportImportsSection
+              imports={repImportsRes.data ?? []}
+              failures={repFailuresRes.data ?? []}
+              reviews={repReviewsRes.data ?? []}
+              fields={repFieldsRes.data ?? []}
+              tokens={repTokensRes.data ?? []}
+              endpointUrl={reportEndpoint}
+              endpointAltUrl={reportEndpointAlt}
+              endpointIsLocal={reportEndpointLocal}
+              animalsWithReport={repAnimalsRes.count ?? 0}
+            />
+          </TabsContent>
+
+          <TabsContent value="gyvuliai">
+            <Card>
+              <CardHeader className="py-3">
+                <CardTitle>Gyvuliai iš DelPro</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <HowTo
+                  intro={`Gyvulių sąrašas į GVET ateina iš DelPro pats, kelis kartus per dieną. Dabar GVET turi ${animalsRes.count ?? 0} aktyvių gyvulių iš DelPro. Naujas gyvulys DelPro atsiras GVET po kitos sinchronizacijos; išėjęs (parduotas, nugaišęs) — GVET bus pažymėtas neaktyviu.`}
+                  steps={[
+                    <>Nieko daryti nereikia, jei <b>„Praleisti“</b> visada 0.</>,
+                    <>Jei <b>„Praleisti“</b> ne 0 — kažkurio DelPro gyvulio ausies numeris GVET jau priklauso kitam gyvuliui. Suraskite tą numerį skiltyje Gyvūnai ir pataisykite neteisingą įrašą.</>,
+                    <>Jei paskutinė eilutė sena (daugiau nei para) — patikrinkite, ar veikia ūkio kompiuteris.</>,
+                    <>Gyvulių GVET ranka nekurkite, jei jie yra DelPro — ranka įvestas gyvulys neturi ryšio su DelPro, ir jo gydymai į DelPro nenueis.</>,
+                  ]}
+                />
+                {runs.length === 0 ? (
+                  <p className="text-[12px] text-text-muted">Sinchronizacijų dar nebuvo.</p>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full min-w-[560px] text-[12.5px]">
+                      <thead className="border-b border-border text-left text-text-muted">
+                        <tr>
+                          <th className="py-1.5 pr-2 font-medium">Laikas</th>
+                          <th className="px-2 py-1.5 font-medium" title="Kiek gyvulių buvo DelPro sąraše">Gauta iš DelPro</th>
+                          <th className="px-2 py-1.5 font-medium" title="Nauji gyvuliai, sukurti GVET">Nauji</th>
+                          <th className="px-2 py-1.5 font-medium" title="Gyvuliai, kurių duomenys pasikeitė">Atnaujinti</th>
+                          <th className="px-2 py-1.5 font-medium" title="Nebėra DelPro — GVET pažymėti neaktyviais">Išėję</th>
+                          <th className="px-2 py-1.5 font-medium" title="Ausies numeris GVET priklauso kitam gyvuliui — praleista">Praleisti</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-border">
+                        {runs.map((r) => (
+                          <tr key={r.id}>
+                            <td className="py-1.5 pr-2 text-text-secondary">{formatDateTime(r.created_at)}</td>
+                            <td className="px-2 py-1.5">{r.received_rows}</td>
+                            <td className="px-2 py-1.5">{r.inserted}</td>
+                            <td className="px-2 py-1.5">{r.updated}</td>
+                            <td className="px-2 py-1.5">{r.deactivated}</td>
+                            <td className={r.skipped > 0 ? "px-2 py-1.5 font-semibold text-warning" : "px-2 py-1.5"}>{r.skipped}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          </TabsContent>
+
+          <TabsContent value="nustatymai" className="space-y-4">
+            <Card>
+              <CardHeader className="py-3">
+                <CardTitle>Gydymų siuntimo nustatymai</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <HowTo
+                  title="Ką reiškia nustatymai"
+                  steps={[
+                    <><b>Tvirtinama ranka</b> — gydymas į DelPro išeina tik paspaudus „Siųsti pažymėtus“. Saugiausia, kai norite viską peržiūrėti.</>,
+                    <><b>Automatiškai po delsos</b> — gydymas išeina pats po nurodyto minučių skaičiaus. Per tą laiką klaidingą įrašą dar galima ištrinti ar pataisyti.</>,
+                    <><b>Išjungta</b> — niekas nesiunčiama, įrašai kaupiasi „Paruošta siųsti“. Naudokite, jei DelPro tvarkomas ar keičiamas kompiuteris.</>,
+                  ]}
+                  note={
+                    settings.get("delpro_admin_approval_required") === "true"
+                      ? "Šiuo metu įjungtas administratoriaus patvirtinimas: kiekvieną naują gydymą vis tiek turi išleisti administratorius, nepriklausomai nuo šio nustatymo."
+                      : undefined
+                  }
+                />
+                <DelproSettingsForm mode={(settings.get("delpro_outbound_mode") ?? "approval") as DelproOutboundMode} delayMinutes={settings.get("delpro_auto_delay_minutes") ?? "10"} />
+              </CardContent>
+            </Card>
+
+            <CatalogSyncSection {...catalogProps} part="advanced" />
+
+            <Card id="susiejimai">
+              <CardHeader className="py-3">
+                <CardTitle>Kitokie pavadinimai DelPro</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <HowTo
+                  title="Kada to reikia"
+                  intro="Paprastai GVET ir DelPro pavadinimai sutampa ir nieko čia pildyti nereikia. Įrašykite DelPro pavadinimą (ar kodą) tik tada, kai tas pats vaistas ar liga DelPro vadinasi kitaip ir susieti pagal pavadinimą nepavyksta."
+                  steps={[<>Atsidarykite sąrašą, suraskite ligą ar vaistą, įrašykite DelPro pavadinimą ir išsaugokite.</>]}
+                />
+                <CollapsibleSection defaultOpen={false} title={`Ligos (${(diseasesRes.data ?? []).length})`}>
+                  <div className="-mx-4 divide-y divide-border">
+                    {(diseasesRes.data ?? []).map((d) => {
+                      const m = mappingFor("disease", d.id);
+                      return <MappingRow key={d.id} kind="disease" localId={d.id} localName={d.name} code={m?.delpro_code ?? null} name={m?.delpro_name ?? null} />;
+                    })}
+                  </div>
+                </CollapsibleSection>
+                <CollapsibleSection defaultOpen={false} title={`Vaistai (${(productsRes.data ?? []).length})`}>
+                  <div className="-mx-4 divide-y divide-border">
+                    {(productsRes.data ?? []).map((p) => {
+                      const m = mappingFor("product", p.id);
+                      return <MappingRow key={p.id} kind="product" localId={p.id} localName={p.name} code={m?.delpro_code ?? null} name={m?.delpro_name ?? null} />;
+                    })}
+                  </div>
+                </CollapsibleSection>
+              </CardContent>
+            </Card>
+          </TabsContent>
+        </Tabs>
       </div>
     </div>
   );
 }
 
-function Stat({ label, value, tone }: { label: string; value: number; tone?: "danger" }) {
+const TONE = {
+  success: { dot: "bg-success", text: "text-success" },
+  warning: { dot: "bg-warning", text: "text-warning" },
+  danger: { dot: "bg-danger", text: "text-danger" },
+  neutral: { dot: "bg-text-muted", text: "text-text-secondary" },
+} as const;
+
+function StatusTile({
+  icon,
+  title,
+  value,
+  detail,
+  hint,
+  tone,
+}: {
+  icon: React.ReactNode;
+  title: string;
+  value: string;
+  detail: string;
+  hint?: string;
+  tone: keyof typeof TONE;
+}) {
+  const t = TONE[tone];
   return (
-    <div className="flex items-baseline gap-1.5">
-      <span className={`text-[16px] font-semibold tabular-nums ${tone === "danger" ? "text-danger" : "text-text-primary"}`}>{value}</span>
-      <span className="text-[12px] text-text-muted">{label}</span>
-    </div>
+    <Card>
+      <CardContent className="space-y-1 py-3">
+        <p className="flex items-center gap-1.5 text-[12px] font-semibold uppercase tracking-wide text-text-muted">
+          {icon} {title}
+        </p>
+        <p className={`flex items-center gap-2 text-[16px] font-bold ${t.text}`}>
+          <span className={`size-2.5 rounded-full ${t.dot}`} /> {value}
+        </p>
+        <p className="text-[12px] leading-snug text-text-secondary">{detail}</p>
+        {hint && <p className="text-[12px] font-medium text-text-primary">{hint}</p>}
+      </CardContent>
+    </Card>
   );
 }

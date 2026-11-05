@@ -68,6 +68,23 @@ export async function rejectDelproJob(_prev: DelproActionResult | null, formData
   return done();
 }
 
+// 0065: reject many waiting / failed transfers at once (e.g. a test animal's treatments).
+export async function rejectDelproJobs(_prev: DelproActionResult | null, formData: FormData): Promise<DelproActionResult> {
+  let ids: string[] = [];
+  try {
+    ids = JSON.parse(String(formData.get("job_ids") ?? "[]"));
+  } catch {
+    ids = [];
+  }
+  if (ids.length === 0) return { ok: false, error: "Nepasirinktas nė vienas įrašas." };
+  const reason = String(formData.get("reason") ?? "").trim();
+  const supabase = await createClient();
+  const { data, error } = await supabase.rpc("delpro_reject_jobs", { p_job_ids: ids, p_reason: reason || undefined });
+  if (error) return { ok: false, error: error.message };
+  const n = data ?? 0;
+  return done(n < ids.length ? `Atmesta: ${n}. Kiti ${ids.length - n} jau buvo kitos būsenos.` : `Atmesta: ${n}.`);
+}
+
 export async function retryDelproJob(_prev: DelproActionResult | null, formData: FormData): Promise<DelproActionResult> {
   const jobId = String(formData.get("job_id") ?? "");
   const refresh = formData.get("refresh") === "1";

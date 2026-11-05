@@ -9,6 +9,9 @@ import { Badge } from "@/components/ui/badge";
 import { Input, Label, Select } from "@/components/ui/input";
 import { EmptyState } from "@/components/ui/empty-state";
 import { completeSyncSteps, type SyncMassResult } from "@/lib/actions/sync-mass";
+import { StepGroupDialog } from "@/components/sinchronizacijos/step-group-dialog";
+import type { SyncAnimal } from "@/lib/sync-mass";
+import type { SyncProductOption } from "@/lib/sync-protocols";
 import { addDays } from "@/lib/visits";
 import { formatDate, formatQty } from "@/lib/utils";
 import type { SyncOpenStepRow } from "@/lib/supabase/types";
@@ -32,12 +35,18 @@ type Group = { key: string; date: string; protocol: string; title: string; rows:
 export function SyncStepsPanel({
   steps,
   products,
+  protocolProducts,
+  animals,
   currentVetName,
   today,
   canWrite,
 }: {
   steps: SyncOpenStepRow[];
   products: { id: string; name: string; unit: string }[];
+  /** Medicines a step may plan (same as the protocol editor) — for "Redaguoti". */
+  protocolProducts: SyncProductOption[];
+  /** For adding animals to a group. */
+  animals: SyncAnimal[];
   currentVetName?: string | null;
   today: string;
   canWrite: boolean;
@@ -161,6 +170,11 @@ export function SyncStepsPanel({
                 <span className="font-semibold text-text-primary">{g.title}</span>
                 <span className="text-[12px] text-text-muted">{g.protocol}</span>
                 <Badge tone="neutral">{g.rows.length} gyv.</Badge>
+                {canWrite && (
+                  <span className="ml-auto">
+                    <StepGroupDialog rows={g.rows} title={g.title} date={g.date} protocol={g.protocol} products={protocolProducts} animals={animals} />
+                  </span>
+                )}
                 {insemination && (
                   <Badge tone="accent">
                     <Dna className="size-3" /> Sėklinimas — įrašykite{" "}

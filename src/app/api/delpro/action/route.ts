@@ -16,6 +16,7 @@ const HANDLERS: Record<DelproOp, Handler> = {
   approveDelproJobs: delpro.approveDelproJobs,
   confirmDelproTransfer: delpro.confirmDelproTransfer,
   rejectDelproJob: delpro.rejectDelproJob,
+  rejectDelproJobs: delpro.rejectDelproJobs,
   retryDelproJob: delpro.retryDelproJob,
   updateDelproSettings: delpro.updateDelproSettings,
   saveDelproMapping: delpro.saveDelproMapping,

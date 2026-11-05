@@ -66,7 +66,7 @@ export function SyncClient({
         </TabsContent>
       )}
       <TabsContent value="zingsniai" className="mt-4">
-        <SyncStepsPanel steps={steps} products={allProducts} currentVetName={currentVetName} today={today} canWrite={canWrite} />
+        <SyncStepsPanel steps={steps} products={allProducts} protocolProducts={protocolProducts} animals={animals} currentVetName={currentVetName} today={today} canWrite={canWrite} />
       </TabsContent>
       <TabsContent value="vykdomi" className="mt-4">
         <SyncApplicationsPanel applications={applications} massApplications={massApplications} canWrite={canWrite} />

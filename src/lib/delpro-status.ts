@@ -54,6 +54,17 @@ const PROBLEM_SHORT: Record<string, string> = {
   // Gateway channel (0037)
   animal_guid: "Nėra DelPro ObjectGuid",
   diagnosis_link: "Diagnozė nesusieta su DelPro",
+  // Gateway treatment plan (0044/0046)
+  no_animal_guid: "Nėra DelPro ObjectGuid",
+  no_diagnosis_code: "Liga nesusieta su DelPro",
+  medicine_not_linked: "Vaistas nesusietas su DelPro",
+  medicine_params_missing: "Negauti DelPro vaisto parametrai",
+  unit_mismatch: "Nesutampa vienetai",
+  withdrawal_mismatch: "Nesutampa karencija",
+  frequency_missing: "Nenurodyta kartai per dieną",
+  course_days_missing: "Nenurodyta trukmė",
+  missing_dose: "Nėra dozės",
+  not_treatment: "Ne gydymas",
 };
 
 /** Short label for a blocking problem (the database message is the fallback). */

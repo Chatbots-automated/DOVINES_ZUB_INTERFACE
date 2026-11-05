@@ -72,3 +72,65 @@ export async function cancelSyncApplications(_prev: SyncMassResult | null, formD
   revalidateUsageViews();
   return { ok: true, message: `Nutraukta protokolų: ${ids.length}, atšaukta žingsnių: ${data ?? 0}.` };
 }
+
+// 0066 — change planned steps after applying: date / time (optionally moving the animal's later
+// steps by the same number of days), planned medicine, title. Recorded steps are never touched.
+export async function editSyncSteps(_prev: SyncMassResult | null, formData: FormData): Promise<SyncMassResult> {
+  const visit_ids = parseIds(formData.get("visit_ids"));
+  if (visit_ids.length === 0) return { ok: false, error: "Pažymėkite bent vieną gyvūną." };
+  const field = (name: string) => String(formData.get(name) ?? "").trim();
+  let medications: unknown = undefined;
+  if (formData.get("medications") !== null) {
+    try {
+      medications = JSON.parse(String(formData.get("medications")));
+    } catch {
+      return { ok: false, error: "Netinkami vaistų duomenys." };
+    }
+  }
+  const supabase = await createClient();
+  const { data, error } = await supabase.rpc("edit_sync_steps", {
+    p_data: {
+      visit_ids,
+      date: field("date") || null,
+      time: field("time") || null,
+      shift_following: formData.get("shift_following") === "1",
+      title: field("title") || null,
+      ...(medications !== undefined ? { medications } : {}),
+    },
+  });
+  if (error) {
+    console.error("[sinchronizacijos] edit_sync_steps failed:", error);
+    return { ok: false, error: error.message || "Nepavyko išsaugoti pakeitimų." };
+  }
+  revalidateUsageViews();
+  const moved = data?.moved_following ?? 0;
+  return { ok: true, message: `Pakeista žingsnių: ${data?.steps ?? visit_ids.length}${moved > 0 ? `, kartu perkelta vėlesnių: ${moved}` : ""}.` };
+}
+
+export async function skipSyncSteps(_prev: SyncMassResult | null, formData: FormData): Promise<SyncMassResult> {
+  const ids = parseIds(formData.get("visit_ids"));
+  if (ids.length === 0) return { ok: false, error: "Pažymėkite bent vieną gyvūną." };
+  const supabase = await createClient();
+  const { data, error } = await supabase.rpc("skip_sync_steps", { p_visit_ids: ids });
+  if (error) {
+    console.error("[sinchronizacijos] skip_sync_steps failed:", error);
+    return { ok: false, error: error.message || "Nepavyko praleisti žingsnių." };
+  }
+  revalidateUsageViews();
+  return { ok: true, message: `Žingsnis praleistas gyvūnų: ${data ?? ids.length}. Kiti jų žingsniai liko.` };
+}
+
+export async function addSyncAnimals(_prev: SyncMassResult | null, formData: FormData): Promise<SyncMassResult> {
+  const animal_ids = parseIds(formData.get("animal_ids"));
+  if (animal_ids.length === 0) return { ok: false, error: "Pasirinkite bent vieną gyvūną." };
+  const mass_application_id = String(formData.get("mass_application_id") ?? "");
+  const start_date = String(formData.get("start_date") ?? "").trim() || null;
+  const supabase = await createClient();
+  const { data, error } = await supabase.rpc("add_sync_animals", { p_data: { mass_application_id, animal_ids, start_date } });
+  if (error) {
+    console.error("[sinchronizacijos] add_sync_animals failed:", error);
+    return { ok: false, error: error.message || "Nepavyko pridėti gyvūnų." };
+  }
+  revalidateUsageViews();
+  return { ok: true, message: `Pridėta gyvūnų: ${data?.animals ?? animal_ids.length}. Suplanuota vizitų: ${data?.visits ?? 0}.` };
+}
