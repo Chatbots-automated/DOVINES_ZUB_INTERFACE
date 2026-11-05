@@ -18,7 +18,8 @@ import { ROUTE_OPTIONS, type WithdrawalFieldKey } from "@/lib/administration-rou
 import { catalogFromProps, loadTreatmentCatalog } from "@/lib/treatments/catalog";
 import {
   addDays,
-  assignDayNumbers,
+  courseDaysPayload,
+  courseRowProblems,
   daysBetween,
   summarizePlan,
   todayIso,
@@ -257,7 +258,7 @@ export function NewTreatmentDialog({
   const courseRows = plan.enabled ? plan.rows : NO_ROWS;
   const summary = React.useMemo(() => summarizePlan(startDate, medLines, courseRows, productById), [startDate, medLines, courseRows, productById]);
   const nowByProduct = React.useMemo(() => new Map(summary.totals.map((t) => [t.product.id, t.now])), [summary]);
-  const courseDoses = plan.enabled ? summary.doseDays : 1;
+  const dosesByProduct = React.useMemo(() => new Map(summary.totals.map((t) => [t.product.id, t.doses])), [summary]);
 
   // ---- Blocking validation (stock shortfall for today is also refused by the DB) ----
   const problems: string[] = [];
@@ -273,8 +274,7 @@ export function NewTreatmentDialog({
   if (summary.totals.some((t) => t.nowShort)) problems.push("Šiandienos dozės viršija atsargas.");
   if (plan.enabled) {
     if (plan.rows.length === 0) problems.push("Kursas neturi papildomų dozių — pridėkite dozę arba išjunkite kursą.");
-    if (plan.rows.some((r) => !r.product_id || !(Number(r.qty) > 0) || !r.date)) problems.push("Užpildykite visas kurso eilutes (data, produktas, dozė).");
-    if (plan.rows.some((r) => r.date && r.date <= startDate)) problems.push("Kurso dozių datos turi būti vėlesnės už gydymo datą.");
+    problems.push(...courseRowProblems(startDate, plan.rows));
   }
 
   const medicationsJson = JSON.stringify(
@@ -289,22 +289,10 @@ export function NewTreatmentDialog({
       })),
   );
 
-  const courseDaysJson = React.useMemo(() => {
-    const dayNumbers = assignDayNumbers(startDate, courseRows);
-    return JSON.stringify(
-      [...courseRows]
-        .sort((a, b) => a.date.localeCompare(b.date))
-        .filter((r) => r.date && r.product_id && Number(r.qty) > 0)
-        .map((r) => ({
-          day_number: dayNumbers.get(r.date),
-          scheduled_date: r.date,
-          product_id: r.product_id,
-          qty: Number(r.qty),
-          unit: productById.get(r.product_id)?.unit ?? null,
-          administration_route: r.route || null,
-        })),
-    );
-  }, [courseRows, startDate, productById]);
+  const courseDaysJson = React.useMemo(
+    () => JSON.stringify(courseDaysPayload(startDate, courseRows, (id) => productById.get(id)?.unit)),
+    [courseRows, startDate, productById],
+  );
 
   const hasMedicines = medLines.some((l) => l.product_id && Number(l.qty) > 0);
 
@@ -407,7 +395,7 @@ export function NewTreatmentDialog({
                         loading={catalogLoading}
                         regDate={startDate}
                         nowByProduct={nowByProduct}
-                        courseDoses={courseDoses}
+                        courseDoses={plan.enabled ? (dosesByProduct.get(line.product_id) ?? 1) : 1}
                         showSchedule={procedureType === "gydymas"}
                         onChange={(patch) => updateLine(line.key, patch)}
                         onRemove={() => setMedLines((prev) => prev.filter((l) => l.key !== line.key))}

@@ -70,7 +70,12 @@ export function previewFefo(product: CatalogProduct, qty: number): { lot: Catalo
 
 /** frequency / days: the vet's times per day and duration in days (gydymas, 0046) — sent to DelPro, never defaulted. */
 export type MedLine = { key: string; product_id: string; qty: string; route: string; frequency?: string; days?: string };
-export type CourseRow = { key: string; date: string; product_id: string; qty: string; route: string };
+/**
+ * One medicine on one course day. `times` doses that day, `every` hours apart, the first at
+ * `start` (HH:MM, Europe/Vilnius) — each time is its own course dose and planned visit (0064).
+ * A row dated on the treatment day itself (day 1) holds the EXTRA doses of that day.
+ */
+export type CourseRow = { key: string; date: string; product_id: string; qty: string; route: string; times: string; every: string; start: string };
 export type ScheduleMode = "daily" | "every2" | "interval";
 
 export const SCHEDULE_MODE_OPTIONS: { value: ScheduleMode; label: string }[] = [
@@ -92,21 +97,113 @@ export function courseDates(startDate: string, days: number, step: number): stri
   return out;
 }
 
-/** Copies the day-1 medicine lines onto each course date (days 2..N). */
-export function generateCourseRows(lines: MedLine[], startDate: string, days: number, mode: ScheduleMode, interval: number): CourseRow[] {
-  const usable = lines.filter((l) => l.product_id);
-  const dates = courseDates(startDate, days, modeStep(mode, interval));
-  const rows: CourseRow[] = [];
-  for (const date of dates) {
-    for (const l of usable) rows.push({ key: crypto.randomUUID(), date, product_id: l.product_id, qty: l.qty, route: l.route });
-  }
-  return rows;
+const posInt = (v: string | undefined) => (/^[1-9]\d*$/.test((v ?? "").trim()) ? Number(v) : null);
+
+/** HH:MM → minutes since midnight (null when not a valid time). */
+export function timeToMinutes(t: string): number | null {
+  const m = /^(\d{1,2}):(\d{2})$/.exec((t ?? "").trim());
+  if (!m) return null;
+  const h = Number(m[1]);
+  const min = Number(m[2]);
+  return h < 24 && min < 60 ? h * 60 + min : null;
 }
 
-/** Day 1 = startDate; each further distinct date gets the next number. */
+export function minutesToTime(min: number): string {
+  return `${String(Math.floor(min / 60)).padStart(2, "0")}:${String(min % 60).padStart(2, "0")}`;
+}
+
+/** Default spacing for n doses a day starting in the morning: the last one by ~12 h later (2× → 12 h, 3× → 6 h). */
+export function defaultEveryHours(times: number): number {
+  return times > 1 ? Math.max(1, Math.floor(12 / (times - 1))) : 24;
+}
+
+/**
+ * The dose times of a row (HH:MM), or an error when the times don't fit in the day
+ * (a dose after midnight belongs to the next day's row).
+ */
+export function rowSlots(row: Pick<CourseRow, "times" | "every" | "start">): { slots: string[]; error: string | null } {
+  const times = posInt(row.times);
+  const start = timeToMinutes(row.start);
+  if (times === null || times > 24) return { slots: [], error: "Kartai per dieną: 1–24." };
+  if (start === null) return { slots: [], error: "Nurodykite pirmo karto laiką." };
+  const every = times > 1 ? Number(row.every) : 0;
+  if (times > 1 && !(every > 0)) return { slots: [], error: "Nurodykite, kas kiek valandų." };
+  const slots: string[] = [];
+  for (let i = 0; i < times; i++) {
+    const at = start + Math.round(i * every * 60);
+    if (at >= 24 * 60) return { slots, error: "Dozės netelpa į dieną — paankstinkite pirmą kartą arba sumažinkite intervalą." };
+    slots.push(minutesToTime(at));
+  }
+  return { slots, error: null };
+}
+
+/**
+ * Copies the medicine lines onto each course date. Per medicine, its own "kartai per dieną" /
+ * "trukmė" (gydymas) win over the planner defaults. Times > 1 also plans the extra doses of day 1
+ * (the first dose of day 1 is the treatment itself).
+ */
+export function generateCourseRows(
+  lines: MedLine[],
+  startDate: string,
+  days: number,
+  mode: ScheduleMode,
+  interval: number,
+  defaults: { times: number; every: number; start: string } = { times: 1, every: 24, start: "08:00" },
+): CourseRow[] {
+  const usable = lines.filter((l) => l.product_id);
+  const step = modeStep(mode, interval);
+  const startMin = timeToMinutes(defaults.start) ?? 8 * 60;
+  const rows: CourseRow[] = [];
+  for (const l of usable) {
+    const times = posInt(l.frequency) ?? defaults.times;
+    // the planner's interval applies when it was set for this many doses; otherwise spread them over the day
+    const every = times === defaults.times ? defaults.every : defaultEveryHours(times);
+    const lineDays = posInt(l.days) ?? days;
+    const base = { product_id: l.product_id, qty: l.qty, route: l.route, every: String(every) };
+    if (times > 1) {
+      const first = startMin + Math.round(every * 60);
+      if (first < 24 * 60) rows.push({ key: crypto.randomUUID(), date: startDate, ...base, times: String(times - 1), start: minutesToTime(first) });
+    }
+    for (const date of courseDates(startDate, lineDays, step)) {
+      rows.push({ key: crypto.randomUUID(), date, ...base, times: String(times), start: defaults.start });
+    }
+  }
+  return rows.sort((a, b) => a.date.localeCompare(b.date) || a.start.localeCompare(b.start));
+}
+
+/** Day 1 = startDate (extra doses that day); each further distinct date gets the next number. */
 export function assignDayNumbers(startDate: string, rows: CourseRow[]): Map<string, number> {
   const dates = Array.from(new Set(rows.map((r) => r.date).filter((d) => d && d > startDate))).sort();
-  return new Map(dates.map((d, i) => [d, i + 2]));
+  return new Map<string, number>([[startDate, 1], ...dates.map((d, i) => [d, i + 2] as [string, number])]);
+}
+
+/** Problems that block saving the course rows (empty = ok). */
+export function courseRowProblems(startDate: string, rows: CourseRow[]): string[] {
+  const out: string[] = [];
+  if (rows.some((r) => !r.product_id || !(Number(r.qty) > 0) || !r.date)) out.push("Užpildykite visas kurso eilutes (data, produktas, dozė).");
+  if (rows.some((r) => r.date && r.date < startDate)) out.push("Kurso dozių datos negali būti ankstesnės už gydymo datą.");
+  const slotError = rows.map((r) => rowSlots(r).error).find(Boolean);
+  if (slotError) out.push(slotError);
+  return out;
+}
+
+/** The course as create_treatment() takes it: one entry per dose time (0064 scheduled_time). */
+export function courseDaysPayload(startDate: string, rows: CourseRow[], unitOf: (productId: string) => string | null | undefined) {
+  const dayNumbers = assignDayNumbers(startDate, rows);
+  return [...rows]
+    .filter((r) => r.date && r.product_id && Number(r.qty) > 0)
+    .flatMap((r) =>
+      rowSlots(r).slots.map((t) => ({
+        day_number: dayNumbers.get(r.date),
+        scheduled_date: r.date,
+        scheduled_time: t,
+        product_id: r.product_id,
+        qty: Number(r.qty),
+        unit: unitOf(r.product_id) ?? null,
+        administration_route: r.route || null,
+      })),
+    )
+    .sort((a, b) => a.scheduled_date.localeCompare(b.scheduled_date) || a.scheduled_time.localeCompare(b.scheduled_time));
 }
 
 // ---------------------------------------------------------------------------
@@ -118,6 +215,8 @@ export type ProductTotals = {
   now: number;
   later: number;
   total: number;
+  /** Doses of this product in the plan, incl. day 1. */
+  doses: number;
   /** Day-1 quantity exceeds usable stock — saving would be refused. */
   nowShort: boolean;
   /** Whole course exceeds usable stock (later doses may fail unless restocked). */
@@ -130,6 +229,8 @@ export type PlanSummary = {
   meatUntil: string | null;
   lastDate: string;
   doseDays: number;
+  /** All dose times in the plan, incl. day 1's treatment (= planned visits + 1). */
+  doseCount: number;
 };
 
 type WithdrawalProduct = Pick<CatalogProduct, "withdrawal_days_milk" | "withdrawal_days_meat"> & Partial<Record<WithdrawalFieldKey, number | null>>;
@@ -152,7 +253,7 @@ export function summarizePlan(
   rows: CourseRow[],
   productById: Map<string, CatalogProduct>,
 ): PlanSummary {
-  const acc = new Map<string, { now: number; later: number }>();
+  const acc = new Map<string, { now: number; later: number; doses: number }>();
   let milk: string | null = null;
   let meat: string | null = null;
   let lastDate = startDate;
@@ -167,17 +268,20 @@ export function summarizePlan(
   for (const l of lines) {
     const product = productById.get(l.product_id);
     if (!product || num(l.qty) <= 0) continue;
-    const e = acc.get(product.id) ?? { now: 0, later: 0 };
+    const e = acc.get(product.id) ?? { now: 0, later: 0, doses: 0 };
     e.now += num(l.qty);
+    e.doses += 1;
     acc.set(product.id, e);
     milk = bump(milk, until(startDate, product, l.route, "milk"));
     meat = bump(meat, until(startDate, product, l.route, "meat"));
   }
   for (const r of rows) {
     const product = productById.get(r.product_id);
-    if (!product || num(r.qty) <= 0 || !r.date) continue;
-    const e = acc.get(product.id) ?? { now: 0, later: 0 };
-    e.later += num(r.qty);
+    const slots = rowSlots(r).slots.length;
+    if (!product || num(r.qty) <= 0 || !r.date || slots === 0) continue;
+    const e = acc.get(product.id) ?? { now: 0, later: 0, doses: 0 };
+    e.later += num(r.qty) * slots;
+    e.doses += slots;
     acc.set(product.id, e);
     if (r.date > lastDate) lastDate = r.date;
     const k = `${product.id}|${r.route}`;
@@ -199,6 +303,7 @@ export function summarizePlan(
       now: e.now,
       later: e.later,
       total,
+      doses: e.doses,
       nowShort: stock !== null && e.now > stock + 1e-9,
       courseShort: stock !== null && total > stock + 1e-9,
     };
@@ -209,7 +314,8 @@ export function summarizePlan(
     milkUntil: milk,
     meatUntil: meat,
     lastDate,
-    doseDays: new Set(rows.filter((r) => r.date).map((r) => r.date)).size + 1,
+    doseDays: new Set(rows.filter((r) => r.date && r.date > startDate).map((r) => r.date)).size + 1,
+    doseCount: 1 + new Set(rows.flatMap((r) => (r.date ? rowSlots(r).slots.map((t) => `${r.date} ${t}`) : []))).size,
   };
 }
 

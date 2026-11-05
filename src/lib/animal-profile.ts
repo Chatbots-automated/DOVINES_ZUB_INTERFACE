@@ -275,7 +275,8 @@ export function buildTreatmentCards(raw: RawTreatment[], lines: RawLine[]): Trea
         // Day 1 is the treatment's own usage; a later day is done once every
         // dose scheduled for it has been administered.
         const perDay = new Map<number, boolean>();
-        for (const d of c.course_doses ?? []) perDay.set(d.day_number, (perDay.get(d.day_number) ?? true) && d.administered);
+        // 0064: day 1 may also hold extra doses later that day — it counts once (as the treatment itself)
+        for (const d of c.course_doses ?? []) if (d.day_number > 1) perDay.set(d.day_number, (perDay.get(d.day_number) ?? true) && d.administered);
         const doneLater = [...perDay.values()].filter(Boolean).length;
         const pending = (c.course_doses ?? []).filter((d) => !d.administered).map((d) => d.scheduled_date).sort();
         course = {

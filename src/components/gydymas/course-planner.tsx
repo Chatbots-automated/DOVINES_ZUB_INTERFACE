@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { AlertTriangle, CalendarClock, CheckCircle2, Plus, RefreshCw, Trash2 } from "lucide-react";
+import { AlertTriangle, CalendarClock, CheckCircle2, Clock, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input, Label, Select } from "@/components/ui/input";
@@ -11,8 +11,10 @@ import {
   SCHEDULE_MODE_OPTIONS,
   addDays,
   assignDayNumbers,
+  defaultEveryHours,
   generateCourseRows,
   modeStep,
+  rowSlots,
   type CatalogProduct,
   type CourseRow,
   type MedLine,
@@ -27,17 +29,23 @@ export type CoursePlan = {
   days: number;
   mode: ScheduleMode;
   interval: number;
+  /** Defaults for generated rows (0064): doses per day, hours apart, first dose time (HH:MM). */
+  times: number;
+  every: number;
+  start: string;
   rows: CourseRow[];
 };
 
-export const EMPTY_COURSE_PLAN: CoursePlan = { enabled: false, days: 5, mode: "daily", interval: 3, rows: [] };
+export const EMPTY_COURSE_PLAN: CoursePlan = { enabled: false, days: 5, mode: "daily", interval: 3, times: 1, every: 12, start: "08:00", rows: [] };
 
 const DAY_PRESETS = [3, 5, 7, 10];
 
 // "Kurso planavimas" (Priedas §2.4). Today's medicine lines are the template;
 // the schedule for the following days is generated from it and stays fully
-// editable (date, product, dose, route per row). Day 1 is deducted from stock
-// on save; days 2..N only when each dose is given (Gydymo kursai).
+// editable per day and medicine: date, product, dose, route, how many times that
+// day, every how many hours, first time (0064). Every dose time becomes a planned
+// visit (Vizitai). Day 1's first dose is deducted from stock on save; every other
+// dose only when it is given (Gydymo kursai / the visit card).
 export function CoursePlanner({
   plan,
   onChange,
@@ -57,11 +65,14 @@ export function CoursePlanner({
 }) {
   const regenerate = (patch: Partial<CoursePlan>): CoursePlan => {
     const next = { ...plan, ...patch };
-    return { ...next, rows: generateCourseRows(lines, regDate, next.days, next.mode, next.interval) };
+    return {
+      ...next,
+      rows: generateCourseRows(lines, regDate, next.days, next.mode, next.interval, { times: next.times, every: next.every, start: next.start }),
+    };
   };
 
   const dayNumbers = assignDayNumbers(regDate, plan.rows);
-  const sortedRows = [...plan.rows].sort((a, b) => a.date.localeCompare(b.date));
+  const sortedRows = [...plan.rows].sort((a, b) => a.date.localeCompare(b.date) || a.start.localeCompare(b.start));
   const hasTemplate = lines.some((l) => l.product_id && Number(l.qty) > 0);
 
   function updateRow(key: string, patch: Partial<CourseRow>) {
@@ -80,6 +91,9 @@ export function CoursePlanner({
           product_id: last?.product_id ?? lines[0]?.product_id ?? "",
           qty: last?.qty ?? lines[0]?.qty ?? "",
           route: last?.route ?? lines[0]?.route ?? "",
+          times: last?.times ?? String(plan.times),
+          every: last?.every ?? String(plan.every),
+          start: last && last.date > regDate ? last.start : plan.start,
         },
       ],
     });
@@ -149,6 +163,38 @@ export function CoursePlanner({
               </div>
             )}
             <div>
+              <Label className="mb-1">Kartai per dieną</Label>
+              <Input
+                type="number"
+                min={1}
+                max={24}
+                value={plan.times}
+                onChange={(e) => {
+                  const times = Math.max(1, Math.min(24, Number(e.target.value) || 1));
+                  onChange(regenerate({ times, every: defaultEveryHours(times) }));
+                }}
+                className="w-20"
+              />
+            </div>
+            {plan.times > 1 && (
+              <div>
+                <Label className="mb-1">Kas kiek val.</Label>
+                <Input
+                  type="number"
+                  min={1}
+                  max={23}
+                  step="0.5"
+                  value={plan.every}
+                  onChange={(e) => onChange(regenerate({ every: Math.max(0.5, Math.min(23, Number(e.target.value) || 1)) }))}
+                  className="w-20"
+                />
+              </div>
+            )}
+            <div>
+              <Label className="mb-1">Pirmas kartas</Label>
+              <Input type="time" value={plan.start} onChange={(e) => e.target.value && onChange(regenerate({ start: e.target.value }))} className="w-28" />
+            </div>
+            <div>
               <Label className="mb-1">Pradžia</Label>
               <p className="flex h-9 items-center rounded-control bg-surface px-3 text-[13px] font-medium text-text-primary">{formatDate(regDate)}</p>
             </div>
@@ -156,6 +202,11 @@ export function CoursePlanner({
               <RefreshCw className="size-4" /> Sugeneruoti iš vaistų
             </Button>
           </div>
+
+          <p className="text-[11.5px] text-text-muted">
+            Vaisto „Kartai per dieną“ ir „Trukmė“ (žingsnis 3) naudojami generuojant; kiekvieną dieną galima keisti atskirai. Kiekvienas
+            dozės laikas — atskiras planuojamas vizitas.
+          </p>
 
           {!hasTemplate && (
             <p className="rounded-control bg-warning-soft px-3 py-2 text-[12px] text-warning">
@@ -173,13 +224,15 @@ export function CoursePlanner({
             {sortedRows.map((row) => {
               const p = productById.get(row.product_id);
               const dayNo = dayNumbers.get(row.date);
+              const { slots, error } = rowSlots(row);
+              const times = Number(row.times) || 0;
               return (
-                <div key={row.key} className="rounded-control border border-border bg-surface p-2.5">
+                <div key={row.key} className={`rounded-control border bg-surface p-2.5 ${error ? "border-danger/50" : "border-border"}`}>
                   <div className="grid grid-cols-2 items-center gap-2 sm:grid-cols-[88px_140px_minmax(0,1.5fr)_100px_minmax(0,1fr)_36px]">
-                    <Badge tone={dayNo ? "info" : "danger"} className="justify-center">
-                      {dayNo ? `Diena ${dayNo}` : "Per anksti"}
+                    <Badge tone={dayNo ? (dayNo === 1 ? "success" : "info") : "danger"} className="justify-center">
+                      {dayNo ? (dayNo === 1 ? "Diena 1 +" : `Diena ${dayNo}`) : "Per anksti"}
                     </Badge>
-                    <Input type="date" min={addDays(regDate, 1)} value={row.date} onChange={(e) => updateRow(row.key, { date: e.target.value })} className="h-8" />
+                    <Input type="date" min={regDate} value={row.date} onChange={(e) => updateRow(row.key, { date: e.target.value })} className="h-8" />
                     <div className="col-span-2 sm:col-span-1">
                       <MedicinePicker compact catalog={catalog} value={row.product_id} onChange={(id) => updateRow(row.key, { product_id: id })} loading={loading} />
                     </div>
@@ -202,6 +255,51 @@ export function CoursePlanner({
                     >
                       <Trash2 className="size-4" />
                     </Button>
+                  </div>
+                  <div className="mt-2 flex flex-wrap items-center gap-2 text-[12px] text-text-secondary">
+                    <Clock className="size-3.5 text-text-muted" />
+                    <Input
+                      type="number"
+                      min={1}
+                      max={24}
+                      value={row.times}
+                      onChange={(e) => {
+                        const n = Math.max(1, Math.min(24, Number(e.target.value) || 1));
+                        updateRow(row.key, { times: String(n), every: n > 1 && !(Number(row.every) > 0 && Number(row.every) < 24) ? String(defaultEveryHours(n)) : row.every });
+                      }}
+                      className="h-7 w-14"
+                      aria-label="Kartai per dieną"
+                    />
+                    <span>{dayNo === 1 ? "papildomai šiandien" : "k. per dieną"}</span>
+                    {times > 1 && (
+                      <>
+                        <span>kas</span>
+                        <Input
+                          type="number"
+                          min={0.5}
+                          max={23}
+                          step="0.5"
+                          value={row.every}
+                          onChange={(e) => updateRow(row.key, { every: e.target.value })}
+                          className="h-7 w-16"
+                          aria-label="Kas kiek valandų"
+                        />
+                        <span>val.</span>
+                      </>
+                    )}
+                    <span>nuo</span>
+                    <Input type="time" value={row.start} onChange={(e) => updateRow(row.key, { start: e.target.value })} className="h-7 w-28" aria-label="Pirmas kartas" />
+                    {error ? (
+                      <span className="font-medium text-danger">{error}</span>
+                    ) : (
+                      <span className="flex flex-wrap gap-1">
+                        {slots.map((t) => (
+                          <Badge key={t} tone="neutral">
+                            {t}
+                          </Badge>
+                        ))}
+                      </span>
+                    )}
                   </div>
                 </div>
               );
@@ -280,7 +378,7 @@ export function PlanSummaryPanel({ summary, hasCourse }: { summary: PlanSummary;
 
       <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-accent-border/60 pt-3">
         <span className="text-[12px] font-semibold text-text-secondary">
-          {hasCourse ? `Paskutinė kurso diena: ${formatDate(summary.lastDate)} (${summary.doseDays} d.) · ` : ""}Karencija:
+          {hasCourse ? `Paskutinė kurso diena: ${formatDate(summary.lastDate)} (${summary.doseDays} d., ${summary.doseCount} doz.) · ` : ""}Karencija:
         </span>
         {summary.milkUntil ? <Badge tone="warning">🥛 pienas iki {formatDate(summary.milkUntil)}</Badge> : <Badge tone="success">🥛 pienui karencijos nėra</Badge>}
         {summary.meatUntil ? <Badge tone="danger">🥩 mėsa iki {formatDate(summary.meatUntil)}</Badge> : <Badge tone="success">🥩 mėsai karencijos nėra</Badge>}

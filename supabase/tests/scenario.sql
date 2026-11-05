@@ -3344,3 +3344,72 @@ do $$ declare v jsonb; begin
   if (select sum(qty_left) from batches where product_id = '63000000-0000-0000-0000-0000000000a1') <> 4 then raise exception 'material stock must be written off'; end if;
 end $$;
 select 'assert' as step, '0063 DelPro plan: unlinked materials stay in GVET only; unlinked drugs still blocked' as what;
+
+-- 0064. Course dose times: several doses a day, each time = its own planned visit; extra doses on day 1
+set role authenticated;
+select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-00000000000b',false);
+select set_config('t.times64', create_treatment_with_visits(jsonb_build_object('animal_id', (select id from animals where animal_no = 'KT338'),
+  'reg_date', '2026-11-05', 'diagnosis', 'Mastitas', 'disease_id', '36000000-0000-0000-0000-0000000000d2',
+  'medications', jsonb_build_array(jsonb_build_object('product_id', '63000000-0000-0000-0000-0000000000a2', 'qty', 2, 'unit', 'ml', 'frequency_per_day', 2, 'course_days', 3)),
+  'course_days', jsonb_build_array(
+    jsonb_build_object('day_number', 1, 'scheduled_date', '2026-11-05', 'scheduled_time', '20:00', 'product_id', '63000000-0000-0000-0000-0000000000a2', 'qty', 2, 'unit', 'ml'),
+    jsonb_build_object('day_number', 2, 'scheduled_date', '2026-11-06', 'scheduled_time', '08:00', 'product_id', '63000000-0000-0000-0000-0000000000a2', 'qty', 2, 'unit', 'ml'),
+    jsonb_build_object('day_number', 2, 'scheduled_date', '2026-11-06', 'scheduled_time', '08:00', 'product_id', '36000000-0000-0000-0000-0000000000a1', 'qty', 1, 'unit', 'ml'),
+    jsonb_build_object('day_number', 2, 'scheduled_date', '2026-11-06', 'scheduled_time', '20:00', 'product_id', '63000000-0000-0000-0000-0000000000a2', 'qty', 2, 'unit', 'ml'),
+    jsonb_build_object('day_number', 3, 'scheduled_date', '2026-11-07', 'scheduled_time', '08:00', 'product_id', '63000000-0000-0000-0000-0000000000a2', 'qty', 2, 'unit', 'ml'))))::text, false);
+do $$ declare blocked boolean := false; begin
+  -- a day-1 dose must be on the treatment day
+  begin perform create_treatment(jsonb_build_object('animal_id', (select id from animals where animal_no = 'KT338'), 'reg_date', '2026-11-05', 'procedure_type', 'profilaktika',
+    'course_days', jsonb_build_array(jsonb_build_object('day_number', 1, 'scheduled_date', '2026-11-06', 'scheduled_time', '08:00',
+      'product_id', '63000000-0000-0000-0000-0000000000a2', 'qty', 1, 'unit', 'ml'))));
+  exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: day 1 dose on another date'; end if;
+end $$;
+do $$ declare blocked boolean := false; begin
+  begin perform create_treatment(jsonb_build_object('animal_id', (select id from animals where animal_no = 'KT338'), 'reg_date', '2026-11-05', 'procedure_type', 'profilaktika',
+    'course_days', jsonb_build_array(jsonb_build_object('day_number', 2, 'scheduled_date', '2026-11-04', 'product_id', '63000000-0000-0000-0000-0000000000a2', 'qty', 1, 'unit', 'ml'))));
+  exception when others then blocked := true; end;
+  if not blocked then raise exception 'EXPECTED BLOCK DID NOT HAPPEN: dose before the treatment date'; end if;
+end $$;
+reset role;
+do $$ declare t uuid := current_setting('t.times64')::uuid; v_times text[]; day1 uuid; begin
+  select array_agg(distinct to_char(v.visit_datetime at time zone 'Europe/Vilnius', 'YYYY-MM-DD HH24:MI') order by to_char(v.visit_datetime at time zone 'Europe/Vilnius', 'YYYY-MM-DD HH24:MI'))
+    into v_times
+  from course_doses cd join treatment_courses tc on tc.id = cd.course_id join animal_visits v on v.id = cd.visit_id
+  where tc.treatment_id = t;
+  if v_times is distinct from array['2026-11-05 20:00', '2026-11-06 08:00', '2026-11-06 20:00', '2026-11-07 08:00'] then
+    raise exception 'one visit per dose time expected: %', v_times;
+  end if;
+  if (select count(distinct cd.visit_id) from course_doses cd join treatment_courses tc on tc.id = cd.course_id where tc.treatment_id = t) <> 4 then
+    raise exception 'medicines at the same time must share one visit';
+  end if;
+  if (select days from treatment_courses where treatment_id = t) <> 3 then raise exception 'course must span 3 days'; end if;
+  select visit_id into day1 from treatments where id = t;
+  if (select count(*) from animal_visits where related_visit_id = day1 and status = 'planuojamas') <> 4 then raise exception 'dose visits must follow the treatment visit'; end if;
+  if exists (select 1 from usage_items where course_dose_id in (select cd.id from course_doses cd join treatment_courses tc on tc.id = cd.course_id where tc.treatment_id = t)) then
+    raise exception 'planned doses must not consume stock';
+  end if;
+end $$;
+-- giving the 08:00 doses closes only the 08:00 visit; moving a time moves its visit
+select administer_course_dose(cd.id, '2026-11-06') from course_doses cd join treatment_courses tc on tc.id = cd.course_id
+where tc.treatment_id = current_setting('t.times64')::uuid and cd.scheduled_date = '2026-11-06' and cd.scheduled_time = '08:00';
+update course_doses set scheduled_time = '21:30'
+where scheduled_date = '2026-11-06' and scheduled_time = '20:00' and course_id in (select id from treatment_courses where treatment_id = current_setting('t.times64')::uuid);
+do $$ declare t uuid := current_setting('t.times64')::uuid; begin
+  if (select v.status from course_doses cd join treatment_courses tc on tc.id = cd.course_id join animal_visits v on v.id = cd.visit_id
+      where tc.treatment_id = t and cd.scheduled_date = '2026-11-06' and cd.scheduled_time = '08:00' limit 1) <> 'baigtas' then
+    raise exception '08:00 visit should be finished';
+  end if;
+  if (select v.status from course_doses cd join treatment_courses tc on tc.id = cd.course_id join animal_visits v on v.id = cd.visit_id
+      where tc.treatment_id = t and cd.scheduled_date = '2026-11-06' and cd.scheduled_time = '21:30') <> 'planuojamas' then
+    raise exception 'the evening visit must stay open';
+  end if;
+  if (select v.visit_datetime from course_doses cd join treatment_courses tc on tc.id = cd.course_id join animal_visits v on v.id = cd.visit_id
+      where tc.treatment_id = t and cd.scheduled_time = '21:30') <> '2026-11-06 21:30 Europe/Vilnius'::timestamptz then
+    raise exception 'visit must follow the moved dose time';
+  end if;
+  if (select count(*) from usage_items where course_dose_id in (select cd.id from course_doses cd join treatment_courses tc on tc.id = cd.course_id where tc.treatment_id = t)) <> 2 then
+    raise exception 'the two 08:00 doses must be written off';
+  end if;
+end $$;
+select 'assert' as step, '0064 course dose times: visit per time, shared by medicines, day-1 extra doses, closes/moves per time' as what;

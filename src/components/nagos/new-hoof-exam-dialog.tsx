@@ -15,7 +15,7 @@ import { createHoofExam, type ActionResult } from "@/lib/actions/hoof";
 import { RouteSelect, WithdrawalChips } from "@/components/gydymas/medicine-line";
 import { CoursePlanner, PlanSummaryPanel, EMPTY_COURSE_PLAN, type CoursePlan } from "@/components/gydymas/course-planner";
 import { catalogFromProps, loadTreatmentCatalog } from "@/lib/treatments/catalog";
-import { assignDayNumbers, summarizePlan, type CatalogProduct, type CourseRow, type MedLine } from "@/lib/treatments/planner";
+import { courseDaysPayload, courseRowProblems, summarizePlan, type CatalogProduct, type CourseRow, type MedLine } from "@/lib/treatments/planner";
 import { DRUG_CATEGORIES } from "@/lib/product-categories";
 import type { ProductCategory } from "@/lib/supabase/types";
 
@@ -263,10 +263,9 @@ export function NewHoofExamDialog({
     if (lines.some((l) => !(Number(l.qty) > 0))) return { error: "Nurodykite kiekį kiekvienam pasirinktam produktui." };
     if (plan.enabled && hasDrug) {
       if (plan.rows.length === 0) return { error: "Kursas neturi papildomų dozių — pridėkite dozę arba išjunkite kursą." };
-      if (plan.rows.some((r) => !r.product_id || !(Number(r.qty) > 0) || !r.date)) return { error: "Užpildykite visas kurso eilutes (data, produktas, dozė)." };
-      if (plan.rows.some((r) => r.date <= examDate)) return { error: "Kurso dozių datos turi būti vėlesnės už apžiūros datą." };
+      const courseProblem = courseRowProblems(examDate, plan.rows)[0];
+      if (courseProblem) return { error: courseProblem };
     }
-    const dayNumbers = assignDayNumbers(examDate, courseRows);
     return {
       finding: {
         key: crypto.randomUUID(),
@@ -287,16 +286,7 @@ export function NewHoofExamDialog({
           unit: productById.get(l.product_id)?.unit ?? null,
           administration_route: isDrug(l.product_id) ? l.route || null : null,
         })),
-        course_days: [...courseRows]
-          .sort((a, b) => a.date.localeCompare(b.date))
-          .map((r) => ({
-            day_number: dayNumbers.get(r.date),
-            scheduled_date: r.date,
-            product_id: r.product_id,
-            qty: Number(r.qty),
-            unit: productById.get(r.product_id)?.unit ?? null,
-            administration_route: r.route || null,
-          })),
+        course_days: courseDaysPayload(examDate, courseRows, (id) => productById.get(id)?.unit),
       },
     };
   }

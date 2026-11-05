@@ -325,6 +325,8 @@ export interface Database {
           course_id: string;
           day_number: number;
           scheduled_date: string;
+          /** 0064: dose time (Europe/Vilnius wall clock, "HH:MM:SS"); null = once that day (visit at 09:00). */
+          scheduled_time: string | null;
           product_id: string | null;
           batch_id: string | null;
           dose_amount: number | null;

@@ -201,6 +201,8 @@ function CourseCard({ course, today }: { course: CourseView; today: string }) {
 
 function DayRow({ day, cancelled }: { day: DayView; cancelled: boolean }) {
   const open = day.doses.filter((d) => !d.administered);
+  // 0064: several dose times that day → one button per time (given separately)
+  const openTimes = [...new Set(open.map((d) => d.time ?? ""))].sort();
   const urgent = day.overdue || day.today;
   return (
     <div className={cn("flex flex-wrap items-center justify-between gap-3 px-5 py-3", day.overdue && "bg-danger-soft/60", day.today && "bg-warning-soft/70")}>
@@ -214,6 +216,7 @@ function DayRow({ day, cancelled }: { day: DayView; cancelled: boolean }) {
         <ul className="space-y-0.5">
           {day.doses.map((d) => (
             <li key={d.id} className="flex flex-wrap items-center gap-x-2 text-[12.5px] text-text-secondary">
+              {d.time && <span className="font-semibold tabular-nums text-text-primary">{d.time}</span>}
               <span className={cn("font-medium", d.administered ? "text-text-muted line-through decoration-1" : "text-text-primary")}>{d.product}</span>
               <span>{formatQty(d.amount, d.unit)}</span>
               {d.route && <span className="text-text-muted">· {ROUTE_LABELS[d.route] ?? d.route}</span>}
@@ -222,8 +225,21 @@ function DayRow({ day, cancelled }: { day: DayView; cancelled: boolean }) {
           ))}
         </ul>
       </div>
+      {!cancelled && open.length > 0 && openTimes.length > 1 ? (
+        <div className="flex flex-wrap gap-1.5">
+          {openTimes.map((t) => (
+            <AdministerDoseButton
+              key={t}
+              doseIds={open.filter((d) => (d.time ?? "") === t).map((d) => d.id)}
+              label={`Skirti ${t || "—"}`}
+              variant={urgent ? "primary" : "outline"}
+            />
+          ))}
+        </div>
+      ) : null}
       {!cancelled &&
         open.length > 0 &&
+        openTimes.length <= 1 &&
         (open.length === 1 ? (
           <AdministerDoseButton doseId={open[0].id} variant={urgent ? "primary" : "outline"} />
         ) : (

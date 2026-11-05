@@ -17,6 +17,8 @@ export type RawDose = {
   id: string;
   day_number: number;
   scheduled_date: string;
+  /** 0064: dose time (HH:MM:SS, Vilnius); null = once that day */
+  scheduled_time?: string | null;
   dose_amount: number | null;
   unit: string | null;
   administration_route: AdministrationRoute | null;
@@ -42,6 +44,8 @@ export type RawCourse = {
 
 export type DoseView = {
   id: string;
+  /** HH:MM or null */
+  time: string | null;
   product: string;
   productId: string | null;
   amount: number | null;
@@ -96,6 +100,7 @@ export function buildCourseViews(
       const view: DayView = byDay.get(d.day_number) ?? { day: d.day_number, date: d.scheduled_date, doses: [], done: true, overdue: false, today: false };
       view.doses.push({
         id: d.id,
+        time: d.scheduled_time ? d.scheduled_time.slice(0, 5) : null,
         product: d.products?.name ?? "—",
         productId: d.product_id,
         amount: d.dose_amount,
@@ -109,6 +114,7 @@ export function buildCourseViews(
     }
     const daysView = [...byDay.values()].sort((a, b) => a.day - b.day);
     for (const day of daysView) {
+      day.doses.sort((a, b) => (a.time ?? "").localeCompare(b.time ?? ""));
       day.done = day.doses.every((x) => x.administered);
       day.overdue = !day.done && day.date < today;
       day.today = !day.done && day.date === today;
@@ -149,7 +155,7 @@ export function buildCourseViews(
       days: c.days,
       startDate: c.start_date,
       statusKey,
-      doneDays: (statusKey === "completed" && c.status !== "cancelled" ? c.days : 1 + daysView.filter((d) => d.done).length),
+      doneDays: (statusKey === "completed" && c.status !== "cancelled" ? c.days : 1 + daysView.filter((d) => d.done && d.day > 1).length),
       nextDate: open[0]?.date ?? null,
       nextDay: open[0]?.day ?? null,
       pendingDates: open.map((d) => d.date),

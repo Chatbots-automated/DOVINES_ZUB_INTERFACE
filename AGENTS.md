@@ -73,7 +73,11 @@ not look for Žibartoniai's 0013–0021 VIC/UNIFORM history here.
   (`administer_course_dose`, from the visit card or Gydymo kursai) closes the visit once all its doses are given — the visit itself
   never consumes stock, and its card shows **Skirti dozę** instead of "Įrašyti gydymą". The treatment dialog calls
   `create_treatment_with_visits(data, visit?)`: from a visit card it links that visit, on its own it also records a finished (`baigtas`)
-  day-1 visit. Deleting a treatment removes its planned course visits. Not mirrored yet: standalone vaccinations, inseminations,
+  day-1 visit. Deleting a treatment removes its planned course visits.
+  **0064 dose times**: `course_doses.scheduled_time` (Vilnius wall clock; null = once that day, 09:00) — one visit per (course, date, time),
+  shared by the medicines given at that time. Kurso planavimas rows = date × medicine × (kartai per dieną, kas kiek val., pirmas kartas),
+  expanded to one dose per time by `courseDaysPayload()` (`src/lib/treatments/planner.ts`). `day_number` 1 = an EXTRA dose later on the
+  treatment day (needs a time; the first dose is the treatment itself). Doses never before `reg_date`. Not mirrored yet: standalone vaccinations, inseminations,
   hoof exams (only when done from a visit card).
 - **Masinis gydymas** (0056, 2026-11, billed separately; pattern from Oksana's `BulkTreatment`): `/veterinarija/masinis-gydymas`.
   `create_mass_treatment(jsonb)` = `create_treatment_with_visits()` once per animal in ONE transaction (any stock shortfall saves

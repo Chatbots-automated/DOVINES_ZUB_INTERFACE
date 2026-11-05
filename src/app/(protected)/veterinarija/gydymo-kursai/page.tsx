@@ -15,7 +15,7 @@ export default async function GydymoKursaiPage() {
     supabase
       .from("treatment_courses")
       .select(
-        "id, days, start_date, status, treatments(diagnosis, withdrawal_until_milk, withdrawal_until_meat, animals(id, tag_no, animal_no)), course_doses(id, day_number, scheduled_date, product_id, dose_amount, unit, administration_route, administered, administered_date, products(name))",
+        "id, days, start_date, status, treatments(diagnosis, withdrawal_until_milk, withdrawal_until_meat, animals(id, tag_no, animal_no)), course_doses(id, day_number, scheduled_date, scheduled_time, product_id, dose_amount, unit, administration_route, administered, administered_date, products(name))",
       )
       .order("start_date", { ascending: false })
       .limit(300),
